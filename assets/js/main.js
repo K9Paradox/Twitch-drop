@@ -261,6 +261,12 @@ $(() => {
         setTimeout(() => btn.removeAttr("disabled"), 2000);
     });
 
+    // Clicking the streamer name jumps to the actual farming tab/popout
+    $(document).on("click", "#focusFarmTab", (e) => {
+        e.preventDefault();
+        chrome.runtime.sendMessage({ type: "p:focusFarmTab" }).catch(() => {});
+    });
+
     // Background Message Listener
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!message) return;
@@ -454,7 +460,7 @@ function updateDropProgressUI(data) {
 
     // Normal In-Progress Mode:
     if (camp.curWatching) {
-        $("#dropGame").html(`Watching Streamer: <a href="https://www.twitch.tv/${encodeURIComponent(camp.curWatching)}" target="_blank" class="streamerLink">@${escapeHtml(camp.curWatching)} ↗</a>`);
+        $("#dropGame").html(`Watching Streamer: <a href="#" id="focusFarmTab" class="streamerLink" title="Click to jump to the farming tab">@${escapeHtml(camp.curWatching)} ↗</a>`);
         $("#headerStatusPill").html(`🟢 @${escapeHtml(camp.curWatching)}`).addClass("activePill");
     } else if (camp.status === "nostream") {
         $("#dropGame").text(`Waiting for a live stream with drops enabled...`);

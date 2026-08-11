@@ -450,6 +450,15 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
                 }
                 chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
             });
+        } else if (message.type === "p:focusFarmTab") {
+            // Bring the hidden farming tab/popout window to the front
+            if (curWindow.id !== 0) {
+                chrome.tabs.get(curWindow.id).then((tab) => {
+                    if (!tab) return;
+                    chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+                    chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+                }).catch(() => {});
+            }
         } else if (message.type === "p:getConfig") {
             chrome.runtime.sendMessage({ type: "p:setConfig", data: config }).catch(() => {});
         } else if (message.type === "setAutoDrops") {
