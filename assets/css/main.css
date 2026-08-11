@@ -1,0 +1,974 @@
+:root {
+    --bg-dark: #0e0e10;
+    --card-bg: #18181b;
+    --card-border: #26262c;
+    --twitch-purple: #9146FF;
+    --twitch-purple-hover: #772ce8;
+    --accent-cyan: #00f0ff;
+    --text-primary: #efeff1;
+    --text-muted: #adadb8;
+    --success-green: #00e676;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+body {
+    width: 620px;
+    height: 480px;
+    background-color: var(--bg-dark);
+    color: var(--text-primary);
+    overflow: hidden;
+    user-select: none;
+}
+
+#appContainer {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+/* Toast Notification */
+.toastNotice {
+    position: absolute;
+    bottom: 15px;
+    right: 15px;
+    background: #1f1f23;
+    color: #ffffff;
+    border: 1px solid var(--twitch-purple);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    z-index: 1000;
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.25s ease;
+    pointer-events: none;
+}
+
+.toastNotice.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* Header */
+#topHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 18px;
+    background: #1f1f23;
+    border-bottom: 1px solid var(--card-border);
+}
+
+.logoArea {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.appLogo {
+    width: 28px;
+    height: 28px;
+    filter: drop-shadow(0 0 6px rgba(145, 70, 255, 0.6));
+}
+
+.logoText {
+    display: flex;
+    flex-direction: column;
+}
+
+.appName {
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: 0.5px;
+    color: #ffffff;
+}
+
+.proBadge {
+    background: linear-gradient(135deg, var(--twitch-purple), var(--accent-cyan));
+    color: #000;
+    font-size: 10px;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 4px;
+}
+
+.appVersion {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.headerActions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.headerStatusPill {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-muted);
+    background: #18181b;
+    padding: 4px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--card-border);
+}
+
+.headerStatusPill.activePill {
+    color: var(--success-green);
+    border-color: rgba(0, 230, 118, 0.3);
+    background: rgba(0, 230, 118, 0.08);
+}
+
+/* Master Toggle Switch */
+.masterSwitch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 24px;
+}
+
+.masterSwitch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.masterSlider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: #3f3f46;
+    transition: .3s;
+    border-radius: 24px;
+}
+
+.masterSlider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: .3s;
+    border-radius: 50%;
+}
+
+.masterSwitch input:checked + .masterSlider {
+    background-color: var(--twitch-purple);
+}
+
+.masterSwitch input:checked + .masterSlider:before {
+    transform: translateX(24px);
+}
+
+/* Layout */
+#bodyLayout {
+    display: flex;
+    flex: 1;
+    height: calc(100% - 53px);
+}
+
+/* Sidebar */
+#sidebar {
+    width: 130px;
+    background-color: #1f1f23;
+    border-right: 1px solid var(--card-border);
+    display: flex;
+    flex-direction: column;
+    padding: 8px 6px;
+    gap: 4px;
+}
+
+.navItem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: var(--text-muted);
+}
+
+.navItem:hover {
+    background-color: #26262c;
+    color: var(--text-primary);
+}
+
+.navItem.active {
+    background: linear-gradient(90deg, rgba(145, 70, 255, 0.25) 0%, rgba(145, 70, 255, 0.05) 100%);
+    color: #ffffff;
+    border-left: 3px solid var(--twitch-purple);
+}
+
+.navIcon {
+    font-size: 15px;
+}
+
+.navLabel {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* Content Area */
+#contentArea {
+    flex: 1;
+    padding: 14px;
+    overflow-y: auto;
+    background-color: var(--bg-dark);
+}
+
+#contentArea::-webkit-scrollbar {
+    width: 6px;
+}
+#contentArea::-webkit-scrollbar-thumb {
+    background-color: var(--card-border);
+    border-radius: 3px;
+}
+
+.page {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* Cards */
+.card {
+    background-color: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 12px 14px;
+}
+
+.cardHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.cardTitle {
+    font-size: 13px;
+    font-weight: 700;
+    color: #ffffff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.cardSubtext {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+    line-height: 1.4;
+}
+
+/* Status Card */
+.statusCard {
+    background: linear-gradient(135deg, #18181b 0%, #221c2e 100%);
+    border: 1px solid rgba(145, 70, 255, 0.3);
+    border-radius: 8px;
+    padding: 12px 14px;
+}
+
+.statusHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.statusPulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: var(--success-green);
+    box-shadow: 0 0 8px var(--success-green);
+}
+
+.statusTitle {
+    font-size: 14px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.statusDetailsRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.statusSub {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.streamerLink {
+    color: var(--accent-cyan);
+    text-decoration: none;
+    font-weight: 700;
+    transition: color 0.15s;
+}
+
+.streamerLink:hover {
+    color: #ffffff;
+    text-decoration: underline;
+}
+
+.lastCheckTime {
+    font-size: 10px;
+    color: var(--accent-cyan);
+    font-weight: 600;
+}
+
+/* Select Box & Search */
+.customSelectWrapper {
+    position: relative;
+}
+
+#selGame {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #0e0e10;
+    border: 1px solid var(--card-border);
+    padding: 8px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-primary);
+    transition: border 0.2s;
+}
+
+#selGame:hover {
+    border-color: var(--twitch-purple);
+}
+
+.selectDropdown {
+    position: absolute;
+    top: 105%;
+    left: 0;
+    right: 0;
+    background-color: #1f1f23;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    z-index: 100;
+    box-shadow: 0 10px 20px rgba(0,0,0,0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.dropdownSearchBox {
+    display: flex;
+    align-items: center;
+    padding: 6px;
+    background: #18181b;
+    border-bottom: 1px solid var(--card-border);
+    gap: 4px;
+}
+
+#gameSearchInput {
+    flex: 1;
+    padding: 6px 10px;
+    background: #0e0e10;
+    border: 1px solid var(--card-border);
+    border-radius: 4px;
+    color: #ffffff;
+    font-size: 12px;
+    outline: none;
+}
+
+#gameSearchInput:focus {
+    border-color: var(--twitch-purple);
+}
+
+.searchClearBtn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 4px 8px;
+    cursor: pointer;
+    transition: color 0.15s;
+}
+
+.searchClearBtn:hover {
+    color: #ffffff;
+}
+
+.dropdownList {
+    max-height: 160px;
+    overflow-y: auto;
+    list-style: none;
+}
+
+.dropdownList li {
+    padding: 8px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-primary);
+    transition: background 0.15s;
+}
+
+.dropdownList li:hover {
+    background-color: var(--twitch-purple);
+    color: #ffffff;
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Buttons */
+.actionBtn {
+    background: var(--twitch-purple);
+    color: #ffffff;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.actionBtn:hover {
+    background: var(--twitch-purple-hover);
+    transform: translateY(-1px);
+}
+
+.secondaryBtn {
+    background: #26262c;
+    color: var(--text-primary);
+    border: 1px solid var(--card-border);
+}
+
+.secondaryBtn:hover {
+    background: #3f3f46;
+    color: #ffffff;
+}
+
+/* Progress Container & Enriched Card */
+.dropProgressContainer {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 4px 0;
+}
+
+.activeDropMetaRow {
+    background: #0e0e10;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    padding: 8px 12px;
+}
+
+.activeRewardItem {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.activeRewardThumb {
+    width: 38px;
+    height: 38px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: #18181b;
+    border: 1px solid var(--card-border);
+}
+
+.activeRewardMeta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.activeRewardTitle {
+    font-size: 13px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.activeRewardSub {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.progressBarOuter {
+    width: 100%;
+    height: 24px;
+    background-color: #0e0e10;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--card-border);
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.progressBarInner {
+    height: 100%;
+    background: linear-gradient(90deg, var(--twitch-purple), var(--accent-cyan));
+    transition: width 0.4s ease;
+    border-radius: 12px 0 0 12px;
+}
+
+.progressPercentText {
+    position: absolute;
+    width: 100%;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 800;
+    color: #ffffff;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 6px rgba(0, 0, 0, 0.8);
+    pointer-events: none;
+}
+
+/* Active Drops Rewards List */
+.dropsListContainer {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.dropsListContainer::-webkit-scrollbar {
+    width: 6px;
+}
+.dropsListContainer::-webkit-scrollbar-track {
+    background: #0e0e10;
+    border-radius: 3px;
+}
+.dropsListContainer::-webkit-scrollbar-thumb {
+    background-color: var(--card-border);
+    border-radius: 3px;
+}
+.dropsListContainer::-webkit-scrollbar-thumb:hover {
+    background-color: var(--twitch-purple);
+}
+
+.dropRewardCard {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #0e0e10;
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid var(--card-border);
+}
+
+.rewardImage {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: #18181b;
+    border: 1px solid var(--card-border);
+}
+
+.rewardInfo {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: 4px;
+}
+
+.rewardName {
+    font-size: 13px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.rewardTime {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.rewardBadge {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+
+.rewardBadge.claimed {
+    background: rgba(0, 230, 118, 0.2);
+    color: var(--success-green);
+    border: 1px solid var(--success-green);
+}
+
+.rewardBadge.active {
+    background: rgba(145, 70, 255, 0.2);
+    color: var(--twitch-purple);
+    border: 1px solid var(--twitch-purple);
+}
+
+.rewardBadge.locked {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-muted);
+}
+
+/* Auto Games Upgraded Styles */
+.autoGamesNoticeCard {
+    background: linear-gradient(135deg, #18181b 0%, #1f1b2e 100%);
+    border: 1px solid rgba(145, 70, 255, 0.25);
+}
+
+.noticeHeader {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.noticeIcon {
+    font-size: 14px;
+}
+
+.noticeTitle {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    text-transform: uppercase;
+}
+
+.autoGamesToolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+#autoGameSearchInput {
+    flex: 1;
+    padding: 6px 10px;
+    background: #0e0e10;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    color: #ffffff;
+    font-size: 12px;
+    outline: none;
+}
+
+#autoGameSearchInput:focus {
+    border-color: var(--twitch-purple);
+}
+
+.toolbarButtons {
+    display: flex;
+    gap: 6px;
+}
+
+.autoGamesGrid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.autoGamesGrid::-webkit-scrollbar {
+    width: 6px;
+}
+.autoGamesGrid::-webkit-scrollbar-thumb {
+    background-color: var(--card-border);
+    border-radius: 3px;
+}
+
+.autoGameCard {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #0e0e10;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--card-border);
+    transition: all 0.2s ease;
+}
+
+.autoGameCard:hover {
+    border-color: #3f3f46;
+}
+
+.autoGameCard.activeQueueCard {
+    background: linear-gradient(90deg, rgba(145, 70, 255, 0.12) 0%, #0e0e10 100%);
+    border-color: rgba(145, 70, 255, 0.4);
+}
+
+.autoGameMeta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.autoGameIcon {
+    font-size: 16px;
+}
+
+.autoGameTitleGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.autoGameName {
+    font-size: 13px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.autoGameStatusTag {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.activeQueueCard .autoGameStatusTag {
+    color: var(--accent-cyan);
+    font-weight: 600;
+}
+
+/* Statistics Grid */
+.statsGrid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.statCard {
+    background-color: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+
+.statIcon {
+    font-size: 24px;
+    margin-bottom: 6px;
+}
+
+.statNumber {
+    font-size: 22px;
+    font-weight: 800;
+    color: #ffffff;
+}
+
+.statLabel {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.proStatusText {
+    font-size: 12px;
+    color: var(--text-primary);
+    line-height: 1.5;
+}
+
+/* Settings List */
+.settingsList {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.settingRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--card-border);
+}
+
+.settingRow:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.settingInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-right: 12px;
+}
+
+.settingTitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: #ffffff;
+}
+
+.settingDesc {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.3;
+}
+
+/* Regular Switch */
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 38px;
+    height: 20px;
+    flex-shrink: 0;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: #3f3f46;
+    transition: .2s;
+    border-radius: 20px;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 14px;
+    width: 14px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: .2s;
+    border-radius: 50%;
+}
+
+.switch input:checked + .slider {
+    background-color: var(--twitch-purple);
+}
+
+.switch input:checked + .slider:before {
+    transform: translateX(18px);
+}
+
+.emptyState {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    text-align: center;
+}
+
+.emptyIcon {
+    font-size: 32px;
+    margin-bottom: 8px;
+}
+
+.subText {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.badgeAlert {
+    font-size: 12px;
+    color: var(--accent-cyan);
+    margin-top: 6px;
+}
+
+/* All Drops Completed Card Box */
+.allCompletedCardBox {
+    background: linear-gradient(135deg, rgba(0, 245, 155, 0.08) 0%, rgba(14, 14, 16, 0.95) 100%);
+    border: 1px solid rgba(0, 245, 155, 0.3);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.completedHeader {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.completedTitle {
+    font-size: 13px;
+    font-weight: 700;
+    color: #00f59b;
+}
+
+.completedSub {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.completedGridRow {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.completedRewardIconCard {
+    position: relative;
+    background: #18181b;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 8px 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 4px;
+    transition: transform 0.2s ease;
+}
+
+.completedRewardIconCard:hover {
+    transform: translateY(-2px);
+    border-color: #00f59b;
+}
+
+.completedThumb {
+    width: 42px;
+    height: 42px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: #0e0e10;
+}
+
+.completedBadgeCheck {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    font-size: 12px;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.8));
+}
+
+.completedRewardLabel {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100px;
+}

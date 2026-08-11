@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto Twitch Drops Pro</title>
+    <script type="text/javascript" src="assets/js/jquery.js"></script>
+    <script type="text/javascript" src="assets/js/main.js"></script>
+    <link rel="stylesheet" href="assets/css/main.css">
+</head>
+<body>
+    <div id="appContainer">
+        <!-- Toast Notification Container -->
+        <div id="toastNotification" class="toastNotice"></div>
+
+        <!-- Header -->
+        <header id="topHeader">
+            <div class="logoArea">
+                <img src="assets/img/atd-32.png" alt="Logo" class="appLogo">
+                <div class="logoText">
+                    <span class="appName">TWITCH DROPS <span class="proBadge">PRO</span></span>
+                    <span class="appVersion" id="extVersion">v1.4.2.2</span>
+                </div>
+            </div>
+            <div class="headerActions">
+                <span id="headerStatusPill" class="headerStatusPill">⚪ Idle</span>
+                <label class="masterSwitch" title="Enable/Disable Extension">
+                    <input type="checkbox" class="enableEx" checked>
+                    <span class="masterSlider"></span>
+                </label>
+            </div>
+        </header>
+
+        <!-- Main Body -->
+        <div id="bodyLayout">
+            <!-- Sidebar Navigation -->
+            <nav id="sidebar">
+                <div class="navItem active" data-page="mainPage">
+                    <span class="navIcon">🏠</span>
+                    <span class="navLabel">Home</span>
+                </div>
+                <div class="navItem" data-page="dropsPage">
+                    <span class="navIcon">🎁</span>
+                    <span class="navLabel">Active Drops</span>
+                </div>
+                <div class="navItem" data-page="autoDropsPage">
+                    <span class="navIcon">⚡</span>
+                    <span class="navLabel">Auto Games</span>
+                </div>
+                <div class="navItem" data-page="statsPage">
+                    <span class="navIcon">📊</span>
+                    <span class="navLabel">Statistics</span>
+                </div>
+                <div class="navItem" data-page="settingsPage">
+                    <span class="navIcon">⚙️</span>
+                    <span class="navLabel">Settings</span>
+                </div>
+            </nav>
+
+            <!-- Main Content Area -->
+            <main id="contentArea">
+                
+                <!-- Disabled Page Overlay -->
+                <div class="page" id="extDisabled" style="display: none;">
+                    <div class="emptyState">
+                        <span class="emptyIcon">💤</span>
+                        <h3>Extension Disabled</h3>
+                        <p>Toggle the master switch at top right to enable automatic drop farming.</p>
+                    </div>
+                </div>
+
+                <!-- Main Home Dashboard Page -->
+                <div class="page" id="mainPage">
+                    <!-- Status Banner -->
+                    <div class="statusCard">
+                        <div class="statusHeader">
+                            <span class="statusPulse active" id="statusIndicator"></span>
+                            <span class="statusTitle" id="dropStatus">Status: Ready & Monitoring</span>
+                        </div>
+                        <div class="statusDetailsRow">
+                            <p class="statusSub" id="dropGame">Game: Select a campaign below or enable Auto Games</p>
+                            <span class="lastCheckTime" id="lastCheckTime">Last check: Just now</span>
+                        </div>
+                    </div>
+
+                    <!-- Game Selector Box -->
+                    <div class="card">
+                        <div class="cardHeader">
+                            <span class="cardTitle">Select Target Game Campaign</span>
+                        </div>
+                        <div class="customSelectWrapper">
+                            <div id="selGame">
+                                <span class="selectedGame">Select a Game...</span>
+                                <span class="arrow">▼</span>
+                            </div>
+                            <div class="selectDropdown hidden">
+                                <div class="dropdownSearchBox">
+                                    <input type="text" id="gameSearchInput" placeholder="🔍 Search games..." />
+                                    <button class="searchClearBtn" id="clearSearchBtn" title="Clear search">✕</button>
+                                </div>
+                                <ul id="gameDropdownItems" class="dropdownList"></ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Active Drop Progress -->
+                    <div class="card">
+                        <div class="cardHeader">
+                            <span class="cardTitle">Current Drop Progress</span>
+                            <button class="actionBtn claimNowBtn" id="manualClaimBtn">✨ Claim Drops Now</button>
+                        </div>
+                        <div id="curDrops">
+                            <div class="dropProgressContainer">
+                                <div id="activeDropDetails" class="activeDropMetaRow"></div>
+                                <div class="dropBox current">
+                                    <div class="progressBarOuter">
+                                        <div class="progressBarInner" style="width: 0%;"></div>
+                                        <span class="progressPercentText">0%</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="badgesAvailable" class="badgeAlert"></div>
+                </div>
+
+                <!-- Active Drops Page -->
+                <div class="page" id="dropsPage" style="display: none;">
+                    <div class="card">
+                        <div class="cardHeader">
+                            <span class="cardTitle">Active Campaign Drops & Rewards</span>
+                            <div style="display: flex; gap: 6px;">
+                                <button class="actionBtn secondaryBtn" id="refreshRewardsBtn" title="Sync Rewards">🔄 Sync</button>
+                                <button class="actionBtn secondaryBtn" id="openTwitchInventoryBtn">🔗 Twitch Inventory</button>
+                            </div>
+                        </div>
+                        <div id="allDrops" class="dropsListContainer">
+                            <p class="subText">No active campaign selected. Choose a game on the Home tab.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Auto Games Page -->
+                <div class="page" id="autoDropsPage" style="display: none;">
+                    <!-- Platform Rule Banner -->
+                    <div class="card autoGamesNoticeCard">
+                        <div class="noticeHeader">
+                            <span class="noticeIcon">💡</span>
+                            <span class="noticeTitle">Automated Queue Manager</span>
+                        </div>
+                        <p class="cardSubtext" style="margin-bottom: 0;">
+                            Twitch restricts drop watch progress to <strong>1 stream at a time</strong> per account. 
+                            Auto Games acts as your smart queue that automatically farms selected games sequentially, prioritizing campaigns that expire soonest!
+                        </p>
+                    </div>
+
+                    <!-- Auto Games Management Box -->
+                    <div class="card">
+                        <div class="cardHeader">
+                            <span class="cardTitle">Queue Selection</span>
+                            <span class="proBadge" id="autoGameCountBadge">0 / 0 Active Queue</span>
+                        </div>
+
+                        <!-- Search & Quick Action Bar -->
+                        <div class="autoGamesToolbar">
+                            <input type="text" id="autoGameSearchInput" placeholder="🔍 Search auto games..." />
+                            <div class="toolbarButtons">
+                                <button class="actionBtn secondaryBtn" id="autoGameSelectAllBtn">Select All</button>
+                                <button class="actionBtn secondaryBtn" id="autoGameDeselectAllBtn">Deselect All</button>
+                            </div>
+                        </div>
+
+                        <!-- Auto Games Cards List -->
+                        <div id="autoGamesList" class="autoGamesGrid">
+                            <p class="subText">Loading connected games...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Statistics Page -->
+                <div class="page" id="statsPage" style="display: none;">
+                    <div class="statsGrid">
+                        <div class="statCard">
+                            <span class="statIcon">🎁</span>
+                            <span class="statNumber" id="totalClaimedDrops">0</span>
+                            <span class="statLabel">Drops Claimed</span>
+                        </div>
+                        <div class="statCard">
+                            <span class="statIcon">💎</span>
+                            <span class="statNumber" id="totalClaimedPoints">0</span>
+                            <span class="statLabel">Channel Points</span>
+                        </div>
+                    </div>
+                    <div class="card" style="margin-top: 15px;">
+                        <div class="cardHeader">
+                            <span class="cardTitle">Pro Status</span>
+                        </div>
+                        <p class="proStatusText">⚡ <strong>PRO Features Active:</strong> Auto-Claim Points, Auto-Claim Drops, MV3 Background Worker, and Multi-Game Farming are 100% enabled with zero limits.</p>
+                    </div>
+                </div>
+
+                <!-- Settings Page -->
+                <div class="page" id="settingsPage" style="display: none;">
+                    <div class="card">
+                        <div class="cardHeader">
+                            <span class="cardTitle">Extension Settings</span>
+                        </div>
+                        <div class="settingsList">
+                            <div class="settingRow">
+                                <div class="settingInfo">
+                                    <span class="settingTitle">Auto Refresh Tab</span>
+                                    <span class="settingDesc">Automatically refreshes stream tab if no watch progress is recorded after 2 minutes.</span>
+                                </div>
+                                <label class="switch">
+                                    <input id="setautoRefresh" class="settingsBool" type="checkbox">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="settingRow">
+                                <div class="settingInfo">
+                                    <span class="settingTitle">Auto Mute Stream Tabs</span>
+                                    <span class="settingDesc">Mutes browser tab audio without muting HTML5 video player so streams never pause.</span>
+                                </div>
+                                <label class="switch">
+                                    <input id="setautoMute" class="settingsBool" type="checkbox">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="settingRow">
+                                <div class="settingInfo">
+                                    <span class="settingTitle">Show All Twitch Games</span>
+                                    <span class="settingDesc">Show all Twitch campaigns in the drop-down, not just connected games.</span>
+                                </div>
+                                <label class="switch">
+                                    <input id="setshowAllGames" class="settingsBool" type="checkbox">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="settingRow">
+                                <div class="settingInfo">
+                                    <span class="settingTitle">Auto Token Refresh</span>
+                                    <span class="settingDesc">Automatically refreshes Twitch OAuth/Integrity tokens when expired.</span>
+                                </div>
+                                <label class="switch">
+                                    <input id="setautoGetToken" class="settingsBool" type="checkbox">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="settingRow">
+                                <div class="settingInfo">
+                                    <span class="settingTitle">Show Badge Notifications</span>
+                                    <span class="settingDesc">Show badge notifications when chat badge drop campaigns are available.</span>
+                                </div>
+                                <label class="switch">
+                                    <input id="setsetShowBadges" class="settingsBool" type="checkbox">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </main>
+        </div>
+    </div>
+</body>
+</html>
