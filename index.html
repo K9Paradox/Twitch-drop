@@ -107,7 +107,10 @@
                     <div class="card">
                         <div class="cardHeader">
                             <span class="cardTitle">Current Drop Progress</span>
-                            <button class="actionBtn claimNowBtn" id="manualClaimBtn">✨ Claim Drops Now</button>
+                            <div class="headerBtnGroup">
+                                <button class="actionBtn stopBtn" id="stopCampaignBtn" style="display: none;" title="Stop farming the current campaign">⏹ Stop</button>
+                                <button class="actionBtn claimNowBtn" id="manualClaimBtn">✨ Claim Drops Now</button>
+                            </div>
                         </div>
                         <div id="curDrops">
                             <div class="dropProgressContainer">
@@ -247,6 +250,17 @@
                                 </div>
                                 <label class="switch">
                                     <input id="setautoGetToken" class="settingsBool" type="checkbox">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="settingRow">
+                                <div class="settingInfo">
+                                    <span class="settingTitle">Watch in Popout Window</span>
+                                    <span class="settingDesc">Opens farming streams in their own popout window instead of a background tab.</span>
+                                </div>
+                                <label class="switch">
+                                    <input id="setwatchPopout" class="settingsBool" type="checkbox">
                                     <span class="slider"></span>
                                 </label>
                             </div>

@@ -460,6 +460,29 @@ body {
     color: #ffffff;
 }
 
+.headerBtnGroup {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stopBtn {
+    background: #2c1318;
+    color: #ff6b6b;
+    border: 1px solid rgba(255, 107, 107, 0.35);
+}
+
+.stopBtn:hover {
+    background: #451a20;
+    color: #ffffff;
+}
+
+.actionBtn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+}
+
 /* Progress Container & Enriched Card */
 .dropProgressContainer {
     display: flex;

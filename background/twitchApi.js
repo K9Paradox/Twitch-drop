@@ -63,7 +63,9 @@ export class Client {
         }
         if (this.integrity && this.integrity.token) {
             headers["Client-Integrity"] = this.integrity.token;
-            headers["X-Device-Id"] = this.deviceId;
+            if (this.deviceId) {
+                headers["X-Device-Id"] = this.deviceId;
+            }
         }
         return await this.postWraper(data, headers);
     }

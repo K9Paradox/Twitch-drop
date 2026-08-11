@@ -1,8 +1,53 @@
 if (!window._originalFetch) {
-    // Set Twitch player volume to unmuted in localStorage so Twitch's internal tracking JS counts 100% of watch time toward drops
-    try {
-        localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
-    } catch (e) {}
+    /**
+     * Farming mode: only TRUE on the tab the extension itself opened for
+     * watching a drop stream. The background worker broadcasts it through
+     * inject.js ("farmMode" messages). Previously this script force-unmuted,
+     * force-played and overwrote the saved volume on *every* Twitch tab every
+     * 2 seconds — even on the user's own tabs while they were just browsing.
+     */
+    window.__atdFarming = window.__atdFarming === true;
+
+    window.addEventListener("message", (e) => {
+        if (!e.data || !e.data.autoTwitchDrops) return;
+        const d = e.data.autoTwitchDrops;
+        if (d.type === "farmMode") {
+            window.__atdFarming = !!d.enabled;
+            if (window.__atdFarming) applyFarmingMediaState();
+        }
+    });
+
+    /**
+     * Set Twitch player volume to unmuted in localStorage so Twitch's internal
+     * tracking JS counts 100% of watch time toward drops — and keep the HTML5
+     * video playing & unmuted internally (Chrome tab-muting still provides
+     * complete silence). ONLY runs in farming mode now.
+     */
+    function applyFarmingMediaState() {
+        try {
+            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
+        } catch (e) {}
+        try {
+            const videos = document.querySelectorAll('video');
+            videos.forEach(v => {
+                if (v) {
+                    if (v.muted) {
+                        v.muted = false;
+                    }
+                    if (v.volume < 0.1) {
+                        v.volume = 0.5;
+                    }
+                    if (v.paused) {
+                        v.play().catch(() => {});
+                    }
+                }
+            });
+        } catch (e) {}
+    }
+
+    setInterval(() => {
+        if (window.__atdFarming) applyFarmingMediaState();
+    }, 2000);
 
     // Safely override Page Visibility API without throwing "Cannot redefine property" errors
     try {
@@ -46,26 +91,6 @@ if (!window._originalFetch) {
             e.stopImmediatePropagation();
         }, true);
     } catch (e) {}
-
-    // Keep HTML5 video playing and UNMUTED internally so Twitch drop progress never pauses (Chrome tab-muting provides complete silence)
-    setInterval(() => {
-        try {
-            const videos = document.querySelectorAll('video');
-            videos.forEach(v => {
-                if (v) {
-                    if (v.muted) {
-                        v.muted = false;
-                    }
-                    if (v.volume < 0.1) {
-                        v.volume = 0.5;
-                    }
-                    if (v.paused) {
-                        v.play().catch(() => {});
-                    }
-                }
-            });
-        } catch (e) {}
-    }, 2000);
 
     window._originalFetch = window._originalFetch || fetch;
     window.fetch = new Proxy(fetch, {

@@ -1,4 +1,4 @@
-/** 
+/**
 @typedef {import("./types").activeStream} activeStream
 **/
 import { Client } from "./background/twitchApi.js"
@@ -57,10 +57,78 @@ let gettingStreamObj = {
 };
 let autoGetTokenWindow = 0;
 let currentBadgeDrops = [];
-let cfdInterval, agtInterval, startupTimeout, recheckCampTimeout, ssdInterval;
+let startupTimeout, recheckCampTimeout;
+
+// --- Reliability / concurrency guards -------------------------------------
+let lastAutoDropCheck = 0;          // throttle for the auto-drop GQL scan
+let checkForDropsRunning = false;   // re-entrancy guard for checkForDrops
+let campaignTickRunning = false;    // re-entrancy guard for campaignTick
+let campaignCreationInFlight = null;// mutex for createCampaign
+let lastBadgeState = "";            // avoid spamming chrome.action updates
+const notifiedDropClaims = new Set(); // dedupe claim notifications
+
+const TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko";
 
 function saveState() {
     chrome.storage.local.set({ activeStream, curWindow }).catch(() => {});
+    updateActionBadge();
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar badge: live status instead of a static label
+// ---------------------------------------------------------------------------
+function updateActionBadge() {
+    try {
+        if (!chrome.action) return;
+        let text = "";
+        let color = "#9146FF";
+
+        if (!extEnabled) {
+            text = "OFF";
+            color = "#52525b";
+        } else if (activeStream && activeStream.campaign && activeStream.campaign !== "none") {
+            const camp = activeStream.campaign;
+            if (camp.isCompleted) {
+                text = "✓";
+                color = "#00e676";
+            } else if (camp.status === "nostream") {
+                text = "…";
+                color = "#f0a232";
+            } else if (activeStream.campaigns && activeStream.campaigns.length > 0) {
+                const cur = activeStream.campaigns[camp.onCamp || 0];
+                if (cur && cur.minutesNeeded) {
+                    const left = Math.max(0, cur.minutesNeeded - (cur.minutesWatched || 0));
+                    text = left > 0 ? `${left}m` : "✓";
+                    color = left > 0 ? "#9146FF" : "#00e676";
+                } else {
+                    text = "…";
+                }
+            }
+        } else if (settings.setShowBadges) {
+            text = "PRO";
+        }
+
+        if (text === lastBadgeState) return;
+        lastBadgeState = text;
+        chrome.action.setBadgeText({ text }).catch(() => {});
+        chrome.action.setBadgeBackgroundColor({ color }).catch(() => {});
+    } catch (e) {}
+}
+
+// ---------------------------------------------------------------------------
+// OS notifications
+// ---------------------------------------------------------------------------
+function notifyUser(title, message) {
+    try {
+        if (!chrome.notifications) return;
+        chrome.notifications.create({
+            type: "basic",
+            iconUrl: "assets/img/atd-128.png",
+            title,
+            message,
+            priority: 0
+        }).catch(() => {});
+    } catch (e) {}
 }
 
 function enableAutoplayForTwitch() {
@@ -68,10 +136,6 @@ function enableAutoplayForTwitch() {
         if (chrome.contentSettings && chrome.contentSettings.autoplay) {
             chrome.contentSettings.autoplay.set({
                 primaryPattern: "*://*.twitch.tv/*",
-                setting: "allow"
-            });
-            chrome.contentSettings.autoplay.set({
-                primaryPattern: "https://*.twitch.tv/*",
                 setting: "allow"
             });
         }
@@ -89,26 +153,37 @@ async function fetchTwitchCookiesAndInitClient() {
         let deviceId = deviceCookie ? deviceCookie.value : null;
 
         let localData = await chrome.storage.local.get(["oauthToken", "deviceId", "userId", "uuid"]).catch(() => ({}));
-        
+
         oauthToken = oauthToken || localData.oauthToken;
         deviceId = deviceId || localData.deviceId;
 
         if (oauthToken) {
             chrome.storage.local.set({ oauthToken, deviceId });
             if (client === null) {
-                client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid });
+                client = new Client({ clientId: TWITCH_CLIENT_ID, oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid });
             } else {
                 client.updateUserInfo({ oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid });
             }
         } else if (client === null) {
-            client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko" });
+            client = new Client({ clientId: TWITCH_CLIENT_ID });
         }
     } catch (e) {
         console.warn("Error fetching Twitch cookies directly:", e);
         if (client === null) {
-            client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko" });
+            client = new Client({ clientId: TWITCH_CLIENT_ID });
         }
     }
+}
+
+/**
+ * `streamers` has historically been either an array of channel names or the
+ * sentinel string "gen". Normalize it so `.includes()` is never accidentally
+ * called on a string (substring matching bug).
+ */
+function normalizeStreamers(list) {
+    if (Array.isArray(list)) return list.filter(v => typeof v === "string" && v.length > 0);
+    if (typeof list === "string" && list && list !== "gen") return [list];
+    return [];
 }
 
 function isDropItemClaimed(item, eventDropsList) {
@@ -151,9 +226,9 @@ function syncCampaignProgressWithInventory(inventory) {
     let allCampaignsCompleted = true;
 
     for (const curCamp of activeStream.campaigns) {
-        const matchedDropCamp = inProgressList.find(c => 
-            c.id === curCamp.id || 
-            (c.game && (c.game.displayName === activeStream.campaign.game.name || c.game.name === activeStream.campaign.game.name))
+        const matchedDropCamp = inProgressList.find(c =>
+            c.id === curCamp.id ||
+            (c.game && activeStream.campaign.game && (c.game.displayName === activeStream.campaign.game.name || c.game.name === activeStream.campaign.game.name))
         );
 
         if (matchedDropCamp && matchedDropCamp.timeBasedDrops) {
@@ -228,19 +303,33 @@ function syncCampaignProgressWithInventory(inventory) {
     return allCampaignsCompleted;
 }
 
-// MV3 Alarm Keepalive
+// ---------------------------------------------------------------------------
+// MV3 keepalive alarm: drives ALL periodic work. Unlike setInterval timers,
+// alarms wake the service worker back up after Chrome suspends it, so farming
+// reliably continues in the background.
+// ---------------------------------------------------------------------------
 chrome.alarms.create("keepAliveAlarm", { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === "keepAliveAlarm") {
-        if (extEnabled) {
-            fetchTwitchCookiesAndInitClient().then(() => {
-                checkForDrops();
-                if (activeStream && activeStream.campaign !== "none") {
-                    checkClaimDrop();
+    if (alarm.name !== "keepAliveAlarm") return;
+    if (!extEnabled) return;
+
+    fetchTwitchCookiesAndInitClient().then(async () => {
+        try {
+            if (activeStream.campaign === "none") {
+                // Throttled scan for auto-drop games (full scan every ~3 min)
+                if (Date.now() - lastAutoDropCheck >= 170000) {
+                    lastAutoDropCheck = Date.now();
+                    await checkForDrops();
                 }
-            });
+                await checkClaimDrop();
+            } else {
+                await campaignTick();
+            }
+            autoGetToken();
+        } catch (e) {
+            console.warn("Alarm tick error:", e);
         }
-    }
+    }).catch(() => {});
 });
 
 startupTimeout = setTimeout(startup, 1000);
@@ -335,15 +424,8 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
             };
             sendGames();
         } else if (message.type === "p:startCampaign") {
-            if (message.data.campaign === "none") {
-                if (activeStream.campaign !== "none" && curWindow.id !== 0) {
-                    endCampaign();
-                }
-                activeStream = { campaign: "none" };
-                saveState();
-                chrome.storage.local.remove(["drops", "activeStream"]);
-                chrome.runtime.sendMessage({ type: "p:startedCampaign", data: { drops: "none" } }).catch(() => {});
-                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+            if (!message.data || message.data.campaign === "none") {
+                stopActiveCampaign();
                 return;
             }
             createCampaign(message.data.campaign);
@@ -358,14 +440,9 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
                         let inventory = await client.getInventory().catch(() => null);
                         if (inventory) {
                             let isDone = syncCampaignProgressWithInventory(inventory);
-                            if (isDone) {
-                                console.log("Current campaign completed during sync! Preserving completed campaign state...");
-                                if (activeStream && activeStream.campaign) {
-                                    activeStream.campaign.isCompleted = true;
-                                    activeStream.campaign.curWatching = null;
-                                }
-                                saveState();
-                                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+                            if (isDone && !activeStream.campaign.isCompleted) {
+                                console.log("Current campaign completed during sync!");
+                                completeCampaign();
                                 return;
                             }
                         }
@@ -383,16 +460,17 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
             priorityStreams = message.data.prio;
             meshPrioStreams();
         } else if (message.type === "p:settingsChanged") {
-            settings = message.data.settings;
+            // Merge instead of replacing so a popup with partial state can
+            // never wipe other settings back to undefined.
+            settings = { ...settings, ...(message.data.settings || {}) };
             chrome.storage.local.set({ settings });
         } else if (message.type === "p:changeToStream") {
-            if (activeStream.campaign) {
+            if (activeStream.campaign && activeStream.campaign !== "none") {
                 activeStream.campaign.reOpening = true;
                 clearInterval(activeStream.campaign.interval);
                 activeStream.campaigns.forEach((v, i) => {
-                    if (v.streamers.includes(message.data) && message.data !== "gen") {
-                        activeStream.campaign.onCamp = i;
-                    } else if (message.data === "gen" && v.streamers === "gen") {
+                    const streamers = normalizeStreamers(v.streamers);
+                    if (streamers.includes(message.data)) {
                         activeStream.campaign.onCamp = i;
                     }
                 });
@@ -401,7 +479,8 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
         } else if (message.type === "p:deleteDrop") {
             if (activeStream.campaigns) {
                 activeStream.campaigns.forEach((v, i) => {
-                    if (v.streamers.includes(message.data) && message.data !== "gen") {
+                    const streamers = normalizeStreamers(v.streamers);
+                    if (streamers.includes(message.data)) {
                         activeStream.campaigns.splice(i, 1);
                     } else if (message.data === "gen" && v.streamers === "gen") {
                         activeStream.campaigns.splice(i, 1);
@@ -439,33 +518,40 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
         if (extEnabled) {
             enableAutoplayForTwitch();
             createClient();
+            lastAutoDropCheck = 0;
             setTimeout(checkForDrops, 3000);
-            cfdInterval = setInterval(checkForDrops, 180000);
-            ssdInterval = setInterval(displayBadgeDrops, 600000);
-            agtInterval = setInterval(autoGetToken, 960000);
+            setTimeout(autoGetToken, 5000);
         } else {
-            clearInterval(cfdInterval);
-            clearInterval(ssdInterval);
-            clearInterval(agtInterval);
-
-            if (activeStream.campaign !== "none" && curWindow.id !== 0) {
-                endCampaign();
+            clearTimeout(recheckCampTimeout);
+            if (activeStream.campaign && activeStream.campaign.interval) {
+                clearInterval(activeStream.campaign.interval);
             }
-            activeStream = { campaign: "none" };
-            saveState();
-            chrome.storage.local.remove(["drops", "activeStream"]);
-            chrome.runtime.sendMessage({ type: "p:startedCampaign", data: { drops: "none" } }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+            pingFarmMode(false);
+            stopActiveCampaign();
         }
+        updateActionBadge();
     }
 });
 
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
     if (activeStream.campaign !== "none" && extEnabled) {
-        if (tabId === curWindow.id && (!activeStream.campaign || !activeStream.campaign.reOpening)) {
-            clearInterval(activeStream.interval);
+        if (tabId === curWindow.id && activeStream.campaign && !activeStream.campaign.reOpening) {
+            // BUGFIX: the interval handle lives on activeStream.campaign, not activeStream
+            clearInterval(activeStream.campaign.interval);
+            curWindow.id = 0;
+            curWindow.type = "none";
             endCampaign();
         }
+    }
+});
+
+// Re-assert farming mode whenever the managed tab (re)loads: this covers
+// initial page load and the auto-refresh reload path without any delay.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (tabId === curWindow.id && changeInfo.status === "complete" && curWindow.type === "watch" &&
+        activeStream.campaign && activeStream.campaign !== "none" && extEnabled) {
+        pingFarmMode(true);
+        if (settings.autoMute) chrome.tabs.update(tabId, { muted: true }).catch(() => {});
     }
 });
 
@@ -477,7 +563,7 @@ async function startup() {
     console.log("Auto Twitch Drops background started");
     enableAutoplayForTwitch();
     chrome.storage.local.set({ curBadgeDrops: [] });
-    
+
     await fetchTwitchCookiesAndInitClient();
 
     chrome.storage.local.get(["settings", "autoDropGames", "exEnabled", "priorityStreams", "extStats", "listOfConnected", "activeStream", "curWindow"], (val) => {
@@ -506,16 +592,24 @@ async function startup() {
 
         autoDropGames = val.autoDropGames || [];
         extEnabled = val.exEnabled !== undefined ? val.exEnabled : true;
+        updateActionBadge();
 
         if (extEnabled) {
             priorityStreams = val.priorityStreams || [];
             setTimeout(autoGetToken, 5000);
             setTimeout(checkForDrops, 5000);
-            setTimeout(displayBadgeDrops, 10000);
-            
-            cfdInterval = setInterval(checkForDrops, 180000);
-            agtInterval = setInterval(autoGetToken, 960000);
-            ssdInterval = setInterval(displayBadgeDrops, 600000);
+
+            // MV3 fix: a service worker restart kills every setInterval. If we
+            // were mid-campaign when that happened, resume the farming loop so
+            // progress/claims don't silently stall until the popup is opened.
+            if (activeStream.campaign && activeStream.campaign !== "none" && !activeStream.campaign.isCompleted) {
+                setTimeout(() => {
+                    if (activeStream.campaign && activeStream.campaign !== "none" && !activeStream.campaign.isCompleted) {
+                        console.log("Resuming interrupted campaign after service worker restart...");
+                        runCampaign();
+                    }
+                }, 12000);
+            }
         }
     });
 }
@@ -524,13 +618,149 @@ function createClient() {
     fetchTwitchCookiesAndInitClient();
 }
 
+// ---------------------------------------------------------------------------
+// Campaign loop
+// ---------------------------------------------------------------------------
+
+/**
+ * One "tick" of the active campaign: sync progress with Twitch, claim any
+ * newly completed drops, detect stalled progress (autoRefresh), and advance
+ * to the next campaign / finish when done. Called from the 30s in-campaign
+ * interval AND from the keepalive alarm so MV3 worker suspensions can't
+ * permanently stall a farm.
+ */
+async function campaignTick() {
+    if (campaignTickRunning) return;
+    if (!extEnabled || !activeStream.campaign || activeStream.campaign === "none" || !activeStream.campaigns) return;
+    campaignTickRunning = true;
+    try {
+        const camp = activeStream.campaign;
+        if (camp.isCompleted) return;
+
+        // Waiting for any streamer to come live — runCampaign handles retry.
+        if (camp.status === "nostream") {
+            runCampaign();
+            return;
+        }
+
+        await fetchTwitchCookiesAndInitClient();
+        if (!client) return;
+
+        // Make sure the page-side "farming mode" is active (idempotent).
+        pingFarmMode(true);
+
+        let inventory = await client.getInventory().catch(() => null);
+        if (!inventory) return;
+
+        // The campaign may have been stopped/replaced while we awaited
+        if (!activeStream.campaign || activeStream.campaign === "none" || !activeStream.campaigns) return;
+
+        const curCamp = activeStream.campaigns[camp.onCamp || 0];
+
+        // Auto-refresh: if watch progress hasn't moved in 2 minutes, reload
+        // the farming tab (this setting existed but was never implemented).
+        if (curCamp && camp.status === "watching") {
+            const prog = curCamp.minutesWatched || 0;
+            if (camp._lastProgress === undefined || prog > camp._lastProgress) {
+                camp._lastProgress = prog;
+                camp._lastProgressAt = Date.now();
+            } else if (settings.autoRefresh && Date.now() - (camp._lastProgressAt || Date.now()) > 120000) {
+                console.log("No watch progress for 2+ minutes, refreshing stream tab...");
+                if (curWindow.id !== 0) {
+                    chrome.tabs.reload(curWindow.id).catch(() => {});
+                }
+                camp._lastProgressAt = Date.now();
+            }
+        }
+
+        let isDone = syncCampaignProgressWithInventory(inventory);
+        await checkClaimDrop(inventory);
+
+        const curAfter = activeStream.campaigns[camp.onCamp || 0];
+        if (isDone || (curAfter && curAfter.minutesNeeded !== 0 && curAfter.minutesWatched >= curAfter.minutesNeeded)) {
+            let allDone = activeStream.campaigns.every(c => c.minutesWatched >= c.minutesNeeded);
+            if (allDone) {
+                console.log("All campaigns completed during tick!");
+                clearInterval(camp.interval);
+                completeCampaign();
+                return;
+            } else {
+                clearInterval(camp.interval);
+                camp.reOpening = true;
+                camp.onCamp = (activeStream.campaigns.length - 1) === camp.onCamp ? 0 : camp.onCamp + 1;
+                camp._lastProgress = undefined;
+                runCampaign();
+                return;
+            }
+        }
+
+        saveState();
+        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+    } catch (e) {
+        console.warn("campaignTick error:", e);
+    } finally {
+        campaignTickRunning = false;
+    }
+}
+
+/** Mark the active campaign completed (keep the state so the popup can show it). */
+function completeCampaign() {
+    if (!activeStream.campaign || activeStream.campaign === "none") return;
+    activeStream.campaign.isCompleted = true;
+    activeStream.campaign.curWatching = null;
+    clearInterval(activeStream.campaign.interval);
+    clearTimeout(recheckCampTimeout);
+    windowManager("close");
+    saveState();
+    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+
+    if (!activeStream.campaign.notifiedComplete) {
+        activeStream.campaign.notifiedComplete = true;
+        const gameName = activeStream.campaign.game ? activeStream.campaign.game.name : "campaign";
+        notifyUser("✅ Drops Completed", `All drops for ${gameName} have been farmed & claimed!`);
+        saveState();
+    }
+}
+
+/** Fully stop and reset the active campaign (user-initiated / tab closed). */
+function endCampaign() {
+    console.log("Campaign finished!");
+    if (activeStream && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaign.interval) {
+        clearInterval(activeStream.campaign.interval);
+    }
+    clearTimeout(recheckCampTimeout);
+    pingFarmMode(false);
+    windowManager("close");
+    activeStream = { campaign: "none" };
+    gettingStreamObj.notPlayingGame = [];
+    saveState();
+    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+    chrome.storage.local.remove(["activeStream", "drops"]);
+    checkClaimDrop();
+}
+
+/** User pressed "Stop" (or toggled the extension off) — end + notify popup. */
+function stopActiveCampaign() {
+    if (activeStream.campaign !== "none") {
+        endCampaign();
+    } else {
+        windowManager("close");
+    }
+    activeStream = { campaign: "none" };
+    saveState();
+    chrome.storage.local.remove(["drops", "activeStream"]);
+    chrome.runtime.sendMessage({ type: "p:startedCampaign", data: { drops: "none" } }).catch(() => {});
+    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+}
+
 async function runCampaign() {
-    if (!activeStream.campaign || !activeStream.campaigns || activeStream.campaigns.length === 0) return;
+    if (!activeStream.campaign || activeStream.campaign === "none" || !activeStream.campaigns || activeStream.campaigns.length === 0) return;
     if (activeStream.campaign.reOpening)
         activeStream.campaign.reOpening = false;
 
     if (activeStream.campaign.onCamp === 0) {
-        if (Math.round((new Date().getTime() / 1000) - 20) <= activeStream.campaign.lastLoop) {
+        const lastLoop = Number(activeStream.campaign.lastLoop) || 0;
+        if (Math.round((new Date().getTime() / 1000) - 20) <= lastLoop) {
             let tempBool = true;
             for (const camp of activeStream.campaigns) {
                 if (camp.minutesWatched < camp.minutesNeeded)
@@ -543,12 +773,13 @@ async function runCampaign() {
                 gettingStreamObj.notPlayingGame = [];
                 chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
                 windowManager("wait");
+                clearTimeout(recheckCampTimeout);
                 recheckCampTimeout = setTimeout(() => {
                     runCampaign();
                 }, 180000);
                 return;
             } else {
-                endCampaign();
+                completeCampaign();
                 return;
             }
         }
@@ -557,11 +788,13 @@ async function runCampaign() {
 
     let curCamp = activeStream.campaigns[activeStream.campaign.onCamp];
     if (!curCamp) {
-        endCampaign();
+        completeCampaign();
         return;
     }
 
-    if (curCamp.streamers && curCamp.streamers.length === 0 && !activeStream.campaign.allowGen && activeStream.campaigns.length > 1) {
+    curCamp.streamers = normalizeStreamers(curCamp.streamers);
+
+    if (curCamp.streamers.length === 0 && !activeStream.campaign.allowGen && activeStream.campaigns.length > 1) {
         activeStream.campaign.onCamp = (activeStream.campaigns.length - 1) === activeStream.campaign.onCamp ? 0 : activeStream.campaign.onCamp + 1;
         saveState();
         runCampaign();
@@ -582,20 +815,14 @@ async function runCampaign() {
         }
     }
     if (allDropsGot) {
-        console.log("All drops got in runCampaign! Preserving completed campaign state...");
-        if (activeStream && activeStream.campaign) {
-            activeStream.campaign.isCompleted = true;
-            activeStream.campaign.curWatching = null;
-        }
-        windowManager("close");
-        saveState();
-        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+        console.log("All drops got in runCampaign!");
+        completeCampaign();
         return;
     }
 
     await fetchTwitchCookiesAndInitClient();
 
-    if (!curCamp.streamers || curCamp.streamers.length === 0) {
+    if (curCamp.streamers.length === 0) {
         let stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug);
         if (stream === "nostream" || !stream || !stream.broadcaster) {
             activeStream.campaign.onCamp = (activeStream.campaigns.length - 1) === activeStream.campaign.onCamp ? 0 : activeStream.campaign.onCamp + 1;
@@ -627,69 +854,42 @@ async function runCampaign() {
     }
 
     let streamUrl = `https://www.twitch.tv/${activeStream.campaign.curWatching}`;
-    windowManager("open", { active: true, url: streamUrl }).then(async tab => {
+    windowManager("open", { active: false, url: streamUrl }).then(async tab => {
+        // Campaign may have been stopped while the tab was being (re)opened
+        if (!activeStream.campaign || activeStream.campaign === "none") {
+            if (tab && tab.id) chrome.tabs.remove(tab.id).catch(() => {});
+            return;
+        }
         if (settings.autoMute && tab && tab.id) {
             chrome.tabs.update(tab.id, { muted: true }).catch(() => {});
         }
         activeStream.campaign.status = "watching";
         saveState();
         chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
-        
+
         clearInterval(activeStream.campaign.interval);
-        activeStream.campaign.interval = setInterval(async () => {
-            if (!client || !activeStream.campaign || !activeStream.campaign.curWatching) return;
-            let inventory = await client.getInventory().catch(() => null);
-            if (!inventory) return;
-
-            let isDone = syncCampaignProgressWithInventory(inventory);
-            checkClaimDrop();
-
-            if (isDone || (activeStream.campaigns[activeStream.campaign.onCamp] && activeStream.campaigns[activeStream.campaign.onCamp].minutesWatched >= activeStream.campaigns[activeStream.campaign.onCamp].minutesNeeded)) {
-                let allDone = activeStream.campaigns.every(c => c.minutesWatched >= c.minutesNeeded);
-                if (allDone) {
-                    console.log("All campaigns completed during interval! Preserving completed state...");
-                    if (activeStream && activeStream.campaign) {
-                        activeStream.campaign.isCompleted = true;
-                        activeStream.campaign.curWatching = null;
-                    }
-                    if (activeStream && activeStream.campaign && activeStream.campaign.interval) {
-                        clearInterval(activeStream.campaign.interval);
-                    }
-                    windowManager("close");
-                    saveState();
-                    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
-                    return;
-                } else {
-                    clearInterval(activeStream.campaign.interval);
-                    activeStream.campaign.reOpening = true;
-                    activeStream.campaign.onCamp = (activeStream.campaigns.length - 1) === activeStream.campaign.onCamp ? 0 : activeStream.campaign.onCamp + 1;
-                    runCampaign();
-                    return;
-                }
-            }
-
-            saveState();
-            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
-        }, 30000);
+        activeStream.campaign.interval = setInterval(campaignTick, 30000);
     }).catch(() => {});
 }
 
-function endCampaign() {
-    console.log("Campaign finished!");
-    if (activeStream && activeStream.campaign && activeStream.campaign.interval) {
+async function createCampaign(game) {
+    // Mutex: a user click + the auto-drop scan can race and both try to start
+    // a campaign, which previously produced duplicate tick loops.
+    if (campaignCreationInFlight) return campaignCreationInFlight;
+    campaignCreationInFlight = createCampaignInternal(game)
+        .catch((e) => console.error("createCampaign error:", e))
+        .finally(() => { campaignCreationInFlight = null; });
+    return campaignCreationInFlight;
+}
+
+async function createCampaignInternal(game) {
+    // Clean up any previous campaign's timers before replacing state,
+    // otherwise two tick intervals fight over the new campaign object.
+    if (activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaign.interval) {
         clearInterval(activeStream.campaign.interval);
     }
     clearTimeout(recheckCampTimeout);
-    windowManager("close");
-    activeStream = { campaign: "none" };
-    gettingStreamObj.notPlayingGame = [];
-    saveState();
-    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
-    chrome.storage.local.remove(["activeStream", "drops"]);
-    checkClaimDrop();
-}
 
-async function createCampaign(game) {
     await fetchTwitchCookiesAndInitClient();
 
     let campaigns = await client.getDropCampaigns().catch(() => []);
@@ -714,7 +914,9 @@ async function createCampaign(game) {
         allowGen: true,
         slug: null,
         status: "starting",
-        reOpening: false
+        reOpening: false,
+        isCompleted: false,
+        notifiedComplete: false
     };
     activeStream.campaigns = [];
 
@@ -747,11 +949,10 @@ async function createCampaign(game) {
                 if (stream && stream.name) streams.push(stream.name);
             }
         }
-        activeStream.campaign.allowGen = false;
         let maxTime = 0;
         let timeWatched = 0;
         let allDrops = [];
-        
+
         for (const drop of (dropCamp.timeBasedDrops || [])) {
             if (drop.requiredMinutesWatched > maxTime)
                 maxTime = drop.requiredMinutesWatched;
@@ -762,17 +963,17 @@ async function createCampaign(game) {
                 const isClaimed = isClaimedInEvents || isClaimedInSelf;
                 const currentWatched = (drop.self && drop.self.currentMinutesWatched) ? drop.self.currentMinutesWatched : (isClaimed ? drop.requiredMinutesWatched : 0);
 
-                allDrops.push({ 
-                    name: `${drop.name} - ${drop.benefitEdges[0].benefit.name}`, 
-                    picture: drop.benefitEdges[0].benefit.imageAssetURL, 
-                    reqTime: drop.requiredMinutesWatched, 
-                    id: drop.id, 
+                allDrops.push({
+                    name: `${drop.name} - ${drop.benefitEdges[0].benefit.name}`,
+                    picture: drop.benefitEdges[0].benefit.imageAssetURL,
+                    reqTime: drop.requiredMinutesWatched,
+                    id: drop.id,
                     badge: dropCamp.owner && dropCamp.owner.name === "Twitch Gaming",
                     self: { isClaimed, currentMinutesWatched: currentWatched }
                 });
             }
         }
-        
+
         let dropStarted = inventory.dropCampaignsInProgress ? inventory.dropCampaignsInProgress.some(obj => obj.id === dropCamp.id) : false;
         if (dropStarted) {
             let inProg = inventory.dropCampaignsInProgress.find(obj => obj.id === dropCamp.id);
@@ -806,16 +1007,19 @@ async function createCampaign(game) {
         });
     }
 
+    if (activeStream.campaigns.length === 0) {
+        // Nothing to farm for this game (details fetch failed or campaign empty)
+        activeStream.campaign = "none";
+        activeStream.campaigns = [];
+        saveState();
+        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: { campaign: "none" } } }).catch(() => {});
+        return;
+    }
+
     let isDone = syncCampaignProgressWithInventory(inventory);
     if (isDone) {
-        console.log(`All drops for ${game} already claimed/completed! Preserving completed campaign state...`);
-        if (activeStream && activeStream.campaign) {
-            activeStream.campaign.isCompleted = true;
-            activeStream.campaign.curWatching = null;
-        }
-        windowManager("close");
-        saveState();
-        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream: activeStream } }).catch(() => {});
+        console.log(`All drops for ${game} already claimed/completed!`);
+        completeCampaign();
         return;
     }
 
@@ -824,11 +1028,12 @@ async function createCampaign(game) {
 }
 
 async function checkForDrops() {
-    if (!extEnabled) return;
-    await fetchTwitchCookiesAndInitClient();
+    if (!extEnabled || checkForDropsRunning) return;
+    checkForDropsRunning = true;
+    try {
+        await fetchTwitchCookiesAndInitClient();
 
-    if (activeStream.campaign === "none") {
-        try {
+        if (activeStream.campaign === "none") {
             let campaigns = await client.getDropCampaigns();
             let inventory = await client.getInventory();
             let gamesToRun = [];
@@ -866,9 +1071,11 @@ async function checkForDrops() {
                 gamesToRun.sort((a, b) => a.endsAt - b.endsAt);
                 createCampaign(gamesToRun[0].game);
             }
-        } catch (e) {
-            console.error("Error in checkForDrops:", e);
         }
+    } catch (e) {
+        console.error("Error in checkForDrops:", e);
+    } finally {
+        checkForDropsRunning = false;
     }
 }
 
@@ -881,11 +1088,12 @@ async function getStreamForGame() {
 
     let selectedStream = "";
     let dropLive = false;
+    const wantedStreamers = normalizeStreamers(activeStream.campaigns[activeStream.campaign.onCamp]?.streamers);
 
     for (const stream of gettingStreamObj.allStreamers) {
         if (stream && stream.data && stream.data.userOrError && stream.data.userOrError.login) {
             let login = stream.data.userOrError.login;
-            if (activeStream.campaigns[activeStream.campaign.onCamp].streamers.includes(login) && stream.data.userOrError.stream != null) {
+            if (wantedStreamers.includes(login) && stream.data.userOrError.stream != null) {
                 selectedStream = login;
                 dropLive = true;
                 break;
@@ -907,21 +1115,31 @@ async function getStreamForGame() {
     return currentStreamInfo;
 }
 
-async function checkClaimDrop() {
+async function checkClaimDrop(prefetchedInventory) {
     if (!client) return;
     try {
-        let inventory = await client.getInventory();
+        let inventory = prefetchedInventory || await client.getInventory();
         if (!inventory || !inventory.dropCampaignsInProgress) return;
-        
+
         for (const camp of inventory.dropCampaignsInProgress) {
             for (const drop of (camp.timeBasedDrops || [])) {
-                if (drop.requiredMinutesWatched !== 0 && drop.requiredMinutesWatched <= drop.self.currentMinutesWatched && !drop.self.isClaimed) {
+                // BUGFIX: drop.self can be null for drops you haven't started
+                // watching yet — one bad drop would crash the whole claim loop.
+                if (!drop || !drop.self) continue;
+                if (drop.requiredMinutesWatched !== 0 && drop.requiredMinutesWatched <= (drop.self.currentMinutesWatched || 0) && !drop.self.isClaimed) {
                     let dropClaim = await client.claimDropReward(drop.self.dropInstanceID);
                     if (dropClaim) {
                         console.log("Claimed Drop successfully!");
                         extStats.claimedDrops++;
                         chrome.storage.local.set({ extStats });
                         chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
+
+                        const claimKey = drop.self.dropInstanceID || drop.id;
+                        if (!notifiedDropClaims.has(claimKey)) {
+                            notifiedDropClaims.add(claimKey);
+                            const campName = camp.name || (camp.game && camp.game.displayName) || "Twitch";
+                            notifyUser("🎁 Drop Claimed!", `${campName} reward has been added to your Twitch inventory.`);
+                        }
                     }
                 }
             }
@@ -935,52 +1153,72 @@ function autoGetToken() {
     if (settings.autoGetToken === true && autoGetTokenWindow === 0) {
         if (!client || !client.integrity || client.integrity.expiration - 960000 < new Date().getTime()) {
             chrome.windows.create({ focused: false, type: "popup", url: "https://www.twitch.tv/drops/inventory/" }).then((window) => {
-                if (window) autoGetTokenWindow = window.id;
+                if (!window) return;
+                autoGetTokenWindow = window.id;
+                // Failsafe: if the integrity handshake never arrives (e.g. the
+                // service worker was suspended mid-cycle), don't leave a
+                // zombie window open forever.
+                setTimeout(() => {
+                    if (autoGetTokenWindow === window.id) {
+                        chrome.windows.remove(window.id).catch(() => {});
+                        autoGetTokenWindow = 0;
+                    }
+                }, 60000);
             }).catch(() => {});
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tab / window management
+// ---------------------------------------------------------------------------
+
+/** Returns the extension-managed farming tab, or null if it's gone. */
+async function getManagedTab() {
+    if (curWindow.id === 0) return null;
+    return await chrome.tabs.get(curWindow.id).catch(() => null);
+}
+
+/** Tell the farming tab's page script to enforce unmuted/playing state. */
+function pingFarmMode(enabled) {
+    if (curWindow && curWindow.id) {
+        chrome.tabs.sendMessage(curWindow.id, { type: "farmMode", enabled: !!enabled }).catch(() => {});
+    }
+}
+
 async function windowManager(func, data) {
     if (func === "open") {
-        if (curWindow.id === 0) {
-            let existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-            if (existingTabs && existingTabs.length > 0) {
-                let tab = existingTabs[0];
-                curWindow.id = tab.id;
-                curWindow.type = "tab";
-                saveState();
-                if (data.url && tab.url !== data.url) {
-                    chrome.tabs.update(tab.id, { url: data.url }).catch(() => {});
-                }
-                return tab;
-            }
+        let tab = await getManagedTab();
 
-            let tab = await chrome.tabs.create(data);
-            curWindow.id = tab.id;
-            curWindow.type = "tab";
-            saveState();
-            return tab;
-        } else {
-            let tab = await chrome.tabs.get(curWindow.id).catch(() => null);
-            if (!tab) {
-                let existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-                if (existingTabs && existingTabs.length > 0) {
-                    tab = existingTabs[0];
-                    curWindow.id = tab.id;
-                    saveState();
+        if (!tab) {
+            // NOTE: the old code hijacked *any* existing Twitch tab and
+            // navigated it to the farm stream. We now only ever touch tabs
+            // the extension created itself.
+            if (settings.watchPopout) {
+                const url = data.url || "https://www.twitch.tv/";
+                let win = await chrome.windows.create({ url, type: "popup", focused: false, width: 920, height: 620 }).catch(() => null);
+                if (win && win.tabs && win.tabs[0]) {
+                    tab = win.tabs[0];
                 } else {
-                    tab = await chrome.tabs.create(data);
-                    curWindow.id = tab.id;
-                    saveState();
-                    return tab;
+                    tab = await chrome.tabs.create({ ...data, active: false });
                 }
+            } else {
+                tab = await chrome.tabs.create({ ...data, active: false });
             }
-            if (data.url && data.url !== tab.url) {
-                chrome.tabs.update(curWindow.id, { url: data.url }).catch(() => {});
+            if (tab && tab.id) {
+                curWindow.id = tab.id;
             }
-            return tab;
+        } else if (data.url && tab.url !== data.url) {
+            await chrome.tabs.update(tab.id, { url: data.url }).catch(() => {});
+            tab = await chrome.tabs.get(curWindow.id).catch(() => tab);
         }
+
+        curWindow.type = "watch";
+        saveState();
+        // Enable page-side farming mode once the content script is live;
+        // campaignTick keeps re-pinging so navigation/reloads stay covered.
+        setTimeout(() => pingFarmMode(true), 4000);
+        return tab;
     } else if (func === "close") {
         if (curWindow.id !== 0) {
             chrome.tabs.remove(curWindow.id).catch(() => {});
@@ -989,35 +1227,28 @@ async function windowManager(func, data) {
             saveState();
         }
     } else if (func === "wait") {
-        let waitingURL = chrome.runtime.getURL("waiting.html");
-        if (curWindow.id !== 0) {
+        pingFarmMode(false);
+        const game = (activeStream.campaign && activeStream.campaign.game) ? activeStream.campaign.game.name : "";
+        const waitingURL = chrome.runtime.getURL("waiting.html") + (game ? `?game=${encodeURIComponent(game)}` : "");
+        let tab = await getManagedTab();
+        if (tab) {
             chrome.tabs.update(curWindow.id, { url: waitingURL }).catch(async () => {
-                let tab = await chrome.tabs.create({ active: true, url: waitingURL });
-                curWindow.id = tab.id;
+                let newTab = await chrome.tabs.create({ active: false, url: waitingURL });
+                curWindow.id = newTab.id;
                 saveState();
             });
         } else {
-            let tab = await chrome.tabs.create({ active: true, url: waitingURL });
-            curWindow.id = tab.id;
+            let newTab = await chrome.tabs.create({ active: false, url: waitingURL });
+            curWindow.id = newTab.id;
             saveState();
         }
+        curWindow.type = "wait";
+        saveState();
     }
 }
 
 function meshPrioStreams() {
     config.priorityStreams = priorityStreams;
-}
-
-function displayBadgeDrops() {
-    if (settings.setShowBadges) {
-        chrome.action.getBadgeText({}).then((curBadge) => {
-            if (curBadge !== "New") {
-                let newText = currentBadgeDrops.length !== 0 ? `${currentBadgeDrops.length} B` : "PRO";
-                chrome.action.setBadgeText({ text: newText });
-                chrome.action.setBadgeBackgroundColor({ color: "#9146FF" });
-            }
-        }).catch(() => {});
-    }
 }
 
 function getPremiumStatus() {
