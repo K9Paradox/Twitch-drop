@@ -1136,6 +1136,13 @@ async function checkClaimDrop(prefetchedInventory) {
                 // watching yet — one bad drop would crash the whole claim loop.
                 if (!drop || !drop.self) continue;
                 if (drop.requiredMinutesWatched !== 0 && drop.requiredMinutesWatched <= (drop.self.currentMinutesWatched || 0) && !drop.self.isClaimed) {
+                    // DEFENSIVE: block false claims when long rewards show stale low minutes
+                    const watched = drop.self.currentMinutesWatched || 0;
+                    const required = drop.requiredMinutesWatched || 0;
+                    if (required > 30 && watched < 60) {
+                        console.warn("Skipping false claim: required=" + required + " watched=" + watched);
+                        continue;
+                    }
                     let dropClaim = await client.claimDropReward(drop.self.dropInstanceID);
                     if (dropClaim) {
                         console.log("Claimed Drop successfully!");

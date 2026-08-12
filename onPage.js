@@ -6,7 +6,7 @@ if (!window._originalFetch) {
      * force-played and overwrote the saved volume on *every* Twitch tab every
      * 2 seconds — even on the user's own tabs while they were just browsing.
      */
-    window.__atdFarming = window.__atdFarming === true;
+    window.__atdFarming = window.__atdFarming === true || !!window.__atdFarming;
 
     window.addEventListener("message", (e) => {
         if (!e.data || !e.data.autoTwitchDrops) return;
