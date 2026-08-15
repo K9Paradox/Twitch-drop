@@ -1,6 +1,17 @@
 /**
  * Twitch GQL & Internal API Client
  */
+
+export class TwitchApiError extends Error {
+    constructor(message, { status = null, errors = null, operationName = null } = {}) {
+        super(message);
+        this.name = "TwitchApiError";
+        this.status = status;
+        this.errors = errors;
+        this.operationName = operationName;
+    }
+}
+
 export class Client {
     constructor(options = {}) {
         this.clientId = options?.clientId ?? "kimne78kx3ncx6brgo4mv6wki5h1ko";
@@ -11,65 +22,114 @@ export class Client {
         this.uuid = options?.uuid ?? null;
     }
 
-    async post(data) {
-        try {
-            const headers = {
-                "Client-Id": this.clientId,
-                "Content-Type": "application/json"
-            };
-            if (this.deviceId) headers["X-Device-Id"] = this.deviceId;
-            if (this.integrity) {
-                const integToken = typeof this.integrity === "string" ? this.integrity : this.integrity?.token;
-                if (integToken) headers["Client-Integrity"] = integToken;
-            }
-            if (this.uuid) headers["Client-Session-Id"] = this.uuid;
-
-            const res = await fetch("https://gql.twitch.tv/gql", {
-                method: "POST",
-                headers: headers,
-                body: JSON.stringify(data)
-            });
-            if (!res.ok) return null;
-            const json = await res.json();
-            if (Array.isArray(json)) return json;
-            return (json && json.data) ? json.data : json;
-        } catch (e) {
-            return null;
+    extractOperationName(data) {
+        if (!data) return null;
+        if (Array.isArray(data)) {
+            return data.map(d => d?.operationName).filter(Boolean).join(",");
         }
+        return data?.operationName || null;
+    }
+
+    buildHeaders(authorized = false) {
+        const headers = {
+            "Client-Id": this.clientId,
+            "Content-Type": "application/json"
+        };
+        if (authorized && this.oauthToken) {
+            headers["Authorization"] = `OAuth ${this.oauthToken}`;
+        }
+        if (this.deviceId) {
+            headers["X-Device-Id"] = this.deviceId;
+        }
+        if (this.integrity) {
+            const integToken = typeof this.integrity === "string" ? this.integrity : this.integrity?.token;
+            if (integToken) headers["Client-Integrity"] = integToken;
+        }
+        if (this.uuid) {
+            headers["Client-Session-Id"] = this.uuid;
+        }
+        return headers;
+    }
+
+    async post(data) {
+        const opName = this.extractOperationName(data);
+        const headers = this.buildHeaders(false);
+
+        const res = await fetch("https://gql.twitch.tv/gql", {
+            method: "POST",
+            headers: headers,
+            body: JSON.stringify(data)
+        });
+
+        if (!res.ok) {
+            throw new TwitchApiError(`Twitch GQL HTTP error ${res.status}: ${res.statusText}`, {
+                status: res.status,
+                operationName: opName
+            });
+        }
+
+        const json = await res.json();
+        if (Array.isArray(json)) {
+            return json;
+        }
+
+        if (json && json.errors && json.errors.length > 0) {
+            const errMsg = json.errors.map(e => e?.message || JSON.stringify(e)).join("; ") || "GraphQL query error";
+            throw new TwitchApiError(errMsg, {
+                status: res.status,
+                errors: json.errors,
+                operationName: opName
+            });
+        }
+
+        return (json && json.data !== undefined) ? json.data : json;
     }
 
     async postAuthorized(data) {
-        if (!this.oauthToken) return null;
-        try {
-            const headers = {
-                "Client-Id": this.clientId,
-                "Authorization": `OAuth ${this.oauthToken}`,
-                "Content-Type": "application/json"
-            };
-            if (this.deviceId) headers["X-Device-Id"] = this.deviceId;
-            if (this.integrity) {
-                const integToken = typeof this.integrity === "string" ? this.integrity : this.integrity?.token;
-                if (integToken) headers["Client-Integrity"] = integToken;
-            }
-            if (this.uuid) headers["Client-Session-Id"] = this.uuid;
-
-            const res = await fetch("https://gql.twitch.tv/gql", {
-                method: "POST",
-                headers: headers,
-                body: JSON.stringify(data)
+        const opName = this.extractOperationName(data);
+        if (!this.oauthToken) {
+            throw new TwitchApiError("Unauthorized: Missing OAuth token", {
+                status: 401,
+                operationName: opName
             });
-            if (!res.ok) return null;
-            const json = await res.json();
-            if (Array.isArray(json)) return json;
-            return (json && json.data) ? json.data : json;
-        } catch (e) {
-            return null;
         }
+
+        const headers = this.buildHeaders(true);
+
+        const res = await fetch("https://gql.twitch.tv/gql", {
+            method: "POST",
+            headers: headers,
+            body: JSON.stringify(data)
+        });
+
+        if (!res.ok) {
+            throw new TwitchApiError(`Twitch GQL HTTP error ${res.status}: ${res.statusText}`, {
+                status: res.status,
+                operationName: opName
+            });
+        }
+
+        const json = await res.json();
+        if (Array.isArray(json)) {
+            return json;
+        }
+
+        if (json && json.errors && json.errors.length > 0) {
+            const errMsg = json.errors.map(e => e?.message || JSON.stringify(e)).join("; ") || "GraphQL query error";
+            throw new TwitchApiError(errMsg, {
+                status: res.status,
+                errors: json.errors,
+                operationName: opName
+            });
+        }
+
+        return (json && json.data !== undefined) ? json.data : json;
     }
 
     async getInteg() {
         if (!this.integrity) return false;
-        if (typeof this.integrity === "object" && this.integrity.expiration && this.integrity.expiration - 960000 < Date.now()) {
+        const expiration = typeof this.integrity === "object" ? this.integrity.expiration : null;
+        if (expiration && expiration - 960000 < Date.now()) {
             return false;
         }
         return this.integrity;
@@ -77,16 +137,21 @@ export class Client {
 
     async setInteg(integ) {
         this.integrity = integ;
-        await chrome.storage.local.set({ twitchInteg: integ }).catch(() => {});
+        try {
+            if (typeof chrome !== "undefined" && chrome?.storage?.local) {
+                await chrome.storage.local.set({ twitchInteg: integ });
+            }
+        } catch (e) {}
     }
 
     async updateUserInfo(options) {
-        this.clientId = options?.clientId ?? this.clientId;
-        this.oauthToken = options?.oauthToken ?? this.oauthToken;
-        this.deviceId = options?.deviceId ?? this.deviceId;
-        this.userId = options?.userId ?? this.userId;
-        this.uuid = options?.uuid ?? this.uuid;
-        if (options?.integrity) this.integrity = options.integrity;
+        if (!options) return;
+        if (options.clientId !== undefined) this.clientId = options.clientId;
+        if (options.oauthToken !== undefined) this.oauthToken = options.oauthToken;
+        if (options.deviceId !== undefined) this.deviceId = options.deviceId;
+        if (options.userId !== undefined) this.userId = options.userId;
+        if (options.uuid !== undefined) this.uuid = options.uuid;
+        if (options.integrity !== undefined) this.integrity = options.integrity;
     }
 
     async getUserId() {
@@ -107,13 +172,18 @@ export class Client {
             });
             if (data && data.currentUser && data.currentUser.id) {
                 this.userId = data.currentUser.id;
-                await chrome.storage.local.set({ userId: data.currentUser.id }).catch(() => {});
+                try {
+                    if (typeof chrome !== "undefined" && chrome?.storage?.local) {
+                        await chrome.storage.local.set({ userId: data.currentUser.id });
+                    }
+                } catch (err) {}
             }
         } catch (e) {}
         return this.userId;
     }
 
     async getGameIdFromName(name) {
+        if (!name) return null;
         try {
             const data = await this.post({
                 "operationName": "DirectoryRoot_Directory",
@@ -128,7 +198,7 @@ export class Client {
                 }
             });
             const game = data ? data.game : null;
-            if (game) {
+            if (game && game.id) {
                 return game.id;
             }
         } catch (e) {}
@@ -197,6 +267,7 @@ export class Client {
     }
 
     async getDropCampaignDetails(dropId) {
+        if (!dropId) return null;
         try {
             if (typeof dropId === "string") {
                 const data = await this.postAuthorized({
@@ -212,8 +283,9 @@ export class Client {
                         "channelLogin": this.userId || ""
                     }
                 });
-                return data && data.user ? data.user.dropCampaign : null;
+                return data && data.user ? data.user.dropCampaign : (data?.dropCampaign || null);
             } else if (Array.isArray(dropId)) {
+                if (dropId.length === 0) return [];
                 const dataAry = dropId.map(camp => ({
                     "operationName": "DropCampaignDetails",
                     "extensions": {
@@ -228,7 +300,7 @@ export class Client {
                     }
                 }));
                 const data = await this.postAuthorized(dataAry);
-                return data || [];
+                return Array.isArray(data) ? data : [];
             }
         } catch (e) {
             return null;
@@ -256,11 +328,12 @@ export class Client {
     async getActiveStreams(gameName, slug) {
         try {
             let gameSlug = slug;
-            if (!gameSlug) {
+            if (!gameSlug && gameName) {
                 gameSlug = gameName.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
                 if (gameSlug.startsWith("-")) gameSlug = gameSlug.slice(1);
                 if (gameSlug.endsWith("-")) gameSlug = gameSlug.slice(0, -1);
             }
+            if (!gameSlug) return [];
 
             const data = await this.post([
                 {
@@ -308,56 +381,100 @@ export class Client {
     }
 
     async claimDropReward(dropInstanceId) {
-        try {
-            return await this.postAuthorized({
-                "operationName": "DropsPage_ClaimDropRewards",
-                "variables": {
-                    "input": {
-                        "dropInstanceID": dropInstanceId
-                    }
-                },
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 1,
-                        "sha256Hash": "a455deea71bdc9015b78eb49f4acfbce8baa7ccbedd28e549bb025bd0f751930"
-                    }
-                }
+        if (!dropInstanceId) {
+            throw new TwitchApiError("dropInstanceID is required", {
+                operationName: "DropsPage_ClaimDropRewards"
             });
-        } catch (e) {
-            return null;
         }
+        const data = await this.postAuthorized({
+            "operationName": "DropsPage_ClaimDropRewards",
+            "variables": {
+                "input": {
+                    "dropInstanceID": String(dropInstanceId)
+                }
+            },
+            "extensions": {
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": "a455deea71bdc9015b78eb49f4acfbce8baa7ccbedd28e549bb025bd0f751930"
+                }
+            }
+        });
+
+        const status = data?.claimDropReward?.status || (data?.claimDropReward ? "SUCCESS" : null);
+        if (status) {
+            const isSuccess = status === "SUCCESS" || status === "ELIGIBLE_FOR_CLAIM" || status === "DROP_INSTANCE_ALREADY_CLAIMED";
+            return {
+                status: status,
+                dropInstanceID: String(dropInstanceId),
+                success: isSuccess
+            };
+        }
+
+        throw new TwitchApiError("Failed to claim drop reward: empty or invalid response", {
+            operationName: "DropsPage_ClaimDropRewards"
+        });
     }
 
-    async claimChannelPoints(claimId, channelId) {
-        try {
-            const data = await this.postAuthorized({
-                "operationName": "ClaimCommunityPoints",
-                "variables": {
-                    "input": {
-                        "channelID": channelId,
-                        "claimID": claimId
-                    }
-                },
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 1,
-                        "sha256Hash": "46aaeebe02c99afdf4fc97c7c0cba964124bf6b0af229395f1f6d1feed05b3d0"
-                    }
-                }
-            });
-            if (data && data.claimCommunityPoints && data.claimCommunityPoints.error == null) {
-                return {
-                    success: true,
-                    points: data.claimCommunityPoints.claim?.pointsEarnedTotal ?? 50
-                };
-            }
-            return false;
-        } catch (e) {
-            return false;
+    async claimChannelPoints(channelIdOrClaimId, claimIdOrChannelId) {
+        let channelID = channelIdOrClaimId;
+        let claimID = claimIdOrChannelId;
+
+        if (typeof channelIdOrClaimId === "object" && channelIdOrClaimId !== null) {
+            channelID = channelIdOrClaimId.channelID || channelIdOrClaimId.channelId;
+            claimID = channelIdOrClaimId.claimID || channelIdOrClaimId.claimId;
+        } else if (typeof channelIdOrClaimId === "string" && channelIdOrClaimId.includes("-") && typeof claimIdOrChannelId === "string" && !claimIdOrChannelId.includes("-")) {
+            claimID = channelIdOrClaimId;
+            channelID = claimIdOrChannelId;
         }
+
+        if (!channelID || !claimID) {
+            throw new TwitchApiError("Both channelID and claimID are required to claim community points", {
+                operationName: "ClaimCommunityPoints"
+            });
+        }
+
+        const data = await this.postAuthorized({
+            "operationName": "ClaimCommunityPoints",
+            "variables": {
+                "input": {
+                    "channelID": String(channelID),
+                    "claimID": String(claimID)
+                }
+            },
+            "extensions": {
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": "46aaeebe02c99afdf4fc97c7c0cba964124bf6b0af229395f1f6d1feed05b3d0"
+                }
+            }
+        });
+
+        if (data && data.claimCommunityPoints) {
+            if (data.claimCommunityPoints.error) {
+                throw new TwitchApiError(`Claim community points error: ${data.claimCommunityPoints.error.code || 'UNKNOWN'}`, {
+                    operationName: "ClaimCommunityPoints",
+                    errors: [data.claimCommunityPoints.error]
+                });
+            }
+            const claim = data.claimCommunityPoints.claim;
+            const status = claim?.status || "SUCCESS";
+            const points = claim?.pointsEarnedTotal ?? (claim?.pointsEarned ?? 50);
+            return {
+                claimID: String(claimID),
+                status: status,
+                points: points,
+                success: status === "SUCCESS" || status === "CLAIMED"
+            };
+        }
+
+        throw new TwitchApiError("Invalid claim community points response", {
+            operationName: "ClaimCommunityPoints"
+        });
     }
 
     async getStream(username) {
+        if (!username) return null;
         try {
             if (typeof username === "string") {
                 const data = await this.post({
@@ -374,6 +491,7 @@ export class Client {
                 });
                 return data && data.userOrError ? data.userOrError.stream : null;
             } else if (Array.isArray(username)) {
+                if (username.length === 0) return [];
                 const dataAry = username.map(user => ({
                     "operationName": "ChannelShell",
                     "variables": {
@@ -423,6 +541,7 @@ export class Client {
     }
 
     async getStreamMetadata(channelLogin) {
+        if (!channelLogin) return { login: "" };
         try {
             const data = await this.post({
                 "operationName": "ChannelShell",

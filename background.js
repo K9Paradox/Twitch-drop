@@ -1,7 +1,21 @@
 /** 
  * Auto Twitch Drops Pro - Background Service Worker (Manifest V3)
  **/
-import { Client } from "./background/twitchApi.js";
+import { Client, TwitchApiError } from "./background/twitchApi.js";
+
+// Deduplication cache for background claim and point actions
+const recentBgClaims = new Map();
+function isDuplicateBackgroundClaim(key, ttlMs = 10000) {
+    const now = Date.now();
+    for (const [k, time] of recentBgClaims.entries()) {
+        if (now - time > 60000) recentBgClaims.delete(k);
+    }
+    if (recentBgClaims.has(key) && (now - recentBgClaims.get(key) < ttlMs)) {
+        return true;
+    }
+    recentBgClaims.set(key, now);
+    return false;
+}
 
 const POPULAR_DROP_GAMES = [
     "Overwatch 2",
@@ -579,13 +593,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 await fetchTwitchCookiesAndInitClient();
                 if (client && message.data) {
                     try {
-                        const success = await client.claimChannelPoints(message.data.claimID, message.data.channelID);
-                        if (success && success.success) {
-                            const pts = success.points || 50;
-                            extStats.claimedPoints += pts;
-                            logActivity("points", `+${pts} Channel Points`, "Twitch Channel", pts);
-                            await saveState();
-                            chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
+                        const claimId = message.data.claimID;
+                        const channelId = message.data.channelID;
+                        if (!isDuplicateBackgroundClaim("claim-" + claimId, 15000)) {
+                            const result = await client.claimChannelPoints(channelId, claimId);
+                            if (result && (result.success || result.status === "SUCCESS")) {
+                                const pts = result.points || 50;
+                                extStats.claimedPoints += pts;
+                                logActivity("points", `+${pts} Channel Points`, "Twitch Channel", pts);
+                                await saveState();
+                                chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
+                                chrome.runtime.sendMessage({ type: "p:activityUpdated", data: { history: activityHistory } }).catch(() => {});
+                            }
                         }
                     } catch (e) {
                         console.error("Error claiming points:", e);
@@ -597,10 +616,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case "points-earned":
                 if (message.data) {
                     const earned = message.data.points || 50;
-                    extStats.claimedPoints += earned;
-                    logActivity("points", `+${earned} Channel Points (Watch Bonus)`, "Twitch Stream", earned);
-                    await saveState();
-                    chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
+                    const src = message.data.source || "generic";
+                    if (!isDuplicateBackgroundClaim("points-earned-" + earned + "-" + src, 3000)) {
+                        extStats.claimedPoints += earned;
+                        logActivity("points", `+${earned} Channel Points (Watch Bonus)`, "Twitch Stream", earned);
+                        await saveState();
+                        chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
+                        chrome.runtime.sendMessage({ type: "p:activityUpdated", data: { history: activityHistory } }).catch(() => {});
+                    }
                 }
                 sendResponse({ success: true });
                 break;
@@ -1198,17 +1221,27 @@ async function checkClaimDrop() {
         for (const camp of inventory.dropCampaignsInProgress) {
             for (const drop of (camp.timeBasedDrops || [])) {
                 if (drop.requiredMinutesWatched !== 0 && drop.self && drop.requiredMinutesWatched <= drop.self.currentMinutesWatched && !drop.self.isClaimed) {
-                    const dropClaim = await client.claimDropReward(drop.self.dropInstanceID);
-                    if (dropClaim) {
-                        const rewardTitle = drop.name || "Drop Reward";
-                        const gameName = camp.game ? camp.game.displayName : "Twitch Drop";
-                        extStats.claimedDrops++;
-                        const img = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit.imageAssetURL : (drop.imageURL || "");
-                        logActivity("drop", rewardTitle, gameName, 0, img);
-                        notifyUser("Drop Reward Claimed!", `Successfully claimed ${rewardTitle} for ${gameName}`);
-                        await saveState();
-                        chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
-                        chrome.runtime.sendMessage({ type: "p:rewardClaimedSound" }).catch(() => {});
+                    const dropInstanceId = drop.self.dropInstanceID;
+                    if (!dropInstanceId) continue;
+                    if (isDuplicateBackgroundClaim("drop-claim-" + dropInstanceId, 30000)) continue;
+
+                    try {
+                        const dropClaim = await client.claimDropReward(dropInstanceId);
+                        if (dropClaim && (dropClaim.status === "SUCCESS" || dropClaim.status === "ELIGIBLE_FOR_CLAIM" || dropClaim.success === true)) {
+                            drop.self.isClaimed = true;
+                            const rewardTitle = drop.name || "Drop Reward";
+                            const gameName = camp.game ? camp.game.displayName : "Twitch Drop";
+                            extStats.claimedDrops++;
+                            const img = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit.imageAssetURL : (drop.imageURL || "");
+                            logActivity("drop", rewardTitle, gameName, 0, img);
+                            notifyUser("Drop Reward Claimed!", `Successfully claimed ${rewardTitle} for ${gameName}`);
+                            await saveState();
+                            chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
+                            chrome.runtime.sendMessage({ type: "p:activityUpdated", data: { history: activityHistory } }).catch(() => {});
+                            chrome.runtime.sendMessage({ type: "p:rewardClaimedSound" }).catch(() => {});
+                        }
+                    } catch (err) {
+                        console.error("Failed to claim drop reward:", dropInstanceId, err);
                     }
                 }
             }

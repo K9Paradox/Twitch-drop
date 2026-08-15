@@ -52,6 +52,22 @@ if (!window._originalFetch) {
     } catch (e) {}
 
     /**
+     * Deduplication Cache to prevent double-dispatching and race conditions
+     */
+    const recentClaims = new Map();
+    function isDuplicateClaim(key, ttlMs = 10000) {
+        const now = Date.now();
+        for (const [k, time] of recentClaims.entries()) {
+            if (now - time > 60000) recentClaims.delete(k);
+        }
+        if (recentClaims.has(key) && (now - recentClaims.get(key) < ttlMs)) {
+            return true;
+        }
+        recentClaims.set(key, now);
+        return false;
+    }
+
+    /**
      * Synthetic Click Trigger
      */
     function triggerSyntheticClick(element) {
@@ -103,12 +119,15 @@ if (!window._originalFetch) {
                 const btn = document.querySelector(selector);
                 if (btn && btn.offsetParent !== null) {
                     triggerSyntheticClick(btn);
-                    window.postMessage({
-                        autoTwitchDrops: {
-                            type: "points-earned",
-                            points: 50
-                        }
-                    }, "*");
+                    if (!isDuplicateClaim("dom-chest-claim", 10000)) {
+                        window.postMessage({
+                            autoTwitchDrops: {
+                                type: "points-earned",
+                                points: 50,
+                                source: "dom"
+                            }
+                        }, "*");
+                    }
                 }
             }
         } catch (e) {}
@@ -125,7 +144,7 @@ if (!window._originalFetch) {
         autoClaimPointsChests();
     }, 1500);
 
-    // Network Interceptor (GraphQL & Hermes WebSocket)
+    // Network Interceptor (GraphQL & Hermes/PubSub WebSocket)
     window._originalFetch = window._originalFetch || fetch;
     window.fetch = new Proxy(fetch, {
         apply: (f, s, r) => {
@@ -188,40 +207,124 @@ if (!window._originalFetch) {
 
     window._originalWebSocket = window._originalWebSocket || WebSocket;
     window.WebSocket = new Proxy(_originalWebSocket, {
-        construct: (sock, sockurl) => {
-            const socket = new sock(...sockurl);
-            socket.addEventListener("message", res => {
-                try {
-                    if (res && res.origin === "wss://hermes.twitch.tv") {
-                        const data = JSON.parse(res.data);
-                        if (data.type === "MESSAGE") {
-                            const parsed = JSON.parse(data.data.message);
-                            if (parsed.type === "points-earned") {
-                                window.postMessage({
-                                    autoTwitchDrops: {
-                                        type: "points-earned",
-                                        points: parsed.data.point_gain.total_points
+        construct: (target, args) => {
+            const socket = new target(...args);
+            let targetUrl = "";
+            try {
+                if (typeof args[0] === "string") {
+                    targetUrl = args[0];
+                } else if (args[0] && typeof args[0].url === "string") {
+                    targetUrl = args[0].url;
+                } else if (args[0] && typeof args[0].toString === "function") {
+                    targetUrl = args[0].toString();
+                }
+            } catch (err) {}
+
+            const isHermes = targetUrl.includes("hermes.twitch.tv");
+            const isPubSub = targetUrl.includes("pubsub-edge.twitch.tv");
+
+            if (isHermes || isPubSub) {
+                socket.addEventListener("message", res => {
+                    try {
+                        if (!res || !res.data) return;
+                        const rawData = res.data;
+                        if (typeof rawData !== "string") return;
+
+                        let data;
+                        try {
+                            data = JSON.parse(rawData);
+                        } catch (err) {
+                            return;
+                        }
+
+                        if (data && data.type === "MESSAGE" && data.data) {
+                            let parsed = null;
+                            if (data.data.message) {
+                                try {
+                                    parsed = typeof data.data.message === "string" ? JSON.parse(data.data.message) : data.data.message;
+                                } catch (err) {}
+                            }
+
+                            if (parsed) {
+                                if (parsed.type === "points-earned") {
+                                    const pts = parsed.data?.point_gain?.total_points || parsed.data?.points || 50;
+                                    if (!isDuplicateClaim("ws-points-earned-" + pts, 5000)) {
+                                        window.postMessage({
+                                            autoTwitchDrops: {
+                                                type: "points-earned",
+                                                points: pts,
+                                                source: isHermes ? "hermes" : "pubsub"
+                                            }
+                                        }, "*");
                                     }
-                                }, "*");
-                            } else if (parsed.type === "claim-available") {
-                                window.postMessage({
-                                    autoTwitchDrops: {
-                                        type: "claim-points",
-                                        claimID: parsed.data.claim.id,
-                                        channelID: parsed.data.claim.channel_id
+                                } else if (parsed.type === "claim-available") {
+                                    const claimId = parsed.data?.claim?.id;
+                                    const channelId = parsed.data?.claim?.channel_id;
+                                    if (claimId && !isDuplicateClaim("claim-" + claimId, 15000)) {
+                                        window.postMessage({
+                                            autoTwitchDrops: {
+                                                type: "claim-points",
+                                                claimID: claimId,
+                                                channelID: channelId,
+                                                source: isHermes ? "hermes" : "pubsub"
+                                            }
+                                        }, "*");
                                     }
-                                }, "*");
-                            } else if (parsed.type === "drop-progress") {
-                                window.postMessage({
-                                    autoTwitchDrops: {
-                                        type: "checkDrop"
+                                } else if (parsed.type === "drop-progress" || parsed.type === "drop-claim") {
+                                    if (!isDuplicateClaim("drop-progress", 5000)) {
+                                        window.postMessage({
+                                            autoTwitchDrops: {
+                                                type: "checkDrop",
+                                                source: isHermes ? "hermes" : "pubsub"
+                                            }
+                                        }, "*");
                                     }
-                                }, "*");
+                                }
+                            }
+
+                            const topic = data.data.topic;
+                            if (topic && parsed) {
+                                if (topic.includes("community-points-user-v1")) {
+                                    if (parsed.type === "points-earned") {
+                                        const pts = parsed.data?.point_gain?.total_points || parsed.data?.points || 50;
+                                        if (!isDuplicateClaim("ws-points-earned-" + pts, 5000)) {
+                                            window.postMessage({
+                                                autoTwitchDrops: {
+                                                    type: "points-earned",
+                                                    points: pts,
+                                                    source: "pubsub"
+                                                }
+                                            }, "*");
+                                        }
+                                    } else if (parsed.type === "claim-available") {
+                                        const claimId = parsed.data?.claim?.id;
+                                        const channelId = parsed.data?.claim?.channel_id;
+                                        if (claimId && !isDuplicateClaim("claim-" + claimId, 15000)) {
+                                            window.postMessage({
+                                                autoTwitchDrops: {
+                                                    type: "claim-points",
+                                                    claimID: claimId,
+                                                    channelID: channelId,
+                                                    source: "pubsub"
+                                                }
+                                            }, "*");
+                                        }
+                                    }
+                                } else if (topic.includes("user-drop-events") || topic.includes("drop-progress")) {
+                                    if (!isDuplicateClaim("drop-progress", 5000)) {
+                                        window.postMessage({
+                                            autoTwitchDrops: {
+                                                type: "checkDrop",
+                                                source: "pubsub"
+                                            }
+                                        }, "*");
+                                    }
+                                }
                             }
                         }
-                    }
-                } catch (e) {}
-            });
+                    } catch (e) {}
+                });
+            }
             return socket;
         }
     });

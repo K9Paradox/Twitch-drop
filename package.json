@@ -1,0 +1,9 @@
+{
+  "name": "auto-twitch-drops-pro",
+  "version": "1.5.0",
+  "description": "Auto Twitch Drops Pro Chrome Extension",
+  "type": "module",
+  "scripts": {
+    "test": "node test/run-all-tests.js"
+  }
+}
