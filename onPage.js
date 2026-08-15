@@ -16,6 +16,14 @@ if (!window._originalFetch) {
                 get: function () { return false; },
                 configurable: true
             });
+        } else {
+            const docHidden = Object.getOwnPropertyDescriptor(document, 'hidden');
+            if (docHidden && docHidden.configurable) {
+                Object.defineProperty(document, 'hidden', {
+                    get: function () { return false; },
+                    configurable: true
+                });
+            }
         }
     } catch (e) {}
 
@@ -26,6 +34,14 @@ if (!window._originalFetch) {
                 get: function () { return 'visible'; },
                 configurable: true
             });
+        } else {
+            const docVis = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+            if (docVis && docVis.configurable) {
+                Object.defineProperty(document, 'visibilityState', {
+                    get: function () { return 'visible'; },
+                    configurable: true
+                });
+            }
         }
     } catch (e) {}
 
@@ -50,7 +66,7 @@ if (!window._originalFetch) {
     }
 
     /**
-     * Safe Playback Watchdog (No aggressive unmuting loop)
+     * Safe Playback Watchdog
      */
     function safePlaybackWatchdog() {
         try {
@@ -98,53 +114,73 @@ if (!window._originalFetch) {
         } catch (e) {}
     }
 
-    // Run throttled watchdog every 5 seconds (no heavy MutationObserver hammer)
+    // Run throttled watchdog every 5 seconds
     setInterval(() => {
         safePlaybackWatchdog();
         autoClaimPointsChests();
     }, 5000);
 
-    // Initial check after load
     setTimeout(() => {
         safePlaybackWatchdog();
         autoClaimPointsChests();
-    }, 2000);
+    }, 1500);
 
     // Network Interceptor (GraphQL & Hermes WebSocket)
     window._originalFetch = window._originalFetch || fetch;
     window.fetch = new Proxy(fetch, {
         apply: (f, s, r) => {
-            const req = f.apply(s, r);
-            return req.then(res => {
-                if (res && res.url === "https://gql.twitch.tv/integrity") {
-                    res.clone().json().then(data => {
+            try {
+                // Intercept Client-Integrity header if present in request headers
+                const headers = r[1]?.headers;
+                if (headers) {
+                    let integToken = null;
+                    if (headers instanceof Headers) {
+                        integToken = headers.get('Client-Integrity') || headers.get('client-integrity');
+                    } else if (typeof headers === 'object') {
+                        integToken = headers['Client-Integrity'] || headers['client-integrity'];
+                    }
+                    if (integToken) {
                         window.postMessage({
                             autoTwitchDrops: {
                                 type: "integ",
-                                integrity: data
+                                integrity: { token: integToken, expiration: Date.now() + 3600000 }
                             }
                         }, "*");
-                    }).catch(() => {});
+                    }
                 }
-                if (res && res.url === "https://gql.twitch.tv/gql") {
-                    res.clone().json().then(data => {
-                        try {
-                            const operations = Array.isArray(data) ? data : [data];
-                            operations.forEach(dat => {
-                                const opName = dat?.extensions?.operationName;
-                                if (opName === "DropCurrentSessionContext" || opName === "DropChannelCampaignsProgress" || opName === "Inventory" || opName === "ViewerDropsDashboard") {
-                                    window.postMessage({
-                                        autoTwitchDrops: {
-                                            type: "sessionContext",
-                                            operation: opName,
-                                            data: dat.data
-                                        }
-                                    }, "*");
-                                }
-                            });
-                        } catch (err) {}
-                    }).catch(() => {});
-                }
+            } catch (e) {}
+
+            const req = f.apply(s, r);
+            return req.then(res => {
+                try {
+                    const url = (res && res.url) ? res.url : (r[0] ? (typeof r[0] === 'string' ? r[0] : r[0].url) : '');
+                    if (url && (url.includes('gql.twitch.tv') || url.includes('/gql') || url.includes('/integrity'))) {
+                        res.clone().json().then(data => {
+                            if (url.includes('/integrity') && data && data.token) {
+                                window.postMessage({
+                                    autoTwitchDrops: {
+                                        type: "integ",
+                                        integrity: data
+                                    }
+                                }, "*");
+                            } else if (data) {
+                                const operations = Array.isArray(data) ? data : [data];
+                                operations.forEach(dat => {
+                                    const opName = dat?.extensions?.operationName;
+                                    if (opName) {
+                                        window.postMessage({
+                                            autoTwitchDrops: {
+                                                type: "gqlOperation",
+                                                operation: opName,
+                                                data: dat.data
+                                            }
+                                        }, "*");
+                                    }
+                                });
+                            }
+                        }).catch(() => {});
+                    }
+                } catch (err) {}
                 return res;
             });
         }

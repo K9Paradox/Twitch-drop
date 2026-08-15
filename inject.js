@@ -19,8 +19,12 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
                 if (dropData.type === "points-earned") {
                     chrome.runtime.sendMessage({ type: "points-earned", data: dropData }).catch(() => {});
                 }
-                if (dropData.type === "sessionContext") {
-                    chrome.runtime.sendMessage({ type: "sessionContext", data: dropData.session }).catch(() => {});
+                if (dropData.type === "gqlOperation" || dropData.type === "sessionContext") {
+                    chrome.runtime.sendMessage({
+                        type: "gqlOperation",
+                        operation: dropData.operation,
+                        data: dropData.data || dropData.session
+                    }).catch(() => {});
                 }
             } else if (e.data.autoTwitchBrowserExtension && e.data.autoTwitchBrowserExtension.integrity) {
                 chrome.runtime.sendMessage({ type: "sendInteg", data: e.data.autoTwitchBrowserExtension.integrity }).catch(() => {});
@@ -88,7 +92,7 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
     }
 }).catch(() => {});
 
-setTimeout(() => {
+function syncClientAuth() {
     try {
         if (!chrome.runtime?.id) return;
         const authToken = getCookieValue("auth-token");
@@ -101,9 +105,7 @@ setTimeout(() => {
                 const parsed = JSON.parse(history);
                 if (parsed && parsed.id) userId = parsed.id;
             }
-        } catch (err) {
-            console.warn("Could not read searchSuggestionHistory from localStorage", err);
-        }
+        } catch (err) {}
 
         let uuid = "";
         try {
@@ -112,23 +114,25 @@ setTimeout(() => {
                 const parsed = JSON.parse(rawUuid);
                 if (parsed && parsed.session_id) uuid = parsed.session_id;
             }
-        } catch (err) {
-            console.warn("Could not read local_storage_app_session_id from localStorage", err);
-        }
+        } catch (err) {}
 
-        chrome.runtime.sendMessage({
-            type: "clientInfo",
-            data: {
-                oauthToken: authToken,
-                deviceId: deviceId,
-                userId: userId,
-                uuid: uuid
-            }
-        }).catch(() => {});
-    } catch (e) {
-        console.warn("Error grabbing auth cookies in inject.js:", e);
-    }
-}, 1500);
+        if (authToken || deviceId) {
+            chrome.runtime.sendMessage({
+                type: "clientInfo",
+                data: {
+                    oauthToken: authToken,
+                    deviceId: deviceId,
+                    userId: userId,
+                    uuid: uuid
+                }
+            }).catch(() => {});
+        }
+    } catch (e) {}
+}
+
+syncClientAuth();
+setTimeout(syncClientAuth, 1000);
+setTimeout(syncClientAuth, 3000);
 
 function getCookieValue(cookieName) {
     const cookies = document.cookie ? document.cookie.split("; ") : [];
