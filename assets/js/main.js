@@ -1,5 +1,8 @@
-// Auto Twitch Drops Pro - Popup UI Controller
-const maniData = chrome.runtime.getManifest();
+// Auto Twitch Drops Pro - Popup UI Controller (Manifest V3)
+const maniData = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getManifest)
+    ? chrome.runtime.getManifest()
+    : { version: "1.5.0" };
+
 const POPULAR_DROP_GAMES = [
     "Overwatch 2",
     "Apex Legends",
@@ -37,6 +40,7 @@ let currentAllGames = [...POPULAR_DROP_GAMES];
 let currentActiveStream = null;
 let currentAutoGamesData = { allConnected: [...POPULAR_DROP_GAMES], enabled: [] };
 let tabAudioMuted = true;
+let authBannerDismissed = false;
 
 const GIFT_SVG_ICON = `
 <svg class="rewardFallbackGlyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -49,71 +53,162 @@ const GIFT_SVG_ICON = `
 
 $(() => {
     // Set Manifest Version
-    $("#extVersion").text(`v${maniData.version}`);
+    $("#extVersion").text(`v${maniData.version || "1.5.0"}`);
 
-    // Pre-populate default popular games immediately
+    // Pre-populate default popular games immediately to eliminate empty-state flashing
     populateGameDropdown(POPULAR_DROP_GAMES.map(g => ({ game: { displayName: g } })));
     populateAutoGamesGrid(currentAutoGamesData);
 
-    // Load initial state from storage
-    chrome.storage.local.get(["exEnabled", "settings", "extStats", "activityHistory", "autoDropGames", "listOfConnected", "activeStream"]).then((val) => {
-        extEnabled = val.exEnabled !== undefined ? val.exEnabled : true;
-        $(".enableEx").prop("checked", extEnabled);
+    // Initial storage hydration & check auth
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.get([
+            "exEnabled",
+            "settings",
+            "extStats",
+            "activityHistory",
+            "autoDropGames",
+            "listOfConnected",
+            "activeStream",
+            "oauthToken",
+            "authState"
+        ]).then((val) => {
+            if (!val) val = {};
 
-        if (!extEnabled) {
-            showPage("extDisabled");
-        } else {
-            showPage("mainPage");
-        }
+            extEnabled = val.exEnabled !== undefined ? Boolean(val.exEnabled) : true;
+            $(".enableEx").prop("checked", extEnabled);
 
-        if (val.settings) {
-            settings = { ...settings, ...val.settings };
-            for (let k in settings) {
-                $(`#set${k}`).prop("checked", settings[k]);
+            if (!extEnabled) {
+                showPage("extDisabled");
+            } else {
+                showPage("mainPage");
             }
-        }
 
-        if (val.extStats) {
-            updateStatsUI(val.extStats);
-        }
-
-        if (val.activityHistory) {
-            renderActivityHistory(val.activityHistory);
-        }
-
-        if (val.listOfConnected && val.listOfConnected.length > 0) {
-            const merged = Array.from(new Set([...val.listOfConnected, ...POPULAR_DROP_GAMES]));
-            populateGameDropdown(merged.map(g => ({ game: { displayName: g } })));
-            currentAutoGamesData.allConnected = merged;
-        }
-
-        if (val.autoDropGames) {
-            currentAutoGamesData.enabled = val.autoDropGames;
-            populateAutoGamesGrid(currentAutoGamesData);
-        }
-
-        if (val.activeStream && val.activeStream.campaign && val.activeStream.campaign !== "none") {
-            currentActiveStream = val.activeStream;
-            updateDropProgressUI({ activeStream: val.activeStream });
-            renderActiveDropsList(val.activeStream);
-        }
-
-        // Request live data from background
-        if (extEnabled) {
-            chrome.runtime.sendMessage({ type: "p:getConnectedGames" }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "getAutoDropGames" }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
-                if (res && res.muted !== undefined) {
-                    updateAudioButtonUI(res.muted);
+            if (val.settings && typeof val.settings === "object") {
+                settings = { ...settings, ...val.settings };
+                for (let k in settings) {
+                    $(`#set${k}`).prop("checked", Boolean(settings[k]));
                 }
-            }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "getActivityHistory" }).then((res) => {
-                if (res && res.activityHistory) renderActivityHistory(res.activityHistory);
-            }).catch(() => {});
-        }
-    }).catch(() => {});
+            }
+
+            if (val.extStats) {
+                updateStatsUI(val.extStats);
+            }
+
+            if (Array.isArray(val.activityHistory)) {
+                renderActivityHistory(val.activityHistory);
+            }
+
+            if (Array.isArray(val.listOfConnected) && val.listOfConnected.length > 0) {
+                const merged = Array.from(new Set([...val.listOfConnected, ...POPULAR_DROP_GAMES]));
+                populateGameDropdown(merged.map(g => ({ game: { displayName: g } })));
+                currentAutoGamesData.allConnected = merged;
+            }
+
+            if (Array.isArray(val.autoDropGames)) {
+                currentAutoGamesData.enabled = val.autoDropGames;
+                populateAutoGamesGrid(currentAutoGamesData);
+            }
+
+            if (val.activeStream && val.activeStream.campaign && val.activeStream.campaign !== "none") {
+                currentActiveStream = val.activeStream;
+                updateDropProgressUI({ activeStream: val.activeStream });
+                renderActiveDropsList(val.activeStream);
+            }
+
+            checkAuthStatus();
+
+            // Request live data from background service worker
+            if (extEnabled && chrome.runtime && chrome.runtime.sendMessage) {
+                chrome.runtime.sendMessage({ type: "p:getConnectedGames" }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "getAutoDropGames" }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
+                    if (res && res.muted !== undefined) {
+                        updateAudioButtonUI(res.muted);
+                    }
+                }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "getActivityHistory" }).then((res) => {
+                    if (res && Array.isArray(res.activityHistory)) {
+                        renderActivityHistory(res.activityHistory);
+                    }
+                }).catch(() => {});
+            }
+        }).catch(() => {});
+    }
+
+    // Real-time Reactive Storage Sync
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.onChanged) {
+        chrome.storage.onChanged.addListener((changes, areaName) => {
+            if (areaName && areaName !== "local") return;
+            if (!changes || typeof changes !== "object") return;
+
+            // Master enable switch
+            if (changes.exEnabled !== undefined) {
+                const newEnabled = changes.exEnabled.newValue !== undefined ? Boolean(changes.exEnabled.newValue) : true;
+                if (extEnabled !== newEnabled) {
+                    extEnabled = newEnabled;
+                    $(".enableEx").prop("checked", extEnabled);
+                    if (!extEnabled) {
+                        showPage("extDisabled");
+                        $(".navItem").removeClass("active");
+                    } else {
+                        showPage("mainPage");
+                        $(".navItem").removeClass("active");
+                        $('[data-page="mainPage"]').addClass("active");
+                    }
+                }
+            }
+
+            // Settings sync
+            if (changes.settings && changes.settings.newValue && typeof changes.settings.newValue === "object") {
+                settings = { ...settings, ...changes.settings.newValue };
+                for (let k in settings) {
+                    $(`#set${k}`).prop("checked", Boolean(settings[k]));
+                }
+            }
+
+            // Lifetime stats
+            if (changes.extStats && changes.extStats.newValue) {
+                updateStatsUI(changes.extStats.newValue);
+            }
+
+            // Activity log
+            if (changes.activityHistory && Array.isArray(changes.activityHistory.newValue)) {
+                renderActivityHistory(changes.activityHistory.newValue);
+            }
+
+            // Connected games list
+            if (changes.listOfConnected && Array.isArray(changes.listOfConnected.newValue)) {
+                const merged = Array.from(new Set([...changes.listOfConnected.newValue, ...POPULAR_DROP_GAMES]));
+                populateGameDropdown(merged.map(g => ({ game: { displayName: g } })));
+                currentAutoGamesData.allConnected = merged;
+                populateAutoGamesGrid(currentAutoGamesData);
+            }
+
+            // Auto drop games queue
+            if (changes.autoDropGames && Array.isArray(changes.autoDropGames.newValue)) {
+                currentAutoGamesData.enabled = changes.autoDropGames.newValue;
+                populateAutoGamesGrid(currentAutoGamesData);
+            }
+
+            // Active stream / drop progress
+            if (changes.activeStream) {
+                const newStream = (changes.activeStream.newValue && changes.activeStream.newValue !== "none")
+                    ? changes.activeStream.newValue
+                    : null;
+                currentActiveStream = newStream;
+                updateDropProgressUI({ activeStream: newStream });
+                renderActiveDropsList(currentActiveStream);
+                updateLastCheckTime();
+            }
+
+            // Auth state / token changes
+            if (changes.oauthToken || changes.authState) {
+                checkAuthStatus();
+            }
+        });
+    }
 
     // Top Navigation Tabs
     $(".navItem").on("click", (e) => {
@@ -126,18 +221,20 @@ $(() => {
         target.addClass("active");
         showPage(pageId);
 
-        if (pageId === "autoDropsPage") {
-            chrome.runtime.sendMessage({ type: "getAutoDropGames" }).then(res => {
-                if (res) populateAutoGamesGrid(res);
-            }).catch(() => {});
-        } else if (pageId === "activityPage") {
-            chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "getActivityHistory" }).then((res) => {
-                if (res && res.activityHistory) renderActivityHistory(res.activityHistory);
-            }).catch(() => {});
-        } else if (pageId === "dropsPage") {
-            chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
-            renderActiveDropsList(currentActiveStream);
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            if (pageId === "autoDropsPage") {
+                chrome.runtime.sendMessage({ type: "getAutoDropGames" }).then(res => {
+                    if (res) populateAutoGamesGrid(res);
+                }).catch(() => {});
+            } else if (pageId === "activityPage") {
+                chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "getActivityHistory" }).then((res) => {
+                    if (res && Array.isArray(res.activityHistory)) renderActivityHistory(res.activityHistory);
+                }).catch(() => {});
+            } else if (pageId === "dropsPage") {
+                chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+                renderActiveDropsList(currentActiveStream);
+            }
         }
     });
 
@@ -146,59 +243,86 @@ $(() => {
         const btn = $("#skipStreamerBtn");
         btn.find("span").text("Skipping...");
         btn.attr("disabled", true);
-        chrome.runtime.sendMessage({ type: "p:skipStreamer" }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:skipStreamer" }).catch(() => {});
+        }
         showToast("Switching to next live channel");
 
         setTimeout(() => {
             btn.find("span").text("Next");
             btn.removeAttr("disabled");
-            chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+            if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+                chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+            }
         }, 2000);
     });
 
     $("#toggleAudioBtn").on("click", () => {
-        chrome.runtime.sendMessage({ type: "p:toggleTabAudio" }).then((res) => {
-            if (res && res.success) {
-                updateAudioButtonUI(res.muted);
-                showToast(res.muted ? "Muted stream tab audio" : "Unmuted stream tab audio");
-            } else {
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:toggleTabAudio" }).then((res) => {
+                if (res && res.success && res.muted !== undefined) {
+                    updateAudioButtonUI(res.muted);
+                    showToast(res.muted ? "Muted stream tab audio" : "Unmuted stream tab audio");
+                } else {
+                    tabAudioMuted = !tabAudioMuted;
+                    updateAudioButtonUI(tabAudioMuted);
+                    showToast(tabAudioMuted ? "Muted stream tab audio" : "Unmuted stream tab audio");
+                }
+            }).catch(() => {
                 tabAudioMuted = !tabAudioMuted;
                 updateAudioButtonUI(tabAudioMuted);
-                showToast(tabAudioMuted ? "Muted stream tab audio" : "Unmuted stream tab audio");
-            }
-        }).catch(() => {
+            });
+        } else {
             tabAudioMuted = !tabAudioMuted;
             updateAudioButtonUI(tabAudioMuted);
-        });
+        }
     });
 
     $("#reloadStreamBtn").on("click", () => {
-        chrome.runtime.sendMessage({ type: "p:reloadStream" }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:reloadStream" }).catch(() => {});
+        }
         showToast("Stream tab reloaded");
     });
 
     $("#focusStreamTabBtn").on("click", () => {
-        chrome.runtime.sendMessage({ type: "p:focusStreamTab" }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:focusStreamTab" }).catch(() => {});
+        }
     });
 
     // Open Twitch Drops Inventory Button
     $("#openTwitchInventoryBtn").on("click", () => {
-        chrome.tabs.create({ url: "https://www.twitch.tv/drops/inventory", active: true });
+        if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.create) {
+            chrome.tabs.create({ url: "https://www.twitch.tv/drops/inventory", active: true });
+        } else {
+            window.open("https://www.twitch.tv/drops/inventory", "_blank");
+        }
     });
 
     // Refresh Rewards Button on Active Drops Tab
     $("#refreshRewardsBtn").on("click", () => {
-        chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+        }
         updateLastCheckTime();
         showToast("Synced rewards with Twitch");
     });
 
     // Clear Activity History Button
     $("#clearHistoryBtn").on("click", () => {
-        chrome.runtime.sendMessage({ type: "clearActivityHistory" }).then(() => {
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "clearActivityHistory" }).then(() => {
+                renderActivityHistory([]);
+                showToast("Claim history cleared");
+            }).catch(() => {
+                renderActivityHistory([]);
+                showToast("Claim history cleared");
+            });
+        } else {
             renderActivityHistory([]);
             showToast("Claim history cleared");
-        }).catch(() => {});
+        }
     });
 
     // Auto Games Search Filter
@@ -209,13 +333,15 @@ $(() => {
 
     // Auto Games Select All Button
     $("#autoGameSelectAllBtn").on("click", () => {
-        const allGames = currentAutoGamesData.allConnected && currentAutoGamesData.allConnected.length > 0
+        const allGames = (currentAutoGamesData.allConnected && currentAutoGamesData.allConnected.length > 0)
             ? currentAutoGamesData.allConnected
             : POPULAR_DROP_GAMES;
 
-        allGames.forEach(g => {
-            chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [g, true] }).catch(() => {});
-        });
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            allGames.forEach(g => {
+                chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [g, true] }).catch(() => {});
+            });
+        }
         currentAutoGamesData.enabled = [...allGames];
         $(".autoGameToggle").prop("checked", true);
         $(".autoGameCard").addClass("activeQueueCard").find(".autoGameStatusTag").text("Queued for Farming");
@@ -225,13 +351,15 @@ $(() => {
 
     // Auto Games Deselect All Button
     $("#autoGameDeselectAllBtn").on("click", () => {
-        const allGames = currentAutoGamesData.allConnected && currentAutoGamesData.allConnected.length > 0
+        const allGames = (currentAutoGamesData.allConnected && currentAutoGamesData.allConnected.length > 0)
             ? currentAutoGamesData.allConnected
             : POPULAR_DROP_GAMES;
 
-        allGames.forEach(g => {
-            chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [g, false] }).catch(() => {});
-        });
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            allGames.forEach(g => {
+                chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [g, false] }).catch(() => {});
+            });
+        }
         currentAutoGamesData.enabled = [];
         $(".autoGameToggle").prop("checked", false);
         $(".autoGameCard").removeClass("activeQueueCard").find(".autoGameStatusTag").text("Inactive");
@@ -242,15 +370,21 @@ $(() => {
     // Master Switch Toggle
     $(".enableEx").on("change", (e) => {
         extEnabled = $(e.target).prop("checked");
-        chrome.storage.local.set({ exEnabled: extEnabled });
-        chrome.runtime.sendMessage({ type: "toggleExt", data: extEnabled }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({ exEnabled: extEnabled }).catch(() => {});
+        }
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "toggleExt", data: extEnabled }).catch(() => {});
+        }
 
         if (extEnabled) {
             showPage("mainPage");
             $(".navItem").removeClass("active");
             $('[data-page="mainPage"]').addClass("active");
-            chrome.runtime.sendMessage({ type: "p:getConnectedGames" }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+            if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+                chrome.runtime.sendMessage({ type: "p:getConnectedGames" }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+            }
             showToast("Auto Twitch Drops Enabled");
         } else {
             $(".navItem").removeClass("active");
@@ -263,11 +397,14 @@ $(() => {
     $(".settingsBool").on("change", (e) => {
         const settingName = e.target.id.replace("set", "");
         settings[settingName] = e.target.checked;
-        chrome.storage.local.set({ settings });
-        chrome.runtime.sendMessage({ type: "p:settingsChanged", data: { settings } }).catch(() => {});
-
-        if (settingName === "showAllGames") {
-            chrome.runtime.sendMessage({ type: "p:getConnectedGames" }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({ settings }).catch(() => {});
+        }
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:settingsChanged", data: { settings } }).catch(() => {});
+            if (settingName === "showAllGames") {
+                chrome.runtime.sendMessage({ type: "p:getConnectedGames" }).catch(() => {});
+            }
         }
         showToast("Settings updated");
     });
@@ -300,7 +437,7 @@ $(() => {
     // Select Item from Dropdown
     $(document).on("click", "#gameDropdownItems li", (e) => {
         const selectedGame = $(e.target).text().trim();
-        if (selectedGame === "No Connected Games Found" || selectedGame === "No matching games") return;
+        if (!selectedGame || selectedGame === "No Connected Games Found" || selectedGame === "No matching games") return;
 
         $(".selectedGame").text(selectedGame);
         $(".selectDropdown").addClass("hidden");
@@ -310,11 +447,13 @@ $(() => {
         $("#dropGame").text(`Finding live drop stream for ${selectedGame}...`);
         $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>${selectedGame}</span>`).addClass("activePill");
 
-        chrome.runtime.sendMessage({ type: "p:startCampaign", data: { campaign: selectedGame } }).then(() => {
-            setTimeout(() => {
-                chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
-            }, 1000);
-        }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:startCampaign", data: { campaign: selectedGame } }).then(() => {
+                setTimeout(() => {
+                    chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+                }, 1000);
+            }).catch(() => {});
+        }
 
         updateLastCheckTime();
         showToast(`Target Game: ${selectedGame}`);
@@ -334,7 +473,9 @@ $(() => {
         const btn = $("#manualClaimBtn");
         btn.find("span").text("Checking Claims...");
         btn.attr("disabled", true);
-        chrome.runtime.sendMessage({ type: "claim-drop" }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "claim-drop" }).catch(() => {});
+        }
         updateLastCheckTime();
         showToast("Checking and claiming eligible drops");
 
@@ -344,42 +485,88 @@ $(() => {
         }, 2500);
     });
 
-    // Background Message Listener
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (!message) return;
-
-        if (message.type === "p:connectedGames") {
-            populateGameDropdown(message.data);
-        } else if (message.type === "p:sendCurrentDrops") {
-            currentActiveStream = message.data ? message.data.activeStream : null;
-            updateDropProgressUI(message.data);
-            renderActiveDropsList(currentActiveStream);
-            updateLastCheckTime();
-            chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
-                if (res && res.muted !== undefined) updateAudioButtonUI(res.muted);
-            }).catch(() => {});
-        } else if (message.type === "setAutoDropGames") {
-            if (message.data) {
-                currentAutoGamesData = message.data;
-                populateAutoGamesGrid(message.data);
-            }
-        } else if (message.type === "p:statsUpdated") {
-            updateStatsUI(message.data);
-            updateLastCheckTime();
-        } else if (message.type === "p:activityUpdated") {
-            renderActivityHistory(message.data);
-        } else if (message.type === "p:rewardClaimedSound") {
-            if (settings.soundOnClaim) playClaimChime();
-        }
+    // Re-auth / connection banner dismiss
+    $("#authDismissBtn").on("click", (e) => {
+        e.stopPropagation();
+        authBannerDismissed = true;
+        $("#authStatusBanner").slideUp(180);
     });
+
+    // Background Message Listener
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+            if (!message || typeof message !== "object") return;
+
+            if (message.type === "p:connectedGames") {
+                populateGameDropdown(message.data);
+            } else if (message.type === "p:sendCurrentDrops") {
+                currentActiveStream = (message.data && message.data.activeStream && message.data.activeStream !== "none")
+                    ? message.data.activeStream
+                    : null;
+                updateDropProgressUI(message.data);
+                renderActiveDropsList(currentActiveStream);
+                updateLastCheckTime();
+                if (chrome.runtime && chrome.runtime.sendMessage) {
+                    chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
+                        if (res && res.muted !== undefined) updateAudioButtonUI(res.muted);
+                    }).catch(() => {});
+                }
+            } else if (message.type === "setAutoDropGames") {
+                if (message.data) {
+                    currentAutoGamesData = message.data;
+                    populateAutoGamesGrid(message.data);
+                }
+            } else if (message.type === "p:statsUpdated") {
+                updateStatsUI(message.data);
+                updateLastCheckTime();
+            } else if (message.type === "p:activityUpdated") {
+                renderActivityHistory(message.data);
+            } else if (message.type === "p:rewardClaimedSound") {
+                if (settings.soundOnClaim) playClaimChime();
+            } else if (message.type === "p:authStateChanged") {
+                checkAuthStatus();
+            }
+        });
+    }
 });
 
+async function checkAuthStatus() {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+    try {
+        const stored = await chrome.storage.local.get(["oauthToken", "authState"]).catch(() => ({}));
+        let hasToken = Boolean(stored && stored.oauthToken);
+        let authErr = (stored && stored.authState && stored.authState.error) ? stored.authState.error : null;
+
+        if (!hasToken && chrome.cookies && chrome.cookies.get) {
+            const cookie = await chrome.cookies.get({ url: "https://www.twitch.tv", name: "auth-token" }).catch(() => null);
+            if (cookie && cookie.value) {
+                hasToken = true;
+            }
+        }
+
+        const banner = $("#authStatusBanner");
+        if (authErr) {
+            $("#authBannerTitle").text("Twitch Connection Error");
+            $("#authBannerDesc").text(typeof authErr === "string" ? authErr : "Network or authentication issue detected while communicating with Twitch.");
+            if (!authBannerDismissed) banner.slideDown(200);
+        } else if (!hasToken) {
+            $("#authBannerTitle").text("Twitch Authentication Required");
+            $("#authBannerDesc").text("Please log in to Twitch in your browser to discover campaigns and farm drops automatically.");
+            if (!authBannerDismissed) banner.slideDown(200);
+        } else {
+            banner.slideUp(150);
+        }
+    } catch (e) {
+        console.warn("Error checking auth status:", e);
+    }
+}
+
 function updateAudioButtonUI(isMuted) {
-    tabAudioMuted = isMuted;
+    tabAudioMuted = Boolean(isMuted);
     const btn = $("#toggleAudioBtn");
     const textSpan = $("#audioBtnText");
 
-    if (isMuted) {
+    if (tabAudioMuted) {
         textSpan.text("Unmute");
         btn.attr("title", "Unmute stream tab audio to listen");
         btn.find(".audioGlyph").html('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>');
@@ -392,7 +579,9 @@ function updateAudioButtonUI(isMuted) {
 
 function playClaimChime() {
     try {
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtxClass) return;
+        const audioCtx = new AudioCtxClass();
         const osc = audioCtx.createOscillator();
         const gainNode = audioCtx.createGain();
 
@@ -412,6 +601,7 @@ function playClaimChime() {
 }
 
 function showToast(text) {
+    if (!text) return;
     let toast = $("#toastNotification");
     if (toast.length === 0) {
         toast = $('<div id="toastNotification" class="toastNotice"></div>');
@@ -424,6 +614,7 @@ function showToast(text) {
 }
 
 function showPage(pageId) {
+    if (!pageId) return;
     $(".page").hide();
     $(`#${pageId}`).show();
 }
@@ -435,12 +626,14 @@ function updateLastCheckTime() {
 }
 
 function updateStatsUI(stats) {
-    if (!stats) return;
+    if (!stats || typeof stats !== "object") return;
     if (stats.claimedDrops !== undefined) {
-        $("#totalClaimedDrops").text(stats.claimedDrops.toLocaleString());
+        const dropsNum = Number(stats.claimedDrops) || 0;
+        $("#totalClaimedDrops").text(dropsNum.toLocaleString());
     }
     if (stats.claimedPoints !== undefined) {
-        $("#totalClaimedPoints").text(stats.claimedPoints.toLocaleString());
+        const pointsNum = Number(stats.claimedPoints) || 0;
+        $("#totalClaimedPoints").text(pointsNum.toLocaleString());
     }
 }
 
@@ -448,17 +641,20 @@ function renderActivityHistory(history) {
     const list = $("#activityHistoryList");
     list.empty();
 
-    if (!history || history.length === 0) {
+    if (!Array.isArray(history) || history.length === 0) {
         list.html(`<p class="subText">No claims recorded yet. As rewards and points are claimed, they will appear here in real time.</p>`);
         return;
     }
 
     history.forEach(item => {
-        const timeAgo = formatTimeAgo(new Date(item.timestamp));
-        const hasValidImg = item.imgUrl && (item.imgUrl.startsWith("http://") || item.imgUrl.startsWith("https://"));
+        if (!item || typeof item !== "object") return;
+        const timeAgo = formatTimeAgo(item.timestamp ? new Date(item.timestamp) : new Date());
+        const hasValidImg = item.imgUrl && (typeof item.imgUrl === "string") && (item.imgUrl.startsWith("http://") || item.imgUrl.startsWith("https://"));
+        const title = item.title || "Reward Claimed";
+        const game = item.game || "Twitch";
 
         const imgHtml = hasValidImg
-            ? `<img src="${item.imgUrl}" class="activityThumb" alt="${item.title}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+            ? `<img src="${item.imgUrl}" class="activityThumb" alt="${title}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
                <div class="rewardGlyphBox miniGlyph" style="display:none;">${GIFT_SVG_ICON}</div>`
             : `<div class="rewardGlyphBox miniGlyph">${GIFT_SVG_ICON}</div>`;
 
@@ -466,8 +662,8 @@ function renderActivityHistory(history) {
             <div class="activityItem">
                 ${imgHtml}
                 <div class="activityMeta">
-                    <span class="activityTitle" title="${item.title}">${item.title}</span>
-                    <span class="activitySub">${item.game} &bull; <span class="activityTime">${timeAgo}</span></span>
+                    <span class="activityTitle" title="${title}">${title}</span>
+                    <span class="activitySub">${game} &bull; <span class="activityTime">${timeAgo}</span></span>
                 </div>
             </div>
         `);
@@ -476,7 +672,8 @@ function renderActivityHistory(history) {
 }
 
 function formatTimeAgo(date) {
-    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (!date || isNaN(date.getTime())) return "recently";
+    const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
     if (seconds < 60) return "just now";
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m ago`;
@@ -495,21 +692,27 @@ function populateGameDropdown(data) {
         data.forEach(camp => {
             if (camp && camp.game && camp.game.displayName) {
                 uniqueGames.add(camp.game.displayName);
-            } else if (typeof camp === "string") {
-                uniqueGames.add(camp);
+            } else if (camp && camp.displayName) {
+                uniqueGames.add(camp.displayName);
+            } else if (camp && camp.name) {
+                uniqueGames.add(camp.name);
+            } else if (typeof camp === "string" && camp.trim()) {
+                uniqueGames.add(camp.trim());
             }
         });
     }
 
     currentAllGames = Array.from(uniqueGames).sort((a, b) => a.localeCompare(b));
-    filterDropdownItems("");
+    const curVal = $("#gameSearchInput").val();
+    filterDropdownItems(curVal ? curVal.toLowerCase().trim() : "");
 }
 
 function filterDropdownItems(query) {
     const list = $("#gameDropdownItems");
     list.empty();
 
-    const filtered = currentAllGames.filter(game => game.toLowerCase().includes(query));
+    const q = query ? query.toLowerCase().trim() : "";
+    const filtered = currentAllGames.filter(game => game.toLowerCase().includes(q));
 
     if (filtered.length === 0) {
         list.append(`<li style="color: #adadb8; cursor: default;">No matching games</li>`);
@@ -522,12 +725,9 @@ function filterDropdownItems(query) {
 }
 
 function updateDropProgressUI(data) {
-    if (!data || !data.activeStream) return;
-    const active = data.activeStream;
-
-    if (active.campaign === "none" || !active.campaign) {
+    if (!data || !data.activeStream || data.activeStream.campaign === "none" || !data.activeStream.campaign) {
         $("#dropStatus").text("Status: Ready & Monitoring");
-        $("#dropGame").text("Game: Select a campaign or turn on Auto Games");
+        $("#dropGame").text("Game: Select a campaign below or enable Auto Games");
         $("#headerStatusPill").html('<span class="statusDot idleDot"></span><span>Idle</span>').removeClass("activePill");
         $(".progressBarInner").css({ "width": "0%", "background": "var(--twitch-purple)" });
         $(".progressPercentText").text("0%");
@@ -536,18 +736,20 @@ function updateDropProgressUI(data) {
         return;
     }
 
-    const camp = active.campaign;
-    const gameName = camp.game ? (camp.game.name || camp.game.displayName) : "Twitch Drop";
+    const active = data.activeStream;
+    const camp = active.campaign || {};
+    const gameName = camp.game ? (camp.game.name || camp.game.displayName || "Twitch Drop") : (typeof camp === "string" ? camp : "Twitch Drop");
 
     let currentRewardItem = null;
     let allItems = [];
     let allClaimed = false;
 
-    if (data.activeStream.campaigns && data.activeStream.campaigns.length > 0) {
-        const curCamp = data.activeStream.campaigns[camp.onCamp || 0];
+    if (Array.isArray(active.campaigns) && active.campaigns.length > 0) {
+        const curCampIdx = (typeof camp.onCamp === "number" && camp.onCamp >= 0) ? camp.onCamp : 0;
+        const curCamp = active.campaigns[curCampIdx] || active.campaigns[0];
         if (curCamp) {
             const items = curCamp.items || curCamp.drops || curCamp.timeBasedDrops || [];
-            if (items.length > 0) {
+            if (Array.isArray(items) && items.length > 0) {
                 allItems = [...items].sort((a, b) => {
                     const reqA = a.reqTime || a.requiredMinutesWatched || 0;
                     const reqB = b.reqTime || b.requiredMinutesWatched || 0;
@@ -557,7 +759,9 @@ function updateDropProgressUI(data) {
                 allClaimed = true;
                 allItems.forEach(i => {
                     const req = i.reqTime || i.requiredMinutesWatched || 60;
-                    const itemWatched = (i.self && i.self.currentMinutesWatched !== undefined) ? i.self.currentMinutesWatched : (curCamp.minutesWatched || 0);
+                    const itemWatched = (i.self && i.self.currentMinutesWatched !== undefined)
+                        ? i.self.currentMinutesWatched
+                        : (curCamp.minutesWatched || 0);
                     const isClaimed = Boolean((i.self && i.self.isClaimed === true) || (itemWatched >= req && req > 0));
                     i._computedClaimed = isClaimed;
                     i._computedWatched = itemWatched;
@@ -591,12 +795,13 @@ function updateDropProgressUI(data) {
         $("#streamToolbar").hide();
 
         const iconsHtml = allItems.map(item => {
-            const hasImg = item.picture && (item.picture.startsWith("http://") || item.picture.startsWith("https://"));
+            const pic = item.picture || item.imageAssetURL || item.imageURL || "";
+            const hasImg = pic && (typeof pic === "string") && (pic.startsWith("http://") || pic.startsWith("https://"));
             const title = item.name || item.title || "Reward";
             const reqMins = item.reqTime || item.requiredMinutesWatched || 60;
 
             const imgMarkup = hasImg
-                ? `<img src="${item.picture}" class="completedThumb" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                ? `<img src="${pic}" class="completedThumb" alt="${title}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
                    <div class="rewardGlyphBox miniGlyph" style="display:none;">${GIFT_SVG_ICON}</div>`
                 : `<div class="rewardGlyphBox miniGlyph">${GIFT_SVG_ICON}</div>`;
 
@@ -633,7 +838,9 @@ function updateDropProgressUI(data) {
     }
     $("#dropStatus").text(`Farming: ${gameName}`);
 
-    const curCampObj = data.activeStream.campaigns?.[camp.onCamp || 0];
+    const curCampObj = (Array.isArray(active.campaigns) && active.campaigns.length > 0)
+        ? (active.campaigns[camp.onCamp || 0] || active.campaigns[0])
+        : null;
     const itemWatched = currentRewardItem ? (currentRewardItem._computedWatched || 0) : (curCampObj?.minutesWatched || 0);
     const targetMins = currentRewardItem ? (currentRewardItem._computedReq || 60) : (curCampObj?.minutesNeeded || 60);
 
@@ -644,8 +851,8 @@ function updateDropProgressUI(data) {
     $(".progressPercentText").text(`${percent}% (${itemWatched}/${targetMins} min)`);
 
     const rewardName = currentRewardItem ? (currentRewardItem.name || currentRewardItem.title || `${gameName} Drop Reward`) : `${gameName} Drop Reward`;
-    const rewardImg = currentRewardItem ? (currentRewardItem.picture || currentRewardItem.imageAssetURL || currentRewardItem.imageURL) : "";
-    const hasValidImg = rewardImg && (rewardImg.startsWith("http://") || rewardImg.startsWith("https://"));
+    const rewardImg = currentRewardItem ? (currentRewardItem.picture || currentRewardItem.imageAssetURL || currentRewardItem.imageURL || "") : "";
+    const hasValidImg = rewardImg && (typeof rewardImg === "string") && (rewardImg.startsWith("http://") || rewardImg.startsWith("https://"));
 
     const imageHtml = hasValidImg
         ? `<img src="${rewardImg}" class="activeRewardThumb" alt="Reward" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
@@ -673,43 +880,47 @@ function renderActiveDropsList(activeStream) {
     }
 
     const camp = activeStream.campaign;
-    const gameName = camp.game ? (camp.game.name || camp.game.displayName) : "Selected Game";
-    const campaigns = activeStream.campaigns || [];
+    const gameName = camp.game ? (camp.game.name || camp.game.displayName || "Selected Game") : (typeof camp === "string" ? camp : "Selected Game");
+    const campaigns = Array.isArray(activeStream.campaigns) ? activeStream.campaigns : [];
     const allRewardsList = [];
 
     campaigns.forEach((campaignObj) => {
+        if (!campaignObj) return;
         const dropList = campaignObj.items || campaignObj.drops || campaignObj.timeBasedDrops || [];
 
-        dropList.forEach((drop, index) => {
-            const title = drop.name || drop.title || `Reward #${index + 1}`;
-            const minsNeeded = drop.reqTime || drop.minutesNeeded || drop.requiredMinutesWatched || campaignObj.minutesNeeded || 60;
-            const itemMinsWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
-                ? drop.self.currentMinutesWatched
-                : (campaignObj.minutesWatched || 0);
+        if (Array.isArray(dropList)) {
+            dropList.forEach((drop, index) => {
+                if (!drop) return;
+                const title = drop.name || drop.title || `Reward #${index + 1}`;
+                const minsNeeded = drop.reqTime || drop.minutesNeeded || drop.requiredMinutesWatched || campaignObj.minutesNeeded || 60;
+                const itemMinsWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
+                    ? drop.self.currentMinutesWatched
+                    : (campaignObj.minutesWatched || 0);
 
-            const isClaimed = Boolean((drop.self && drop.self.isClaimed === true) || (itemMinsWatched >= minsNeeded && minsNeeded > 0));
+                const isClaimed = Boolean((drop.self && drop.self.isClaimed === true) || (itemMinsWatched >= minsNeeded && minsNeeded > 0));
 
-            let imgUrl = drop.picture || drop.imageAssetURL || drop.imageURL || "";
-            if (drop.benefitEdges && drop.benefitEdges[0]) {
-                const benefit = drop.benefitEdges[0].benefit || drop.benefitEdges[0].node;
-                if (benefit && benefit.imageAssetURL) {
-                    imgUrl = benefit.imageAssetURL;
+                let imgUrl = drop.picture || drop.imageAssetURL || drop.imageURL || "";
+                if (drop.benefitEdges && Array.isArray(drop.benefitEdges) && drop.benefitEdges[0]) {
+                    const benefit = drop.benefitEdges[0].benefit || drop.benefitEdges[0].node;
+                    if (benefit && benefit.imageAssetURL) {
+                        imgUrl = benefit.imageAssetURL;
+                    }
                 }
-            }
 
-            allRewardsList.push({
-                title,
-                minsNeeded,
-                minsWatched: itemMinsWatched,
-                isClaimed,
-                imgUrl
+                allRewardsList.push({
+                    title,
+                    minsNeeded,
+                    minsWatched: itemMinsWatched,
+                    isClaimed,
+                    imgUrl
+                });
             });
-        });
+        }
     });
 
     if (allRewardsList.length === 0) {
         container.html(`
-            <div class="emptyDropsCard" style="padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; text-align: center;">
+            <div class="emptyDropsCard" style="padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 8px; text-align: center;">
                 <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 8px;">
                     <div class="rewardGlyphBox miniGlyph" style="width: 28px; height: 28px; min-width: 28px;">${GIFT_SVG_ICON}</div>
                     <strong style="color: var(--text-primary); font-size: 14px;">${gameName} Drops Active</strong>
@@ -723,7 +934,9 @@ function renderActiveDropsList(activeStream) {
         `);
 
         $("#dropsPageSyncBtn").on("click", () => {
-            chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+            if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+                chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+            }
             showToast("Syncing drops with Twitch...");
         });
         return;
@@ -745,7 +958,7 @@ function renderActiveDropsList(activeStream) {
             statusText = `${pct}% (${reward.minsWatched}/${reward.minsNeeded}m)`;
         }
 
-        const hasValidImg = reward.imgUrl && (reward.imgUrl.startsWith("http://") || reward.imgUrl.startsWith("https://"));
+        const hasValidImg = reward.imgUrl && (typeof reward.imgUrl === "string") && (reward.imgUrl.startsWith("http://") || reward.imgUrl.startsWith("https://"));
         const imgMarkup = hasValidImg
             ? `<img src="${reward.imgUrl}" class="rewardImage" alt="Reward" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
                <div class="rewardGlyphBox" style="display:none;">${GIFT_SVG_ICON}</div>`
@@ -767,21 +980,26 @@ function renderActiveDropsList(activeStream) {
 }
 
 function updateAutoGamesBadge(enabledCount, totalCount) {
-    $("#autoGameCountBadge").text(`${enabledCount} / ${totalCount} Active Queue`);
+    const eCount = Number(enabledCount) || 0;
+    const tCount = Number(totalCount) || 0;
+    $("#autoGameCountBadge").text(`${eCount} / ${tCount} Active Queue`);
 }
 
 function populateAutoGamesGrid(data) {
     const grid = $("#autoGamesList");
     grid.empty();
 
-    let allGames = (data && data.allConnected && data.allConnected.length > 0)
+    let allGames = (data && Array.isArray(data.allConnected) && data.allConnected.length > 0)
         ? data.allConnected
         : POPULAR_DROP_GAMES;
 
     allGames = Array.from(new Set([...allGames, ...POPULAR_DROP_GAMES]));
     currentAutoGamesData.allConnected = allGames;
 
-    const enabledSet = new Set((data && data.enabled) ? data.enabled : currentAutoGamesData.enabled);
+    const enabledList = (data && Array.isArray(data.enabled))
+        ? data.enabled
+        : (Array.isArray(currentAutoGamesData.enabled) ? currentAutoGamesData.enabled : []);
+    const enabledSet = new Set(enabledList);
     const sortedGames = [...allGames].sort((a, b) => a.localeCompare(b));
 
     updateAutoGamesBadge(enabledSet.size, sortedGames.length);
@@ -807,7 +1025,7 @@ function populateAutoGamesGrid(data) {
         grid.append(card);
     });
 
-    $(".autoGameToggle").on("change", (e) => {
+    $(".autoGameToggle").off("change").on("change", (e) => {
         const game = $(e.target).data("game");
         const checked = $(e.target).prop("checked");
         const card = $(e.target).closest(".autoGameCard");
@@ -820,7 +1038,9 @@ function populateAutoGamesGrid(data) {
             currentAutoGamesData.enabled = currentAutoGamesData.enabled.filter(g => g !== game);
         }
 
-        chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [game, checked] }).catch(() => {});
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [game, checked] }).catch(() => {});
+        }
 
         const newCheckedCount = $(".autoGameToggle:checked").length;
         updateAutoGamesBadge(newCheckedCount, sortedGames.length);
@@ -830,10 +1050,11 @@ function populateAutoGamesGrid(data) {
 }
 
 function filterAutoGamesGrid(query) {
+    const q = query ? query.toLowerCase().trim() : "";
     $(".autoGameCard").each((i, el) => {
         const card = $(el);
         const name = card.data("gamename") || "";
-        if (name.includes(query)) {
+        if (name.includes(q)) {
             card.removeClass("hidden");
         } else {
             card.addClass("hidden");

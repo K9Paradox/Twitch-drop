@@ -1,5 +1,7 @@
 // Auto Twitch Drops Pro - Content Script (inject.js)
 
+const injectIntervals = [];
+
 chrome.storage.local.get(["exEnabled"]).then((val) => {
     const isEnabled = val.exEnabled !== undefined ? val.exEnabled : true;
     if (isEnabled) {
@@ -31,13 +33,28 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
             }
         });
 
+        // Listen for storage changes and forward settings to in-page scripts
+        if (chrome.storage?.onChanged) {
+            chrome.storage.onChanged.addListener((changes, area) => {
+                if (area === "local" && changes.settings && changes.settings.newValue) {
+                    window.postMessage({
+                        autoTwitchDrops: {
+                            type: "settingsChanged",
+                            settings: changes.settings.newValue
+                        }
+                    }, "*");
+                }
+            });
+        }
+
         // Add Tab Title Prefix indicator
         function updateTabTitleIndicator() {
             if (document.title && !document.title.startsWith("[⚡ ATD Pro]")) {
                 document.title = `[⚡ ATD Pro] ${document.title}`;
             }
         }
-        setInterval(updateTabTitleIndicator, 3000);
+        const titleInterval = setInterval(updateTabTitleIndicator, 3000);
+        injectIntervals.push(titleInterval);
         setTimeout(updateTabTitleIndicator, 1000);
 
         // Inject in-page floating glassmorphic badge
@@ -89,6 +106,11 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
         }
 
         injectScript("onPage.js");
+
+        window.addEventListener("beforeunload", () => {
+            injectIntervals.forEach(id => clearInterval(id));
+            injectIntervals.length = 0;
+        });
     }
 }).catch(() => {});
 

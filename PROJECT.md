@@ -53,18 +53,18 @@ Auto Twitch Drops Pro is a Manifest V3 Chrome Extension designed for resilient b
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|---|---|---|---|
-| MT | E2E Testing Track | Mock contract test harness, test runner, fixtures for all GraphQL/WebSocket payloads (Tiers 1-4) | none | IN_PROGRESS |
-| M1 | Twitch GraphQL & WebSocket Automation Hardening | Hardening `twitchApi.js`, `onPage.js` WS/PubSub proxying, `json.data` / `errors` unwrapping, bonus points deduplication | none | PLANNED |
-| M2 | Stream Player Lifecycle & Resilient Worker Automation | Service worker hydration mutex, token window storage persistence, stall watchdog, offline failover, non-intrusive background tabs | M1 contracts | PLANNED |
-| M3 | Popup UI/UX Perfection & Reactive State Sync | `chrome.storage.onChanged` reactivity, auth/error banners, micro-animations, dynamic settings sync, asset cleanup | M1, M2 state | PLANNED |
+| MT | E2E Testing Track | Mock contract test harness, test runner, fixtures for all GraphQL/WebSocket payloads (Tiers 1-4) | none | DONE |
+| M1 | Twitch GraphQL & WebSocket Automation Hardening | Hardening `twitchApi.js`, `onPage.js` WS/PubSub proxying, `json.data` / `errors` unwrapping, bonus points deduplication | none | DONE |
+| M2 | Stream Player Lifecycle & Resilient Worker Automation | Service worker hydration mutex, token window storage persistence, stall watchdog, offline failover, non-intrusive background tabs | M1 | IN_PROGRESS |
+| M3 | Popup UI/UX Perfection & Reactive State Sync | `chrome.storage.onChanged` reactivity, auth/error banners, micro-animations, dynamic settings sync, asset cleanup | M1, M2 | PLANNED |
 | M4 | Final Integration & 100% Verification (Tiers 1-5) | Pass 100% of E2E test suite (Tiers 1-4) + Tier 5 Adversarial Coverage Hardening with Challenger loop | MT, M1, M2, M3 | PLANNED |
 
 ## Interface Contracts
 ### `background/twitchApi.js` ↔ Consumers (`background.js`, tests)
 - `post(body, isBatched)`: Returns `{ data: Object }` (or `Array<{ data: Object }>`) or throws `TwitchApiError`.
 - `postAuthorized(body, isBatched)`: Attaches OAuth + Client-Integrity + Session headers. Returns unwrapped `data` object (or batched array). Throws on `{ errors: [...] }` or HTTP error.
-- `claimDropReward(dropInstanceID)`: Returns `{ status: "SUCCESS" | "ELIGIBLE_FOR_CLAIM" | string, dropInstanceID: string }`. Throws on failure.
-- `claimChannelPoints(channelID, claimID)`: Returns `{ claimID: string, status: string }`. Deduplicated before dispatch.
+- `claimDropReward(dropInstanceID)`: Returns `{ status: "SUCCESS" | "ELIGIBLE_FOR_CLAIM" | string, dropInstanceID: string, success: boolean }`. Throws on failure.
+- `claimChannelPoints(channelID, claimID)`: Returns `{ claimID: string, status: string, success: boolean }`. Deduplicated before dispatch.
 - `getChannelWithDrops(gameName, campaignId, slug, skippedLogins)`: Returns `{ channelLogin: string, stream: Object }` or `null`.
 
 ### Background ↔ Extension Popup (`main.js`)
@@ -92,7 +92,11 @@ Auto Twitch Drops Pro is a Manifest V3 Chrome Extension designed for resilient b
 │   └── img/                   # Icons & artwork
 ├── waiting.html               # Stream waiting placeholder tab
 └── test/                      # E2E & Mock Contract Test Suite (Test Track)
-    ├── harness/               # Mock server & test runner
     ├── fixtures/              # GraphQL & WebSocket response fixtures
-    └── tests/                 # Tier 1-4 contract & behavioral tests
+    ├── harness/               # Mock server, chrome mocks & test sandbox
+    ├── tier1_features/        # Feature isolation tests (70 tests)
+    ├── tier2_boundaries/      # Boundary & error tests (70 tests)
+    ├── tier3_combinations/    # Cross-feature interaction tests (14 tests)
+    ├── tier4_scenarios/       # Full workload scenario tests (5 tests)
+    └── run-all-tests.js       # Unified runner
 ```

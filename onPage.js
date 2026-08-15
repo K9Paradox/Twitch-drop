@@ -1,12 +1,30 @@
 // Auto Twitch Drops Pro - Page-level Interceptor & Stream Automation Engine
 
 if (!window._originalFetch) {
+    const activeIntervals = [];
+
     // 1. Set Low-bandwidth 160p preset and safe player volume in localStorage
-    try {
-        localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
-        localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
-        localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
-    } catch (e) {}
+    function applyLowBandwidthPresets(lowQuality = true) {
+        try {
+            if (lowQuality) {
+                localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
+            }
+            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
+            localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
+        } catch (e) {}
+    }
+    applyLowBandwidthPresets(true);
+
+    // Listen for settings changes relayed from content script
+    window.addEventListener("message", (e) => {
+        if (!e.data || !e.data.autoTwitchDrops) return;
+        const dropData = e.data.autoTwitchDrops;
+        if (dropData.type === "settingsChanged" && dropData.settings) {
+            if (dropData.settings.lowQualityMode !== undefined) {
+                applyLowBandwidthPresets(dropData.settings.lowQualityMode);
+            }
+        }
+    });
 
     // 2. Safely override Page Visibility API so Twitch never pauses background/minimized streams
     try {
@@ -103,6 +121,20 @@ if (!window._originalFetch) {
     }
 
     /**
+     * Fallback DOM Low-Bandwidth Quality Enforcement
+     */
+    function enforcePlayerQualityDOM() {
+        try {
+            const qualityItems = document.querySelectorAll('[data-a-target="player-settings-menu-item"]');
+            qualityItems.forEach(item => {
+                if (item && item.textContent && item.textContent.includes("160p") && item.offsetParent !== null) {
+                    triggerSyntheticClick(item);
+                }
+            });
+        } catch (e) {}
+    }
+
+    /**
      * Auto Claim Channel Points Bonus Chests in Chat
      */
     function autoClaimPointsChests() {
@@ -134,15 +166,25 @@ if (!window._originalFetch) {
     }
 
     // Run throttled watchdog every 5 seconds
-    setInterval(() => {
+    const watchdogInterval = setInterval(() => {
         safePlaybackWatchdog();
         autoClaimPointsChests();
+        enforcePlayerQualityDOM();
     }, 5000);
+    activeIntervals.push(watchdogInterval);
 
     setTimeout(() => {
         safePlaybackWatchdog();
         autoClaimPointsChests();
+        enforcePlayerQualityDOM();
     }, 1500);
+
+    // Garbage collection on unload
+    window.addEventListener('beforeunload', () => {
+        activeIntervals.forEach(id => clearInterval(id));
+        activeIntervals.length = 0;
+        recentClaims.clear();
+    });
 
     // Network Interceptor (GraphQL & Hermes/PubSub WebSocket)
     window._originalFetch = window._originalFetch || fetch;

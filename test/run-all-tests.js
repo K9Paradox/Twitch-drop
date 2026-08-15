@@ -43,12 +43,14 @@ async function main() {
     const tier2Files = getTestFiles("tier2_boundaries");
     const tier3Files = getTestFiles("tier3_combinations");
     const tier4Files = getTestFiles("tier4_scenarios");
+    const tier5Files = getTestFiles("tier5_adversarial");
 
     const allFiles = [
         ...tier1Files,
         ...tier2Files,
         ...tier3Files,
-        ...tier4Files
+        ...tier4Files,
+        ...tier5Files
     ];
 
     console.log(`${COLORS.blue}Discovered test suites:${COLORS.reset}`);
@@ -56,6 +58,9 @@ async function main() {
     console.log(`  ${COLORS.white}• Tier 2 (Boundary & Errors):${COLORS.reset}      ${tier2Files.length} files (${tier2Files.length * 5} tests)`);
     console.log(`  ${COLORS.white}• Tier 3 (Cross-Combinations):${COLORS.reset}     ${tier3Files.length} files (14 tests)`);
     console.log(`  ${COLORS.white}• Tier 4 (Workload Scenarios):${COLORS.reset}     ${tier4Files.length} files (5 tests)`);
+    if (tier5Files.length > 0) {
+        console.log(`  ${COLORS.white}• Tier 5 (Adversarial Coverage):${COLORS.reset}   ${tier5Files.length} files`);
+    }
     console.log(`  ${COLORS.dim}Total test files: ${allFiles.length}${COLORS.reset}\n`);
 
     const startTime = Date.now();

@@ -75,6 +75,7 @@ let gettingStreamObj = {
 };
 let autoGetTokenWindow = 0;
 let isHydrated = false;
+let hydrationPromise = null;
 
 // --- State Persistence & Hydration ---
 
@@ -87,6 +88,7 @@ async function saveState() {
             settings,
             autoDropGames,
             listOfConnected,
+            autoGetTokenWindow,
             activityHistory: activityHistory.slice(0, 50)
         });
     } catch (e) {
@@ -96,44 +98,56 @@ async function saveState() {
 
 async function hydrateState() {
     if (isHydrated) return;
-    try {
-        const val = await chrome.storage.local.get([
-            "exEnabled",
-            "settings",
-            "autoDropGames",
-            "priorityStreams",
-            "extStats",
-            "listOfConnected",
-            "activeStream",
-            "curWindow",
-            "activityHistory",
-            "oauthToken",
-            "deviceId",
-            "userId",
-            "uuid",
-            "twitchInteg"
-        ]);
-
-        extEnabled = val.exEnabled !== undefined ? val.exEnabled : true;
-        if (val.settings) settings = { ...settings, ...val.settings };
-        if (val.autoDropGames) autoDropGames = val.autoDropGames;
-        if (val.priorityStreams) priorityStreams = val.priorityStreams;
-        if (val.listOfConnected && val.listOfConnected.length > 0) {
-            listOfConnected = Array.from(new Set([...val.listOfConnected, ...POPULAR_DROP_GAMES]));
-        }
-        if (val.activityHistory) activityHistory = val.activityHistory;
-        if (val.extStats) extStats = { ...extStats, ...val.extStats };
-
-        if (val.curWindow) curWindow = val.curWindow;
-        if (val.activeStream && val.activeStream.campaign && val.activeStream.campaign !== "none") {
-            activeStream = val.activeStream;
-        }
-
-        await fetchTwitchCookiesAndInitClient();
-        isHydrated = true;
-    } catch (e) {
-        console.warn("Error hydrating state:", e);
+    if (hydrationPromise) {
+        return await hydrationPromise;
     }
+
+    hydrationPromise = (async () => {
+        try {
+            const val = await chrome.storage.local.get([
+                "exEnabled",
+                "settings",
+                "autoDropGames",
+                "priorityStreams",
+                "extStats",
+                "listOfConnected",
+                "activeStream",
+                "curWindow",
+                "autoGetTokenWindow",
+                "activityHistory",
+                "oauthToken",
+                "deviceId",
+                "userId",
+                "uuid",
+                "twitchInteg"
+            ]);
+
+            extEnabled = val.exEnabled !== undefined ? val.exEnabled : true;
+            if (val.settings) settings = { ...settings, ...val.settings };
+            if (val.autoDropGames) autoDropGames = val.autoDropGames;
+            if (val.priorityStreams) priorityStreams = val.priorityStreams;
+            if (val.listOfConnected && val.listOfConnected.length > 0) {
+                listOfConnected = Array.from(new Set([...val.listOfConnected, ...POPULAR_DROP_GAMES]));
+            }
+            if (val.activityHistory) activityHistory = val.activityHistory;
+            if (val.extStats) extStats = { ...extStats, ...val.extStats };
+
+            if (val.curWindow) curWindow = val.curWindow;
+            if (val.autoGetTokenWindow !== undefined) autoGetTokenWindow = val.autoGetTokenWindow;
+            if (val.activeStream && val.activeStream.campaign && val.activeStream.campaign !== "none") {
+                activeStream = val.activeStream;
+            }
+
+            await fetchTwitchCookiesAndInitClient();
+            isHydrated = true;
+        } catch (e) {
+            console.warn("Error hydrating state:", e);
+        } finally {
+            hydrationPromise = null;
+        }
+    })();
+
+    return await hydrationPromise;
 }
 
 function notifyUser(title, message) {
@@ -383,6 +397,31 @@ async function handleWatchdogTick() {
     if (activeStream && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaign.status === "watching") {
         if (!client) await fetchTwitchCookiesAndInitClient();
         if (client) {
+            // 1. Offline Streamer Failover & Dynamic Category Rotation
+            if (activeStream.campaign.curWatching) {
+                const streamStatus = await client.getStream(activeStream.campaign.curWatching).catch(() => null);
+                const meta = await client.getStreamMetadata(activeStream.campaign.curWatching).catch(() => null);
+
+                const activeGameLower = (activeStream.campaign.game?.name || "").toLowerCase();
+                const streamerGameLower = (meta?.game || "").toLowerCase();
+
+                const isOffline = streamStatus === null;
+                const switchedGame = !isOffline && streamerGameLower && activeGameLower &&
+                    !streamerGameLower.includes(activeGameLower) &&
+                    !activeGameLower.includes(streamerGameLower);
+
+                if (isOffline || switchedGame) {
+                    console.log(`Streamer ${activeStream.campaign.curWatching} is ${isOffline ? 'offline' : 'playing ' + meta?.game}. Triggering failover.`);
+                    activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                    if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
+                        activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                    }
+                    await runCampaign(true);
+                    return;
+                }
+            }
+
+            // 2. Inventory Sync & Drop Claiming
             const inventory = await client.getInventory().catch(() => null);
             if (inventory) {
                 const isDone = syncCampaignProgressWithInventory(inventory);
@@ -407,6 +446,49 @@ async function handleWatchdogTick() {
                         chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
                         await checkForDrops();
                         return;
+                    }
+                }
+
+                // 3. Stream Stall & Auto-Recovery Watchdog
+                if (settings.autoRefresh !== false && activeStream.campaign) {
+                    const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
+                    const currentMinutes = curCamp ? (curCamp.minutesWatched || 0) : 0;
+                    const now = Date.now();
+
+                    if (activeStream.campaign.lastMinutesWatched === undefined || activeStream.campaign.lastProgressTimestamp === undefined) {
+                        activeStream.campaign.lastMinutesWatched = currentMinutes;
+                        activeStream.campaign.lastProgressTimestamp = now;
+                        activeStream.campaign.stallCount = 0;
+                    } else if (currentMinutes > activeStream.campaign.lastMinutesWatched) {
+                        // Progress successfully advanced! Reset stall timer & counter
+                        activeStream.campaign.lastMinutesWatched = currentMinutes;
+                        activeStream.campaign.lastProgressTimestamp = now;
+                        activeStream.campaign.stallCount = 0;
+                    } else {
+                        // Progress has stalled
+                        const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
+                        const stallThresholdMs = 2 * 60 * 1000; // 2-minute stall threshold
+
+                        if (elapsedMs >= stallThresholdMs) {
+                            activeStream.campaign.stallCount = (activeStream.campaign.stallCount || 0) + 1;
+                            activeStream.campaign.lastProgressTimestamp = now;
+
+                            if (activeStream.campaign.stallCount === 1) {
+                                console.log(`Stream stall detected for ${activeStream.campaign.curWatching} (${elapsedMs}ms). Reloading stream tab.`);
+                                if (curWindow.id !== 0) {
+                                    chrome.tabs.reload(curWindow.id).catch(() => {});
+                                }
+                            } else {
+                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching}. Rotating to next channel.`);
+                                activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                                if (activeStream.campaign.curWatching && !activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
+                                    activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                                }
+                                activeStream.campaign.stallCount = 0;
+                                await runCampaign(true);
+                                return;
+                            }
+                        }
                     }
                 }
 
@@ -476,6 +558,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 if (autoGetTokenWindow !== 0) {
                     chrome.windows.remove(autoGetTokenWindow).catch(() => {});
                     autoGetTokenWindow = 0;
+                    await chrome.storage.local.set({ autoGetTokenWindow: 0 }).catch(() => {});
                 }
                 sendResponse({ success: true });
                 break;
@@ -795,6 +878,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case "p:settingsChanged":
                 settings = { ...settings, ...message.data.settings };
                 await saveState();
+                if (curWindow.id !== 0) {
+                    if (settings.autoMute) {
+                        chrome.tabs.update(curWindow.id, { muted: true }).catch(() => {});
+                    } else if (settings.autoMute === false) {
+                        chrome.tabs.update(curWindow.id, { muted: false }).catch(() => {});
+                    }
+                }
                 sendResponse({ success: true, settings });
                 break;
 
@@ -851,13 +941,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener(async (tabId) => {
     await hydrateState();
     if (activeStream.campaign !== "none" && extEnabled) {
-        if (tabId === curWindow.id && (!activeStream.campaign || !activeStream.campaign.reOpening)) {
+        if (tabId === curWindow.id) {
             curWindow.id = 0;
             curWindow.type = "none";
             await saveState();
+
+            if (!activeStream.campaign || activeStream.campaign.reOpening || activeStream.campaign.isCompleted) {
+                return;
+            }
+
+            activeStream.campaign.reopenAttempts = (activeStream.campaign.reopenAttempts || 0) + 1;
+            if (activeStream.campaign.reopenAttempts > 5) {
+                console.warn("Too many tab restart attempts, pausing campaign");
+                activeStream.campaign.status = "paused";
+                await saveState();
+                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                return;
+            }
+
             setTimeout(async () => {
                 await hydrateState();
-                if (activeStream.campaign !== "none" && !activeStream.campaign.isCompleted) {
+                if (activeStream.campaign !== "none" && !activeStream.campaign.isCompleted && extEnabled && curWindow.id === 0) {
                     await runCampaign();
                 }
             }, 3000);
@@ -936,26 +1040,31 @@ async function runCampaign(forceNextStreamer = false) {
     let streamUrl = "";
     if (targetStreamer) {
         activeStream.campaign.curWatching = targetStreamer;
-        streamUrl = `https://www.twitch.tv/${targetStreamer}`;
+        streamUrl = `https://www.twitch.tv/${targetStreamer}#atd-managed=1`;
     } else {
         const gameSlug = activeStream.campaign.slug || activeStream.campaign.game.name.toLowerCase().replace(/[^a-z0-9]/g, "-");
         activeStream.campaign.curWatching = "";
-        streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops`;
+        streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops#atd-managed=1`;
     }
+
+    // Reset progress tracking & stall counts for new/re-targeted streamer
+    activeStream.campaign.lastMinutesWatched = curCamp.minutesWatched || 0;
+    activeStream.campaign.lastProgressTimestamp = Date.now();
+    activeStream.campaign.stallCount = 0;
 
     if (curWindow.id !== 0) {
         try {
             const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
             if (tab) {
-                await chrome.tabs.update(curWindow.id, { url: streamUrl });
+                await chrome.tabs.update(curWindow.id, { url: streamUrl, active: false });
             } else {
-                await windowManager("open", { active: true, url: streamUrl });
+                await windowManager("open", { active: false, url: streamUrl });
             }
         } catch (e) {
-            await windowManager("open", { active: true, url: streamUrl });
+            await windowManager("open", { active: false, url: streamUrl });
         }
     } else {
-        await windowManager("open", { active: true, url: streamUrl });
+        await windowManager("open", { active: false, url: streamUrl });
     }
 
     if (settings.autoMute && curWindow.id !== 0) {
@@ -1005,7 +1114,11 @@ async function createCampaign(game) {
         status: "starting",
         reOpening: false,
         isCompleted: false,
-        skippedStreamers: []
+        skippedStreamers: [],
+        lastMinutesWatched: 0,
+        lastProgressTimestamp: Date.now(),
+        stallCount: 0,
+        reopenAttempts: 0
     };
     activeStream.campaigns = [];
 
@@ -1254,29 +1367,49 @@ async function checkClaimDrop() {
 function autoGetToken() {
     if (settings.autoGetToken === true && autoGetTokenWindow === 0) {
         if (!client || !client.integrity || client.integrity.expiration - 960000 < Date.now()) {
-            chrome.windows.create({ focused: false, type: "popup", url: "https://www.twitch.tv/drops/inventory/" }).then((window) => {
-                if (window) autoGetTokenWindow = window.id;
+            chrome.windows.create({ focused: false, type: "popup", url: "https://www.twitch.tv/drops/inventory/" }).then(async (window) => {
+                if (window) {
+                    autoGetTokenWindow = window.id;
+                    await chrome.storage.local.set({ autoGetTokenWindow });
+                }
             }).catch(() => {});
         }
     }
 }
 
-async function windowManager(func, data) {
+if (typeof chrome !== "undefined" && chrome.windows?.onRemoved?.addListener) {
+    chrome.windows.onRemoved.addListener(async (windowId) => {
+        if (windowId === autoGetTokenWindow) {
+            autoGetTokenWindow = 0;
+            await chrome.storage.local.set({ autoGetTokenWindow: 0 }).catch(() => {});
+        }
+    });
+}
+
+async function windowManager(func, data = {}) {
     if (func === "open") {
+        const tabOptions = {
+            active: false,
+            ...data
+        };
+        if (tabOptions.url && !tabOptions.url.includes("#atd-managed=1")) {
+            tabOptions.url = tabOptions.url.includes("#") ? tabOptions.url : `${tabOptions.url}#atd-managed=1`;
+        }
+
         if (curWindow.id === 0) {
-            const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-            if (existingTabs && existingTabs.length > 0) {
-                const tab = existingTabs[0];
+            const managedTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*#atd-managed=1*" }).catch(() => []);
+            if (managedTabs && managedTabs.length > 0) {
+                const tab = managedTabs[0];
                 curWindow.id = tab.id;
                 curWindow.type = "tab";
                 await saveState();
-                if (data.url && tab.url !== data.url) {
-                    await chrome.tabs.update(tab.id, { url: data.url }).catch(() => {});
+                if (tabOptions.url && tab.url !== tabOptions.url) {
+                    await chrome.tabs.update(tab.id, { url: tabOptions.url, active: false }).catch(() => {});
                 }
                 return tab;
             }
 
-            const tab = await chrome.tabs.create(data);
+            const tab = await chrome.tabs.create(tabOptions);
             curWindow.id = tab.id;
             curWindow.type = "tab";
             await saveState();
@@ -1284,20 +1417,20 @@ async function windowManager(func, data) {
         } else {
             let tab = await chrome.tabs.get(curWindow.id).catch(() => null);
             if (!tab) {
-                const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-                if (existingTabs && existingTabs.length > 0) {
-                    tab = existingTabs[0];
+                const managedTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*#atd-managed=1*" }).catch(() => []);
+                if (managedTabs && managedTabs.length > 0) {
+                    tab = managedTabs[0];
                     curWindow.id = tab.id;
                     await saveState();
                 } else {
-                    tab = await chrome.tabs.create(data);
+                    tab = await chrome.tabs.create(tabOptions);
                     curWindow.id = tab.id;
                     await saveState();
                     return tab;
                 }
             }
-            if (data.url && data.url !== tab.url) {
-                await chrome.tabs.update(curWindow.id, { url: data.url }).catch(() => {});
+            if (tabOptions.url && tabOptions.url !== tab.url) {
+                await chrome.tabs.update(curWindow.id, { url: tabOptions.url, active: false }).catch(() => {});
             }
             return tab;
         }
