@@ -1,10 +1,12 @@
+// Auto Twitch Drops Pro - Page-level Interceptor & Autoplay Unmute Bypass
+
 if (!window._originalFetch) {
-    // Set Twitch player volume to unmuted in localStorage so Twitch's internal tracking JS counts 100% of watch time toward drops
+    // Force Twitch player volume in localStorage to unmuted and active
     try {
         localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
     } catch (e) {}
 
-    // Safely override Page Visibility API without throwing "Cannot redefine property" errors
+    // Safely override Page Visibility API so Twitch never pauses background/minimized streams
     try {
         const protoHidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
         if (protoHidden && protoHidden.configurable) {
@@ -47,9 +49,41 @@ if (!window._originalFetch) {
         }, true);
     } catch (e) {}
 
-    // Keep HTML5 video playing and UNMUTED internally so Twitch drop progress never pauses (Chrome tab-muting provides complete silence)
-    setInterval(() => {
+    /**
+     * Automatic "Click to Unmute" Overlay & Autoplay Bypass
+     * Automatically simulates clicks on Twitch's unmute overlay and player controls
+     */
+    function triggerSyntheticClick(element) {
+        if (!element) return;
         try {
+            const mouseOpts = { bubbles: true, cancelable: true, view: window };
+            element.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+            element.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+            element.dispatchEvent(new MouseEvent('click', mouseOpts));
+            if (typeof element.click === 'function') element.click();
+        } catch (err) {}
+    }
+
+    function autoBypassUnmuteOverlay() {
+        try {
+            // 1. Twitch "Click to Unmute" overlays
+            const unmuteSelectors = [
+                '[data-a-target="player-overlay-click-to-unmute"]',
+                '[data-a-target="player-unmute-button"]',
+                'button[data-a-target="player-mute-unmute-button"][aria-label*="Unmute"]',
+                'button[data-a-target="player-mute-unmute-button"][data-a-label*="Unmute"]',
+                '.player-overlay-background button',
+                '[data-test-selector="unmute-button"]'
+            ];
+
+            for (const selector of unmuteSelectors) {
+                const btn = document.querySelector(selector);
+                if (btn && btn.offsetParent !== null) {
+                    triggerSyntheticClick(btn);
+                }
+            }
+
+            // 2. Direct HTML5 Video Player Unmuting & Playback Watchdog
             const videos = document.querySelectorAll('video');
             videos.forEach(v => {
                 if (v) {
@@ -60,13 +94,35 @@ if (!window._originalFetch) {
                         v.volume = 0.5;
                     }
                     if (v.paused) {
-                        v.play().catch(() => {});
+                        v.play().catch(() => {
+                            // If browser blocks unmuted play, briefly mute to start stream and immediately unmute
+                            v.muted = true;
+                            v.play().then(() => {
+                                setTimeout(() => { v.muted = false; }, 500);
+                            }).catch(() => {});
+                        });
                     }
                 }
             });
         } catch (e) {}
-    }, 2000);
+    }
 
+    // Run immediately and continuously every 1.5s
+    setInterval(autoBypassUnmuteOverlay, 1500);
+
+    // Watch DOM mutations to instantly catch and click Twitch unmute overlays when injected
+    const unmuteObserver = new MutationObserver(() => {
+        autoBypassUnmuteOverlay();
+    });
+
+    try {
+        unmuteObserver.observe(document.documentElement || document.body, {
+            childList: true,
+            subtree: true
+        });
+    } catch (e) {}
+
+    // Network Interceptors
     window._originalFetch = window._originalFetch || fetch;
     window.fetch = new Proxy(fetch, {
         apply: (f, s, r) => {
@@ -116,68 +172,34 @@ if (!window._originalFetch) {
             socket.addEventListener("message", res => {
                 try {
                     if (res && res.origin === "wss://hermes.twitch.tv") {
-                        let data = JSON.parse(res.data);
-                        if (data && data.type === "notification" && data.notification && data.notification.type === "pubsub") {
-                            let mes = JSON.parse(data.notification.pubsub);
-                            if (mes && mes.type === "points-earned" && mes.data && mes.data.point_gain) {
+                        const data = JSON.parse(res.data);
+                        if (data.type === "MESSAGE") {
+                            const parsed = JSON.parse(data.data.message);
+                            if (parsed.type === "points-earned") {
                                 window.postMessage({
                                     autoTwitchDrops: {
                                         type: "points-earned",
-                                        points: mes.data.point_gain.total_points || 50
+                                        points: parsed.data.point_gain.total_points
                                     }
                                 }, "*");
-                            }
-                            if (mes && mes.type === "claim-available" && mes.data && mes.data.claim) {
+                            } else if (parsed.type === "claim-available") {
                                 window.postMessage({
                                     autoTwitchDrops: {
                                         type: "claim-points",
-                                        claimID: mes.data.claim.id,
-                                        channelID: mes.data.claim.channel_id
+                                        claimID: parsed.data.claim.id,
+                                        channelID: parsed.data.claim.channel_id
                                     }
                                 }, "*");
-                            }
-                            if (mes && mes.type === "drop-claim") {
+                            } else if (parsed.type === "drop-progress") {
                                 window.postMessage({
                                     autoTwitchDrops: {
-                                        type: "claim-drop"
+                                        type: "checkDrop"
                                     }
                                 }, "*");
-                            }
-                            if (mes && mes.type === "drop-progress" && mes.data) {
-                                if (mes.data.current_progress_min === mes.data.required_progress_min) {
-                                    window.postMessage({
-                                        autoTwitchDrops: {
-                                            type: "checkDrop"
-                                        }
-                                    }, "*");
-                                }
-                            }
-                        }
-                    } else if (res && res.target && res.target.url === "wss://pubsub-edge.twitch.tv/v1") {
-                        let data = JSON.parse(res.data);
-                        if (data && data.type === "MESSAGE" && data.data && data.data.topic && data.data.topic.match(/^user-drop-events/)) {
-                            let mes = JSON.parse(data.data.message);
-                            if (mes && mes.type === "drop-claim") {
-                                window.postMessage({
-                                    autoTwitchDrops: {
-                                        type: "claim-drop"
-                                    }
-                                }, "*");
-                            }
-                            if (mes && mes.type === "drop-progress" && mes.data) {
-                                if (mes.data.current_progress_min === mes.data.required_progress_min) {
-                                    window.postMessage({
-                                        autoTwitchDrops: {
-                                            type: "checkDrop"
-                                        }
-                                    }, "*");
-                                }
                             }
                         }
                     }
-                } catch (err) {
-                    console.warn("WebSocket proxy error:", err);
-                }
+                } catch (e) {}
             });
             return socket;
         }
