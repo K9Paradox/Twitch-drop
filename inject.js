@@ -19,6 +19,9 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
                 if (dropData.type === "points-earned") {
                     chrome.runtime.sendMessage({ type: "points-earned", data: dropData }).catch(() => {});
                 }
+                if (dropData.type === "sessionContext") {
+                    chrome.runtime.sendMessage({ type: "sessionContext", data: dropData.session }).catch(() => {});
+                }
             } else if (e.data.autoTwitchBrowserExtension && e.data.autoTwitchBrowserExtension.integrity) {
                 chrome.runtime.sendMessage({ type: "sendInteg", data: e.data.autoTwitchBrowserExtension.integrity }).catch(() => {});
             }

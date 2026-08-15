@@ -70,7 +70,6 @@ if (!window._originalFetch) {
      */
     function autoBypassUnmuteOverlay() {
         try {
-            // 1. Twitch "Click to Unmute" overlays
             const unmuteSelectors = [
                 '[data-a-target="player-overlay-click-to-unmute"]',
                 '[data-a-target="player-unmute-button"]',
@@ -87,7 +86,6 @@ if (!window._originalFetch) {
                 }
             }
 
-            // 2. Direct HTML5 Video Player Unmuting & Playback Watchdog
             const videos = document.querySelectorAll('video');
             videos.forEach(v => {
                 if (v) {
@@ -99,7 +97,6 @@ if (!window._originalFetch) {
                     }
                     if (v.paused) {
                         v.play().catch(() => {
-                            // If browser blocks unmuted play, briefly start muted then unmute
                             v.muted = true;
                             v.play().then(() => {
                                 setTimeout(() => { v.muted = false; }, 500);
@@ -145,7 +142,6 @@ if (!window._originalFetch) {
         autoClaimPointsChests();
     }, 1500);
 
-    // Watch DOM mutations for instant overlay / chest detection
     const pageObserver = new MutationObserver(() => {
         autoBypassUnmuteOverlay();
         autoClaimPointsChests();
@@ -180,20 +176,18 @@ if (!window._originalFetch) {
                             if (Array.isArray(data)) {
                                 data.forEach(dat => {
                                     if (dat && dat.extensions && dat.extensions.operationName === "DropCurrentSessionContext") {
-                                        if (dat.data && dat.data.currentUser && dat.data.currentUser.dropCurrentSession && dat.data.currentUser.dropCurrentSession.game) {
+                                        if (dat.data && dat.data.currentUser && dat.data.currentUser.dropCurrentSession) {
                                             window.postMessage({
                                                 autoTwitchDrops: {
-                                                    type: "checkDrop",
-                                                    game: dat.data.currentUser.dropCurrentSession.game.displayName
+                                                    type: "sessionContext",
+                                                    session: dat.data.currentUser.dropCurrentSession
                                                 }
                                             }, "*");
                                         }
                                     }
                                 });
                             }
-                        } catch (err) {
-                            console.warn("onPage fetch proxy error:", err);
-                        }
+                        } catch (err) {}
                     }).catch(() => {});
                 }
                 return res;

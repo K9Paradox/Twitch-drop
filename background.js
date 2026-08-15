@@ -3,6 +3,26 @@
  **/
 import { Client } from "./background/twitchApi.js";
 
+const POPULAR_DROP_GAMES = [
+    "Overwatch 2",
+    "Apex Legends",
+    "Valorant",
+    "World of Warcraft",
+    "Rust",
+    "Dead by Daylight",
+    "Counter-Strike 2",
+    "Escape from Tarkov",
+    "Fortnite",
+    "Palworld",
+    "Rainbow Six Siege",
+    "League of Legends",
+    "Warframe",
+    "Destiny 2",
+    "Cyberpunk 2077",
+    "Genshin Impact",
+    "Honkai: Star Rail"
+];
+
 let client = null;
 let settings = {
     autoRefresh: true,
@@ -15,7 +35,7 @@ let settings = {
     desktopNotifications: true,
     lowQualityMode: true
 };
-let listOfConnected = [];
+let listOfConnected = [...POPULAR_DROP_GAMES];
 let autoDropGames = [];
 let priorityStreams = [];
 let extStats = {
@@ -83,7 +103,9 @@ async function hydrateState() {
         if (val.settings) settings = { ...settings, ...val.settings };
         if (val.autoDropGames) autoDropGames = val.autoDropGames;
         if (val.priorityStreams) priorityStreams = val.priorityStreams;
-        if (val.listOfConnected) listOfConnected = val.listOfConnected;
+        if (val.listOfConnected && val.listOfConnected.length > 0) {
+            listOfConnected = Array.from(new Set([...val.listOfConnected, ...POPULAR_DROP_GAMES]));
+        }
         if (val.activityHistory) activityHistory = val.activityHistory;
         if (val.extStats) extStats = { ...extStats, ...val.extStats };
 
@@ -220,6 +242,25 @@ function syncCampaignProgressWithInventory(inventory) {
             let maxWatchedInCamp = 0;
             let allDropsClaimedInCamp = true;
 
+            // If active campaign didn't have items, populate from inventory
+            if (!curCamp.items || curCamp.items.length === 0) {
+                curCamp.items = [];
+                for (const d of matchedDropCamp.timeBasedDrops) {
+                    const benefit = d.benefitEdges && d.benefitEdges[0] ? d.benefitEdges[0].benefit : null;
+                    const req = d.requiredMinutesWatched || 60;
+                    curCamp.items.push({
+                        id: d.id,
+                        name: d.name || (benefit ? benefit.name : "Drop Reward"),
+                        picture: benefit ? benefit.imageAssetURL : (d.imageURL || "assets/img/atd-48.png"),
+                        reqTime: req,
+                        self: {
+                            isClaimed: Boolean(d.self && d.self.isClaimed),
+                            currentMinutesWatched: (d.self && d.self.currentMinutesWatched !== undefined) ? d.self.currentMinutesWatched : 0
+                        }
+                    });
+                }
+            }
+
             for (const drop of matchedDropCamp.timeBasedDrops) {
                 const reqMinutes = drop.requiredMinutesWatched || 60;
                 if (reqMinutes > curCamp.minutesNeeded) {
@@ -245,6 +286,9 @@ function syncCampaignProgressWithInventory(inventory) {
                         matchedItem.self = matchedItem.self || {};
                         matchedItem.self.isClaimed = isExplicitlyClaimed;
                         matchedItem.self.currentMinutesWatched = currentWatched;
+                        if (drop.benefitEdges && drop.benefitEdges[0] && drop.benefitEdges[0].benefit.imageAssetURL) {
+                            matchedItem.picture = drop.benefitEdges[0].benefit.imageAssetURL;
+                        }
                     }
                 }
             }
@@ -411,6 +455,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({ success: true });
                 break;
 
+            case "sessionContext":
+                if (message.data && activeStream.campaign && activeStream.campaign !== "none") {
+                    const session = message.data;
+                    if (session.currentDrop && activeStream.campaigns && activeStream.campaigns.length > 0) {
+                        const curCamp = activeStream.campaigns[activeStream.campaign.onCamp || 0];
+                        if (curCamp) {
+                            curCamp.minutesWatched = session.currentDrop.currentMinutesWatched || curCamp.minutesWatched;
+                            curCamp.minutesNeeded = session.currentDrop.requiredMinutesWatched || curCamp.minutesNeeded;
+
+                            if (!curCamp.items || curCamp.items.length === 0) {
+                                curCamp.items = [{
+                                    id: session.currentDrop.id,
+                                    name: session.currentDrop.name || "Drop Reward",
+                                    picture: session.currentDrop.imageURL || "assets/img/atd-48.png",
+                                    reqTime: session.currentDrop.requiredMinutesWatched || 60,
+                                    self: {
+                                        isClaimed: Boolean(session.currentDrop.isClaimed),
+                                        currentMinutesWatched: session.currentDrop.currentMinutesWatched || 0
+                                    }
+                                }];
+                            } else {
+                                const matched = curCamp.items.find(i => i.id === session.currentDrop.id);
+                                if (matched) {
+                                    matched.self = matched.self || {};
+                                    matched.self.currentMinutesWatched = session.currentDrop.currentMinutesWatched;
+                                    matched.self.isClaimed = Boolean(session.currentDrop.isClaimed);
+                                    if (session.currentDrop.imageURL) matched.picture = session.currentDrop.imageURL;
+                                }
+                            }
+                            await saveState();
+                            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                        }
+                    }
+                }
+                sendResponse({ success: true });
+                break;
+
             case "claim-points":
                 await fetchTwitchCookiesAndInitClient();
                 if (client && message.data) {
@@ -459,6 +540,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 listOfConnected.push(c.game.displayName);
                             }
                         }
+                        listOfConnected = Array.from(new Set([...listOfConnected, ...POPULAR_DROP_GAMES]));
                         extStats.connectedGames = listOfConnected;
                         await saveState();
                         chrome.runtime.sendMessage({ type: "p:connectedGames", data }).catch(() => {});
@@ -473,19 +555,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     console.error("Error fetching connected games:", e);
                 }
 
-                // Default popular games
-                const defaultGames = [
-                    { game: { displayName: "Overwatch 2" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "World of Warcraft" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "Rust" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "Valorant" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "Apex Legends" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "Counter-Strike 2" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "Escape from Tarkov" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "Dead by Daylight" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "Fortnite" }, self: { isAccountConnected: true } },
-                    { game: { displayName: "Palworld" }, self: { isAccountConnected: true } }
-                ];
+                listOfConnected = Array.from(new Set([...listOfConnected, ...POPULAR_DROP_GAMES]));
+                const defaultGames = listOfConnected.map(g => ({
+                    game: { displayName: g },
+                    self: { isAccountConnected: true }
+                }));
                 chrome.runtime.sendMessage({ type: "p:connectedGames", data: defaultGames }).catch(() => {});
                 sendResponse({ games: defaultGames });
                 break;
@@ -545,6 +619,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case "p:reloadStream":
                 if (curWindow.id !== 0) {
                     chrome.tabs.reload(curWindow.id).catch(() => {});
+                } else {
+                    const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
+                    if (tabs && tabs.length > 0) {
+                        chrome.tabs.reload(tabs[0].id).catch(() => {});
+                    }
                 }
                 sendResponse({ success: true });
                 break;
@@ -552,18 +631,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case "p:focusStreamTab":
                 if (curWindow.id !== 0) {
                     chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
+                } else {
+                    const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
+                    if (tabs && tabs.length > 0) {
+                        chrome.tabs.update(tabs[0].id, { active: true }).catch(() => {});
+                    }
                 }
                 sendResponse({ success: true });
                 break;
 
             case "p:toggleTabAudio":
-                if (curWindow.id !== 0) {
+                let targetTabId = curWindow.id;
+                if (targetTabId === 0) {
+                    const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
+                    if (tabs && tabs.length > 0) {
+                        targetTabId = tabs[0].id;
+                        curWindow.id = targetTabId;
+                        await saveState();
+                    }
+                }
+                if (targetTabId !== 0) {
                     try {
-                        const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
+                        const tab = await chrome.tabs.get(targetTabId).catch(() => null);
                         if (tab) {
                             const currentlyMuted = Boolean(tab.mutedInfo && tab.mutedInfo.muted);
                             const newMuted = !currentlyMuted;
-                            await chrome.tabs.update(curWindow.id, { muted: newMuted });
+                            await chrome.tabs.update(targetTabId, { muted: newMuted });
                             sendResponse({ success: true, muted: newMuted });
                             return;
                         }
@@ -573,9 +666,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "p:getTabAudioState":
-                if (curWindow.id !== 0) {
+                let checkTabId = curWindow.id;
+                if (checkTabId === 0) {
+                    const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
+                    if (tabs && tabs.length > 0) {
+                        checkTabId = tabs[0].id;
+                        curWindow.id = checkTabId;
+                        await saveState();
+                    }
+                }
+                if (checkTabId !== 0) {
                     try {
-                        const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
+                        const tab = await chrome.tabs.get(checkTabId).catch(() => null);
                         if (tab && tab.mutedInfo) {
                             sendResponse({ muted: tab.mutedInfo.muted });
                             return;
@@ -592,11 +694,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "getAutoDropGames":
+                const allGames = Array.from(new Set([...listOfConnected, ...POPULAR_DROP_GAMES])).sort((a, b) => a.localeCompare(b));
                 chrome.runtime.sendMessage({
                     type: "setAutoDropGames",
-                    data: { allConnected: listOfConnected, enabled: autoDropGames }
+                    data: { allConnected: allGames, enabled: autoDropGames }
                 }).catch(() => {});
-                sendResponse({ allConnected: listOfConnected, enabled: autoDropGames });
+                sendResponse({ allConnected: allGames, enabled: autoDropGames });
                 break;
 
             case "toggleAutoDropGame":
@@ -804,11 +907,12 @@ async function createCampaign(game) {
     };
     activeStream.campaigns = [];
 
+    let inventory = await client.getInventory().catch(() => ({ dropCampaignsInProgress: [], gameEventDrops: [] }));
+    if (!inventory) inventory = { dropCampaignsInProgress: [], gameEventDrops: [] };
+
     if (matchingCampaigns.length > 0) {
         const campAry = matchingCampaigns.map(c => c.id);
         const campDeets = await client.getDropCampaignDetails(campAry).catch(() => []);
-        let inventory = await client.getInventory().catch(() => ({ dropCampaignsInProgress: [], gameEventDrops: [] }));
-        if (!inventory) inventory = { dropCampaignsInProgress: [], gameEventDrops: [] };
 
         let itemsToProcess = [];
         if (Array.isArray(campDeets) && campDeets.length > 0) {
@@ -892,35 +996,62 @@ async function createCampaign(game) {
                 items: allDrops
             });
         }
+    } else {
+        // Look in user inventory for matching in-progress drops
+        const inProgCamp = inventory.dropCampaignsInProgress?.find(c =>
+            c.game && (c.game.displayName.toLowerCase() === game.toLowerCase() || c.game.name.toLowerCase() === game.toLowerCase())
+        );
 
-        const isDone = syncCampaignProgressWithInventory(inventory);
-        if (isDone) {
-            const allDone = activeStream.campaigns.every(c => {
-                return (c.items && c.items.length > 0)
-                    ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
-                    : c.minutesWatched >= c.minutesNeeded;
-            });
+        const items = [];
+        let maxTime = 60;
+        let timeWatched = 0;
 
-            if (allDone) {
-                console.log(`All drops for ${game} already claimed!`);
-                activeStream.campaign.isCompleted = true;
-                activeStream.campaign.curWatching = null;
-                await windowManager("close");
-                await saveState();
-                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
-                return;
+        if (inProgCamp && inProgCamp.timeBasedDrops) {
+            for (const d of inProgCamp.timeBasedDrops) {
+                const req = d.requiredMinutesWatched || 60;
+                if (req > maxTime) maxTime = req;
+                const benefit = d.benefitEdges && d.benefitEdges[0] ? d.benefitEdges[0].benefit : null;
+                const isClaimed = Boolean(d.self && d.self.isClaimed);
+                const watched = d.self?.currentMinutesWatched || 0;
+                if (watched > timeWatched) timeWatched = watched;
+
+                items.push({
+                    id: d.id,
+                    name: d.name || (benefit ? benefit.name : "Drop Reward"),
+                    picture: benefit ? benefit.imageAssetURL : (d.imageURL || "assets/img/atd-48.png"),
+                    reqTime: req,
+                    self: { isClaimed, currentMinutesWatched: watched }
+                });
             }
         }
-    } else {
-        // Fallback for direct directory search
+
         activeStream.campaigns.push({
             game: game,
-            id: `camp-${gameSlug}`,
-            minutesNeeded: 60,
-            minutesWatched: 0,
+            id: inProgCamp ? inProgCamp.id : `camp-${gameSlug}`,
+            minutesNeeded: maxTime,
+            minutesWatched: timeWatched,
             streamers: [],
-            items: []
+            items: items
         });
+    }
+
+    const isDone = syncCampaignProgressWithInventory(inventory);
+    if (isDone) {
+        const allDone = activeStream.campaigns.every(c => {
+            return (c.items && c.items.length > 0)
+                ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
+                : c.minutesWatched >= c.minutesNeeded;
+        });
+
+        if (allDone) {
+            console.log(`All drops for ${game} already claimed!`);
+            activeStream.campaign.isCompleted = true;
+            activeStream.campaign.curWatching = null;
+            await windowManager("close");
+            await saveState();
+            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+            return;
+        }
     }
 
     await saveState();
