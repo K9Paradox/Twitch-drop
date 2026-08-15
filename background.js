@@ -1031,24 +1031,7 @@ async function runCampaign(forceNextStreamer = false) {
     activeStream.campaign.lastProgressTimestamp = Date.now();
     activeStream.campaign.stallCount = 0;
 
-    if (curWindow.id !== 0) {
-        try {
-            const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
-            if (tab) {
-                await chrome.tabs.update(curWindow.id, { url: streamUrl, active: false });
-            } else {
-                await windowManager("open", { active: false, url: streamUrl });
-            }
-        } catch (e) {
-            await windowManager("open", { active: false, url: streamUrl });
-        }
-    } else {
-        await windowManager("open", { active: false, url: streamUrl });
-    }
-
-    if (settings.autoMute && curWindow.id !== 0) {
-        chrome.tabs.update(curWindow.id, { muted: true }).catch(() => {});
-    }
+    await windowManager("open", { url: streamUrl });
 
     activeStream.campaign.status = "watching";
     await saveState();
@@ -1367,49 +1350,73 @@ if (typeof chrome !== "undefined" && chrome.windows?.onRemoved?.addListener) {
 
 async function windowManager(func, data = {}) {
     if (func === "open") {
+        let prevActiveTab = null;
+        try {
+            const currentTabs = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+            if (currentTabs && currentTabs.length > 0) {
+                prevActiveTab = currentTabs[0];
+            }
+        } catch (e) {}
+
         const tabOptions = {
-            active: false,
+            active: true,
             ...data
         };
+
+        let targetTab = null;
 
         if (curWindow.id === 0) {
             const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
             if (existingTabs && existingTabs.length > 0) {
-                const tab = existingTabs[0];
-                curWindow.id = tab.id;
+                targetTab = existingTabs[0];
+                curWindow.id = targetTab.id;
                 curWindow.type = "tab";
                 await saveState();
-                if (tabOptions.url && tab.url !== tabOptions.url) {
-                    await chrome.tabs.update(tab.id, { url: tabOptions.url, active: false }).catch(() => {});
+                if (tabOptions.url && targetTab.url !== tabOptions.url) {
+                    await chrome.tabs.update(targetTab.id, { url: tabOptions.url, active: true }).catch(() => {});
+                } else {
+                    await chrome.tabs.update(targetTab.id, { active: true }).catch(() => {});
                 }
-                return tab;
+            } else {
+                targetTab = await chrome.tabs.create(tabOptions);
+                curWindow.id = targetTab.id;
+                curWindow.type = "tab";
+                await saveState();
             }
-
-            const tab = await chrome.tabs.create(tabOptions);
-            curWindow.id = tab.id;
-            curWindow.type = "tab";
-            await saveState();
-            return tab;
         } else {
-            let tab = await chrome.tabs.get(curWindow.id).catch(() => null);
-            if (!tab) {
+            targetTab = await chrome.tabs.get(curWindow.id).catch(() => null);
+            if (!targetTab) {
                 const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
                 if (existingTabs && existingTabs.length > 0) {
-                    tab = existingTabs[0];
-                    curWindow.id = tab.id;
+                    targetTab = existingTabs[0];
+                    curWindow.id = targetTab.id;
                     await saveState();
                 } else {
-                    tab = await chrome.tabs.create(tabOptions);
-                    curWindow.id = tab.id;
+                    targetTab = await chrome.tabs.create(tabOptions);
+                    curWindow.id = targetTab.id;
                     await saveState();
-                    return tab;
                 }
             }
-            if (tabOptions.url && tabOptions.url !== tab.url) {
-                await chrome.tabs.update(curWindow.id, { url: tabOptions.url, active: false }).catch(() => {});
+            if (tabOptions.url && targetTab.url !== tabOptions.url) {
+                await chrome.tabs.update(curWindow.id, { url: tabOptions.url, active: true }).catch(() => {});
+            } else {
+                await chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
             }
-            return tab;
         }
+
+        // Allow simulated user-click gesture on the active stream tab, then restore focus and apply tab-muting
+        if (targetTab && targetTab.id) {
+            setTimeout(async () => {
+                if (settings.autoMute !== false) {
+                    chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
+                }
+                if (prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
+                    chrome.tabs.update(prevActiveTab.id, { active: true }).catch(() => {});
+                }
+            }, 1000);
+        }
+
+        return targetTab;
     } else if (func === "close") {
         if (curWindow.id !== 0) {
             await chrome.tabs.remove(curWindow.id).catch(() => {});

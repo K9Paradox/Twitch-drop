@@ -3,17 +3,39 @@
 if (!window._originalFetch) {
     const activeIntervals = [];
 
-    // 1. Set Low-bandwidth 160p preset and muted player volume in localStorage (guarantees Chrome Autoplay)
+    // 1. Set Low-bandwidth 160p preset and unmuted player volume in localStorage
     function applyLowBandwidthPresets(lowQuality = true) {
         try {
             if (lowQuality) {
                 localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
             }
-            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": true }));
+            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
             localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
         } catch (e) {}
     }
     applyLowBandwidthPresets(true);
+
+    // 2. Simulate User Click Gesture on Active Stream Tab to satisfy Chrome Autoplay & Twitch Watch Time
+    function simulateUserInteraction() {
+        try {
+            const unmuteBtn = document.querySelector('[data-a-target="player-overlay-click-to-unmute"], [data-test-selector="unmute-button"], .player-overlay-click-to-unmute');
+            if (unmuteBtn) {
+                triggerSyntheticClick(unmuteBtn);
+            }
+            const videos = document.querySelectorAll('video');
+            videos.forEach(v => {
+                if (v) {
+                    v.muted = false;
+                    v.volume = 0.5;
+                    if (v.paused) v.play().catch(() => {});
+                }
+            });
+        } catch (e) {}
+    }
+
+    setTimeout(simulateUserInteraction, 300);
+    setTimeout(simulateUserInteraction, 700);
+    setTimeout(simulateUserInteraction, 1400);
 
     // Listen for settings and audio state changes relayed from content script
     window.addEventListener("message", (e) => {
