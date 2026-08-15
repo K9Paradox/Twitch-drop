@@ -3,19 +3,19 @@
 if (!window._originalFetch) {
     const activeIntervals = [];
 
-    // 1. Set Low-bandwidth 160p preset and safe player volume in localStorage
+    // 1. Set Low-bandwidth 160p preset and muted player volume in localStorage (guarantees Chrome Autoplay)
     function applyLowBandwidthPresets(lowQuality = true) {
         try {
             if (lowQuality) {
                 localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
             }
-            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
+            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": true }));
             localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
         } catch (e) {}
     }
     applyLowBandwidthPresets(true);
 
-    // Listen for settings changes relayed from content script
+    // Listen for settings and audio state changes relayed from content script
     window.addEventListener("message", (e) => {
         if (!e.data || !e.data.autoTwitchDrops) return;
         const dropData = e.data.autoTwitchDrops;
@@ -23,6 +23,14 @@ if (!window._originalFetch) {
             if (dropData.settings.lowQualityMode !== undefined) {
                 applyLowBandwidthPresets(dropData.settings.lowQualityMode);
             }
+        } else if (dropData.type === "setTabAudio") {
+            const shouldMute = Boolean(dropData.muted);
+            try {
+                const videos = document.querySelectorAll('video');
+                videos.forEach(v => {
+                    if (v) v.muted = shouldMute;
+                });
+            } catch (err) {}
         }
     });
 

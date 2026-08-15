@@ -425,7 +425,7 @@ async function handleWatchdogTick() {
                     }
                 }
 
-                // 2. Stream Stall Watchdog (15-minute threshold)
+                // 2. Stream Stall Watchdog (4-minute threshold)
                 if (settings.autoRefresh !== false && activeStream.campaign) {
                     const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
                     const currentMinutes = curCamp ? (curCamp.minutesWatched || 0) : 0;
@@ -441,21 +441,21 @@ async function handleWatchdogTick() {
                         activeStream.campaign.lastProgressTimestamp = now;
                         activeStream.campaign.stallCount = 0;
                     } else {
-                        // Progress has stalled for >15 minutes
+                        // Progress has stalled for >4 minutes
                         const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
-                        const stallThresholdMs = 15 * 60 * 1000;
+                        const stallThresholdMs = 4 * 60 * 1000;
 
                         if (elapsedMs >= stallThresholdMs) {
                             activeStream.campaign.stallCount = (activeStream.campaign.stallCount || 0) + 1;
                             activeStream.campaign.lastProgressTimestamp = now;
 
                             if (activeStream.campaign.stallCount === 1) {
-                                console.log(`Stream stall detected for ${activeStream.campaign.curWatching}. Reloading stream tab.`);
+                                console.log(`Stream stall detected for ${activeStream.campaign.curWatching} (0m gained in 4m). Reloading stream tab.`);
                                 if (curWindow.id !== 0) {
                                     chrome.tabs.reload(curWindow.id).catch(() => {});
                                 }
-                            } else {
-                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching}. Rotating to next channel.`);
+                            } else if (activeStream.campaign.stallCount >= 2) {
+                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 8m). Rotating to next channel.`);
                                 activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
                                 if (activeStream.campaign.curWatching && !activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
                                     activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
@@ -820,7 +820,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         if (tab) {
                             const currentlyMuted = Boolean(tab.mutedInfo && tab.mutedInfo.muted);
                             const newMuted = !currentlyMuted;
-                            await chrome.tabs.update(targetTabId, { muted: newMuted });
+                            await chrome.tabs.update(targetTabId, { muted: newMuted }).catch(() => {});
+                            chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: newMuted }).catch(() => {});
                             sendResponse({ success: true, muted: newMuted });
                             return;
                         }

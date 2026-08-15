@@ -33,6 +33,20 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
             }
         });
 
+        // Listen for runtime messages from background/popup
+        if (chrome.runtime?.onMessage) {
+            chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+                if (msg && msg.type === "setTabAudio") {
+                    window.postMessage({
+                        autoTwitchDrops: {
+                            type: "setTabAudio",
+                            muted: msg.muted
+                        }
+                    }, "*");
+                }
+            });
+        }
+
         // Listen for storage changes and forward settings to in-page scripts
         if (chrome.storage?.onChanged) {
             chrome.storage.onChanged.addListener((changes, area) => {
