@@ -702,35 +702,48 @@ async function runCampaign(forceNextStreamer = false) {
     activeStream.campaign.isCompleted = false;
     await fetchTwitchCookiesAndInitClient();
 
+    activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+    const skipped = activeStream.campaign.skippedStreamers;
+
     let targetStreamer = null;
 
-    // 1. Fetch live channels playing the game
-    const streamInfo = await getStreamForGame(forceNextStreamer);
-    if (streamInfo && streamInfo.login) {
-        targetStreamer = streamInfo.login;
+    if (curCamp.streamers && curCamp.streamers.length > 0) {
+        const available = curCamp.streamers.filter(s => !skipped.includes(s));
+        targetStreamer = available.length > 0 ? available[0] : curCamp.streamers[0];
     } else {
-        // Fallback to directory query
-        const stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug);
-        if (stream && stream !== "nostream" && stream.broadcaster) {
+        const stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug, skipped);
+        if (stream && stream.broadcaster && stream.broadcaster.login) {
             targetStreamer = stream.broadcaster.login;
         }
     }
 
     if (!targetStreamer) {
-        console.warn("No active live stream found for game, rotating campaign...");
-        activeStream.campaign.onCamp = (activeStream.campaigns.length - 1) === activeStream.campaign.onCamp ? 0 : activeStream.campaign.onCamp + 1;
-        await saveState();
-        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+        console.warn("No active live stream found for game, waiting...");
         await windowManager("wait");
         return;
     }
 
     activeStream.campaign.curWatching = targetStreamer;
     const streamUrl = `https://www.twitch.tv/${targetStreamer}`;
-    const tab = await windowManager("open", { active: true, url: streamUrl });
 
-    if (settings.autoMute && tab && tab.id) {
-        chrome.tabs.update(tab.id, { muted: true }).catch(() => {});
+    // Force active tab navigation directly
+    if (curWindow.id !== 0) {
+        try {
+            const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
+            if (tab) {
+                await chrome.tabs.update(curWindow.id, { url: streamUrl });
+            } else {
+                await windowManager("open", { active: true, url: streamUrl });
+            }
+        } catch (e) {
+            await windowManager("open", { active: true, url: streamUrl });
+        }
+    } else {
+        await windowManager("open", { active: true, url: streamUrl });
+    }
+
+    if (settings.autoMute && curWindow.id !== 0) {
+        chrome.tabs.update(curWindow.id, { muted: true }).catch(() => {});
     }
 
     activeStream.campaign.status = "watching";
@@ -952,52 +965,6 @@ async function checkForDrops() {
     }
 }
 
-async function getStreamForGame(forceNext = false) {
-    if (gettingStreamObj.lastPull + 45 <= Date.now() / 1000 || forceNext || !gettingStreamObj.allStreamers.length) {
-        gettingStreamObj.allStreamers = await client.getAllLiveForGame(activeStream.campaign.game.name).catch(() => []);
-        gettingStreamObj.lastPull = Date.now() / 1000;
-    }
-    if (!gettingStreamObj.allStreamers || gettingStreamObj.allStreamers.length === 0) return null;
-
-    const skipped = activeStream.campaign?.skippedStreamers || [];
-    const curCamp = activeStream.campaigns?.[activeStream.campaign?.onCamp || 0];
-    const allowedStreamers = curCamp?.streamers || [];
-
-    let candidateLogins = [];
-
-    for (const stream of gettingStreamObj.allStreamers) {
-        if (stream && stream.data && stream.data.userOrError && stream.data.userOrError.login) {
-            const login = stream.data.userOrError.login;
-            if (allowedStreamers.length > 0 && !allowedStreamers.includes(login)) continue;
-            candidateLogins.push(login);
-        }
-    }
-
-    if (candidateLogins.length === 0) {
-        candidateLogins = gettingStreamObj.allStreamers.map(s => s?.data?.userOrError?.login).filter(Boolean);
-    }
-
-    // Filter out previously skipped streamers
-    let freshCandidates = candidateLogins.filter(login => !skipped.includes(login));
-
-    // If all candidates have been skipped, reset skipped list
-    if (freshCandidates.length === 0) {
-        activeStream.campaign.skippedStreamers = [];
-        freshCandidates = candidateLogins;
-    }
-
-    const selectedLogin = freshCandidates[0] || null;
-    if (!selectedLogin) return null;
-
-    const currentStreamInfo = await client.getStreamMetadata(selectedLogin).catch(() => null);
-    if (currentStreamInfo) {
-        currentStreamInfo.login = selectedLogin;
-    } else {
-        return { login: selectedLogin };
-    }
-    return currentStreamInfo;
-}
-
 async function checkClaimDrop() {
     if (!client) return;
     try {
@@ -1107,11 +1074,6 @@ function updateBadgeUI() {
         chrome.action.setBadgeBackgroundColor({ color: "#666666" }).catch(() => {});
         return;
     }
-    if (activeStream && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaign.status === "watching") {
-        chrome.action.setBadgeText({ text: "LIVE" }).catch(() => {});
-        chrome.action.setBadgeBackgroundColor({ color: "#00F59B" }).catch(() => {});
-    } else {
-        chrome.action.setBadgeText({ text: "PRO" }).catch(() => {});
-        chrome.action.setBadgeBackgroundColor({ color: "#9146FF" }).catch(() => {});
-    }
+    // Clean, unblocked icon in Chrome toolbar
+    chrome.action.setBadgeText({ text: "" }).catch(() => {});
 }

@@ -1,92 +1,66 @@
+/**
+ * Twitch GQL & Internal API Client
+ */
 export class Client {
-    constructor(options) {
+    constructor(options = {}) {
         this.clientId = options?.clientId ?? "kimne78kx3ncx6brgo4mv6wki5h1ko";
         this.oauthToken = options?.oauthToken ?? null;
-        this.userId = options?.userId ?? null;
         this.deviceId = options?.deviceId ?? null;
+        this.integrity = options?.integrity ?? null;
+        this.userId = options?.userId ?? null;
         this.uuid = options?.uuid ?? null;
-
-        this.integrity = {
-            token: "",
-            expiration: 0,
-            request_id: ""
-        };
-
-        this.getIntegFromStorage();
-
-        if (!this.userId && this.oauthToken) {
-            this.getUserId();
-        }
     }
 
-    async postWrapper(data, headers = {}) {
+    async post(data) {
         try {
+            const headers = {
+                "Client-Id": this.clientId,
+                "Content-Type": "application/json"
+            };
+            if (this.deviceId) headers["X-Device-Id"] = this.deviceId;
+            if (this.integrity?.token) headers["Client-Integrity"] = this.integrity.token;
+            if (this.uuid) headers["Client-Session-Id"] = this.uuid;
+
             const res = await fetch("https://gql.twitch.tv/gql", {
-                headers: headers,
                 method: "POST",
+                headers: headers,
                 body: JSON.stringify(data)
             });
-
-            if (!res.ok) {
-                console.warn(`GQL HTTP Error: ${res.status} ${res.statusText}`);
-                return null;
-            }
-
-            const post = await res.json();
-
-            if (!Array.isArray(post)) {
-                if (post && "error" in post) {
-                    console.warn(`API Error: ${post.message || post.error}`);
-                    return null;
-                }
-                if (post && "errors" in post) {
-                    console.warn(`API errors: ${JSON.stringify(post.errors)}`);
-                    return null;
-                }
-            }
-            return Array.isArray(post) ? post : (post ? post.data : null);
+            if (!res.ok) return null;
+            return await res.json();
         } catch (e) {
-            console.warn("postWrapper network error:", e);
             return null;
         }
     }
 
-    async post(data) {
-        return this.postWrapper(data, {
-            "Content-Type": "text/plain;charset=UTF-8",
-            "Client-Id": this.clientId
-        });
-    }
-
-    async postAuthorized(data, headers = {}) {
-        headers["Content-Type"] = "text/plain;charset=UTF-8";
-        headers["Client-Id"] = this.clientId;
-        if (this.oauthToken) {
-            headers["Authorization"] = `OAuth ${this.oauthToken}`;
-        }
-        if (this.integrity && this.integrity.token) {
-            headers["Client-Integrity"] = this.integrity.token;
-            if (this.deviceId) {
-                headers["X-Device-Id"] = this.deviceId;
-            }
-        }
-        return await this.postWrapper(data, headers);
-    }
-
-    async ensureIntegrity() {
-        if (this.integrity && this.integrity.expiration > Date.now()) {
-            return true;
-        }
-        return false;
-    }
-
-    async getIntegFromStorage() {
+    async postAuthorized(data) {
+        if (!this.oauthToken) return null;
         try {
-            const data = await chrome.storage.local.get(["twitchInteg"]);
-            if (data && data.twitchInteg && data.twitchInteg.token !== undefined) {
-                this.integrity = data.twitchInteg;
-            }
-        } catch (e) {}
+            const headers = {
+                "Client-Id": this.clientId,
+                "Authorization": `OAuth ${this.oauthToken}`,
+                "Content-Type": "application/json"
+            };
+            if (this.deviceId) headers["X-Device-Id"] = this.deviceId;
+            if (this.integrity?.token) headers["Client-Integrity"] = this.integrity.token;
+            if (this.uuid) headers["Client-Session-Id"] = this.uuid;
+
+            const res = await fetch("https://gql.twitch.tv/gql", {
+                method: "POST",
+                headers: headers,
+                body: JSON.stringify(data)
+            });
+            if (!res.ok) return null;
+            return await res.json();
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async getInteg() {
+        if (!this.integrity || this.integrity.expiration - 960000 < Date.now()) {
+            return false;
+        }
         return this.integrity;
     }
 
@@ -132,7 +106,7 @@ export class Client {
             const data = await this.post({
                 "operationName": "DirectoryRoot_Directory",
                 "variables": {
-                    "name": name
+                    "name": name.toLowerCase()
                 },
                 "extensions": {
                     "persistedQuery": {
@@ -262,25 +236,20 @@ export class Client {
 
     async getActiveStreams(gameName, slug) {
         try {
+            const gameSlug = slug || gameName.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
             const data = await this.post({
                 "operationName": "DirectoryPage_Game",
                 "variables": {
-                    "game": gameName.toLowerCase(),
-                    "slug": slug == null ? gameName.toLowerCase().replaceAll(" ", "-") : slug,
+                    "name": gameSlug,
                     "options": {
                         "includeRestricted": [
                             "SUB_ONLY_LIVE"
                         ],
                         "sort": "VIEWER_COUNT",
-                        "recommendationsContext": {
-                            "platform": "web"
-                        },
-                        "requestID": "JIRA-VXP-2397",
                         "tags": ["c2542d6d-cd10-4532-919b-3d19f30a768b"]
                     },
                     "sortTypeIsRecency": false,
-                    "includeCostreaming": true,
-                    "limit": 30
+                    "limit": 50
                 },
                 "extensions": {
                     "persistedQuery": {
@@ -290,12 +259,17 @@ export class Client {
                 }
             });
 
-            const streams = data && data.game ? data.game.streams : null;
-            if (streams == null || !streams.edges) return [];
+            const edges = data?.game?.streams?.edges || data?.data?.game?.streams?.edges || [];
             const result = [];
-            for (const stream of streams.edges) {
-                if (stream && stream.node) {
-                    result.push(stream.node);
+            for (const edge of edges) {
+                const broadcaster = edge?.node?.broadcaster;
+                if (broadcaster && broadcaster.login) {
+                    result.push({
+                        broadcaster: {
+                            login: broadcaster.login,
+                            displayName: broadcaster.displayName || broadcaster.login
+                        }
+                    });
                 }
             }
             return result;
@@ -393,87 +367,56 @@ export class Client {
 
     async getAllLiveForGame(gameName) {
         try {
-            const gameId = await this.getGameIdFromName(gameName);
-            if (!gameId) return [];
-
-            const data = await this.post({
-                "operationName": "DirectoryPage_Game",
-                "variables": {
-                    "game": gameName,
-                    "options": {
-                        "sort": "VIEWER_COUNT",
-                        "tags": ["c2542d6d-cd10-4532-919b-3d19f30a768b"]
-                    },
-                    "sortTypeIsRecency": false,
-                    "limit": 30
-                },
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 1,
-                        "sha256Hash": "76cb069d835b8a02914c08dc42c421d0dafda8af5b113a3f19141824b901402f"
+            const streams = await this.getActiveStreams(gameName, null);
+            return streams.map(s => ({
+                data: {
+                    userOrError: {
+                        login: s.broadcaster.login,
+                        stream: {}
                     }
                 }
-            });
-
-            if (data && data.game && data.game.streams && data.game.streams.edges) {
-                const userAry = [];
-                for (const edge of data.game.streams.edges) {
-                    if (edge && edge.node && edge.node.broadcaster && edge.node.broadcaster.login) {
-                        userAry.push(edge.node.broadcaster.login);
-                    }
-                }
-                if (userAry.length > 0) {
-                    return await this.getStream(userAry);
-                }
-            }
-        } catch (e) {}
-        return [];
+            }));
+        } catch (e) {
+            return [];
+        }
     }
 
-    async getChannelWithDrops(gameName, campaignId, slug) {
+    async getChannelWithDrops(gameName, campaignId, slug, skippedLogins = []) {
         const streams = await this.getActiveStreams(gameName, slug);
         if (Array.isArray(streams) && streams.length > 0) {
-            for (const stream of streams) {
-                if (stream && stream.broadcaster) {
-                    return stream;
-                }
+            const available = streams.filter(s => !skippedLogins.includes(s.broadcaster.login));
+            if (available.length > 0) {
+                return available[0];
             }
+            return streams[0];
         }
-
-        const liveUsers = await this.getAllLiveForGame(gameName);
-        if (Array.isArray(liveUsers) && liveUsers.length > 0) {
-            const first = liveUsers[0];
-            if (first && first.data && first.data.userOrError && first.data.userOrError.login) {
-                return {
-                    broadcaster: {
-                        login: first.data.userOrError.login
-                    }
-                };
-            }
-        }
-
-        return "nostream";
+        return null;
     }
 
-    async getStreamMetadata(username) {
+    async getStreamMetadata(channelLogin) {
         try {
             const data = await this.post({
-                "operationName": "StreamMetadata",
+                "operationName": "ChannelShell",
                 "variables": {
-                    "channelLogin": username
+                    "login": channelLogin
                 },
                 "extensions": {
                     "persistedQuery": {
                         "version": 1,
-                        "sha256Hash": "05e61087e584f2249e088a531cf02a358c27cfc5040e32b0e6e88e22830f81d1"
+                        "sha256Hash": "580ab410bcd0c1ad194224957ae2241e5d252b2c5173d8e0cce9d32d5bb14efe"
                     }
                 }
             });
-
-            if (data && data.user) {
-                return data.user;
+            const stream = data?.userOrError?.stream;
+            if (stream) {
+                return {
+                    login: channelLogin,
+                    game: stream.game?.displayName || stream.game?.name || "Twitch",
+                    title: stream.title || "",
+                    viewers: stream.viewersCount || 0
+                };
             }
         } catch (e) {}
-        return null;
+        return { login: channelLogin };
     }
 }
