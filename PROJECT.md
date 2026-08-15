@@ -32,32 +32,32 @@ Auto Twitch Drops Pro is a Manifest V3 Chrome Extension designed for resilient b
 ```
 
 ## Feature Inventory
-| # | Feature | Description | Milestone | Source |
-|---|---|---|---|---|
-| 1 | GraphQL Contract Hardening & Error Handling | Inspect `json.errors`, unwrap `json.data` properly for single & batched queries, return typed error objects | M1 | Survey (Explorer 1) |
-| 2 | Drops Reward Claim Hardening | Validate `claimDropReward.status === "SUCCESS"` before incrementing stats, triggering notifications and sounds | M1 | Survey (Explorer 1) |
-| 3 | WebSocket & PubSub Proxy Hardening | Remove fragile `res.origin` check, support `hermes.twitch.tv` and `pubsub-edge.twitch.tv`, handle JSON parse safely | M1 | Survey (Explorer 1) |
-| 4 | Channel Points Bonus Claim Deduplication | Deduplicate chest clicks, WebSocket `claim-available`, and `points-earned` events to prevent 3x overcounting | M1 | Survey (Explorer 1 & 2) |
-| 5 | Token & Integrity Security | Store and renew OAuth/Client-Integrity tokens cleanly without stale headers | M1 | Survey (Explorer 1) |
-| 6 | Service Worker Hydration Mutex | Promise-memoized `hydrateState()` preventing race conditions across concurrent boot triggers | M2 | Survey (Explorer 2) |
-| 7 | Persistent Window/Tab Lifecycle | Persist `autoGetTokenWindow` ID in storage to eliminate orphaned popup windows across service worker suspensions | M2 | Survey (Explorer 2) |
-| 8 | Stream Stall & Freeze Watchdog | Implement stalled stream watchdog (`settings.autoRefresh`) tracking progress deltas and refreshing/rotating stalled streams | M2 | Survey (Explorer 2) |
-| 9 | Offline Channel Detection & Failover | Periodically verify channel live status and category match via `getStreamMetadata()`, auto-triggering rotation on offline streams | M2 | Survey (Explorer 2) |
-| 10 | Background Tab Isolation & Non-Intrusive Playback | Tag extension-managed stream tabs (`#atd-managed=1`), open in background (`active: false`), prevent user tab hijacking | M2 | Survey (Explorer 2) |
-| 11 | Real-Time Reactive Popup Synchronization | Add `chrome.storage.onChanged` listener in `main.js` and real-time status/error banners (unauthenticated, network error) | M3 | Survey (Explorer 3) |
-| 12 | Popup UI/UX Polish & Dynamic Quality Sync | Polish micro-animations, quick controls, responsive layout, dynamic `lowQualityMode` settings sync to active stream tab | M3 | Survey (Explorer 3) |
-| 13 | Asset Optimization & Fallback SVG Glyphs | Clean unreferenced assets, verify all inline SVG fallbacks and image error handlers | M3 | Survey (Explorer 3) |
-| 14 | Automated Mock Contract Test Suite (Tiers 1-4) | Comprehensive mock test harness verifying all 9 GQL endpoints, WebSocket parsing, error branches, and contract schemas | Test Track / M4 | Survey (All Explorers) |
-| 15 | Adversarial Coverage Hardening (Tier 5) | White-box stress-testing, fault injection, edge-case simulation, and memory/listener leak validation | M4 Phase 2 | Project Pattern |
+| # | Feature | Description | Milestone | Source | Status |
+|---|---|---|---|---|:---:|
+| 1 | GraphQL Contract Hardening & Error Handling | Inspect `json.errors`, unwrap `json.data` properly for single & batched queries, return typed error objects | M1 | Survey (Explorer 1) | DONE |
+| 2 | Drops Reward Claim Hardening | Validate `claimDropReward.status === "SUCCESS"` before incrementing stats, triggering notifications and sounds | M1 | Survey (Explorer 1) | DONE |
+| 3 | WebSocket & PubSub Proxy Hardening | Remove fragile `res.origin` check, support `hermes.twitch.tv` and `pubsub-edge.twitch.tv`, handle JSON parse safely | M1 | Survey (Explorer 1) | DONE |
+| 4 | Channel Points Bonus Claim Deduplication | Deduplicate chest clicks, WebSocket `claim-available`, and `points-earned` events to prevent 3x overcounting | M1 | Survey (Explorer 1 & 2) | DONE |
+| 5 | Token & Integrity Security | Store and renew OAuth/Client-Integrity tokens cleanly without stale headers | M1 | Survey (Explorer 1) | DONE |
+| 6 | Service Worker Hydration Mutex | Promise-memoized `hydrateState()` preventing race conditions across concurrent boot triggers | M2 | Survey (Explorer 2) | DONE |
+| 7 | Persistent Window/Tab Lifecycle | Persist `autoGetTokenWindow` ID in storage to eliminate orphaned popup windows across service worker suspensions | M2 | Survey (Explorer 2) | DONE |
+| 8 | Stream Stall & Freeze Watchdog | Implement stalled stream watchdog (`settings.autoRefresh`) tracking progress deltas and refreshing/rotating stalled streams | M2 | Survey (Explorer 2) | DONE |
+| 9 | Offline Channel Detection & Failover | Periodically verify channel live status and category match via `getStreamMetadata()`, auto-triggering rotation on offline streams | M2 | Survey (Explorer 2) | DONE |
+| 10 | Background Tab Isolation & Non-Intrusive Playback | Tag extension-managed stream tabs (`#atd-managed=1`), open in background (`active: false`), prevent user tab hijacking | M2 | Survey (Explorer 2) | DONE |
+| 11 | Real-Time Reactive Popup Synchronization | Add `chrome.storage.onChanged` listener in `main.js` and real-time status/error banners (unauthenticated, network error) | M3 | Survey (Explorer 3) | DONE |
+| 12 | Popup UI/UX Polish & Dynamic Quality Sync | Polish micro-animations, quick controls, responsive layout, dynamic `lowQualityMode` settings sync to active stream tab | M3 | Survey (Explorer 3) | DONE |
+| 13 | Asset Optimization & Fallback SVG Glyphs | Clean unreferenced assets, verify all inline SVG fallbacks and image error handlers | M3 | Survey (Explorer 3) | DONE |
+| 14 | Automated Mock Contract Test Suite (Tiers 1-4) | Comprehensive mock test harness verifying all 9 GQL endpoints, WebSocket parsing, error branches, and contract schemas | Test Track / M4 | Survey (All Explorers) | DONE |
+| 15 | Adversarial Coverage Hardening (Tier 5) | White-box stress-testing, fault injection, edge-case simulation, and memory/listener leak validation | M4 Phase 2 | Project Pattern | DONE |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|---|---|---|---|
 | MT | E2E Testing Track | Mock contract test harness, test runner, fixtures for all GraphQL/WebSocket payloads (Tiers 1-4) | none | DONE |
 | M1 | Twitch GraphQL & WebSocket Automation Hardening | Hardening `twitchApi.js`, `onPage.js` WS/PubSub proxying, `json.data` / `errors` unwrapping, bonus points deduplication | none | DONE |
-| M2 | Stream Player Lifecycle & Resilient Worker Automation | Service worker hydration mutex, token window storage persistence, stall watchdog, offline failover, non-intrusive background tabs | M1 | IN_PROGRESS |
-| M3 | Popup UI/UX Perfection & Reactive State Sync | `chrome.storage.onChanged` reactivity, auth/error banners, micro-animations, dynamic settings sync, asset cleanup | M1, M2 | PLANNED |
-| M4 | Final Integration & 100% Verification (Tiers 1-5) | Pass 100% of E2E test suite (Tiers 1-4) + Tier 5 Adversarial Coverage Hardening with Challenger loop | MT, M1, M2, M3 | PLANNED |
+| M2 | Stream Player Lifecycle & Resilient Worker Automation | Service worker hydration mutex, token window storage persistence, stall watchdog, offline failover, non-intrusive background tabs | M1 | DONE |
+| M3 | Popup UI/UX Perfection & Reactive State Sync | `chrome.storage.onChanged` reactivity, auth/error banners, micro-animations, dynamic settings sync, asset cleanup | M1, M2 | DONE |
+| M4 | Final Integration & 100% Verification (Tiers 1-5) | Pass 100% of E2E test suite (Tiers 1-4) + Tier 5 Adversarial Coverage Hardening with Challenger loop | MT, M1, M2, M3 | DONE |
 
 ## Interface Contracts
 ### `background/twitchApi.js` ↔ Consumers (`background.js`, tests)
@@ -98,5 +98,6 @@ Auto Twitch Drops Pro is a Manifest V3 Chrome Extension designed for resilient b
     ├── tier2_boundaries/      # Boundary & error tests (70 tests)
     ├── tier3_combinations/    # Cross-feature interaction tests (14 tests)
     ├── tier4_scenarios/       # Full workload scenario tests (5 tests)
-    └── run-all-tests.js       # Unified runner
+    ├── tier5_adversarial/     # Adversarial stress tests (37 tests)
+    └── run-all-tests.js       # Unified runner (196 tests total, 100% passing)
 ```
