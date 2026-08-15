@@ -335,36 +335,37 @@ export class Client {
             }
             if (!gameSlug) return [];
 
-            const data = await this.post([
-                {
-                    "operationName": "DirectoryPage_Game",
-                    "variables": {
-                        "slug": gameSlug,
-                        "options": {
-                            "sort": "VIEWER_COUNT",
-                            "tags": ["c2542d6d-cd10-4532-919b-3d19f30a768b"],
-                            "recommendationsContext": {
-                                "platform": "web"
-                            },
-                            "requestID": "JIRA-VXP-2397"
+            const data = await this.post({
+                "operationName": "DirectoryPage_Game",
+                "variables": {
+                    "game": (gameName || "").toLowerCase(),
+                    "slug": gameSlug,
+                    "options": {
+                        "includeRestricted": ["SUB_ONLY_LIVE"],
+                        "sort": "VIEWER_COUNT",
+                        "tags": ["c2542d6d-cd10-4532-919b-3d19f30a768b"],
+                        "recommendationsContext": {
+                            "platform": "web"
                         },
-                        "sortTypeIsRecency": false,
-                        "includeCostreaming": true,
-                        "limit": 30
+                        "requestID": "JIRA-VXP-2397"
                     },
-                    "extensions": {
-                        "persistedQuery": {
-                            "version": 1,
-                            "sha256Hash": "76cb069d835b8a02914c08dc42c421d0dafda8af5b113a3f19141824b901402f"
-                        }
+                    "sortTypeIsRecency": false,
+                    "includeCostreaming": true,
+                    "limit": 30
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "76cb069d835b8a02914c08dc42c421d0dafda8af5b113a3f19141824b901402f"
                     }
                 }
-            ]);
+            });
 
-            const edges = data?.[0]?.data?.game?.streams?.edges || [];
+            const edges = data?.game?.streams?.edges || (Array.isArray(data) ? data?.[0]?.data?.game?.streams?.edges : []) || [];
             const result = [];
             for (const edge of edges) {
-                const broadcaster = edge?.node?.broadcaster;
+                const node = edge?.node || edge;
+                const broadcaster = node?.broadcaster;
                 if (broadcaster && broadcaster.login) {
                     result.push({
                         broadcaster: {

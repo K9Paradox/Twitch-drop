@@ -1017,12 +1017,14 @@ async function runCampaign(forceNextStreamer = false) {
     let streamUrl = "";
     if (targetStreamer) {
         activeStream.campaign.curWatching = targetStreamer;
-        streamUrl = `https://www.twitch.tv/${targetStreamer}#atd-managed=1`;
+        streamUrl = `https://www.twitch.tv/${targetStreamer}`;
     } else {
         const gameSlug = activeStream.campaign.slug || activeStream.campaign.game.name.toLowerCase().replace(/[^a-z0-9]/g, "-");
         activeStream.campaign.curWatching = "";
-        streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops#atd-managed=1`;
+        streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops`;
     }
+
+    enableAutoplayForTwitch();
 
     // Reset progress tracking & stall counts for new/re-targeted streamer
     activeStream.campaign.lastMinutesWatched = curCamp.minutesWatched || 0;
@@ -1369,14 +1371,11 @@ async function windowManager(func, data = {}) {
             active: false,
             ...data
         };
-        if (tabOptions.url && !tabOptions.url.includes("#atd-managed=1")) {
-            tabOptions.url = tabOptions.url.includes("#") ? tabOptions.url : `${tabOptions.url}#atd-managed=1`;
-        }
 
         if (curWindow.id === 0) {
-            const managedTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*#atd-managed=1*" }).catch(() => []);
-            if (managedTabs && managedTabs.length > 0) {
-                const tab = managedTabs[0];
+            const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
+            if (existingTabs && existingTabs.length > 0) {
+                const tab = existingTabs[0];
                 curWindow.id = tab.id;
                 curWindow.type = "tab";
                 await saveState();
@@ -1394,9 +1393,9 @@ async function windowManager(func, data = {}) {
         } else {
             let tab = await chrome.tabs.get(curWindow.id).catch(() => null);
             if (!tab) {
-                const managedTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*#atd-managed=1*" }).catch(() => []);
-                if (managedTabs && managedTabs.length > 0) {
-                    tab = managedTabs[0];
+                const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
+                if (existingTabs && existingTabs.length > 0) {
+                    tab = existingTabs[0];
                     curWindow.id = tab.id;
                     await saveState();
                 } else {
