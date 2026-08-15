@@ -100,41 +100,6 @@ if (!window._originalFetch) {
     }
 
     /**
-     * Safe Playback Watchdog
-     */
-    function safePlaybackWatchdog() {
-        try {
-            // Dismiss static Twitch prompt overlays if present
-            const promptBtns = document.querySelectorAll('[data-a-target="player-overlay-click-to-unmute"], [data-test-selector="unmute-button"]');
-            promptBtns.forEach(btn => {
-                if (btn && btn.offsetParent !== null) triggerSyntheticClick(btn);
-            });
-
-            // Ensure video element is playing (never force unmuted playback without interaction)
-            const videos = document.querySelectorAll('video');
-            videos.forEach(v => {
-                if (v && v.paused) {
-                    v.play().catch(() => {});
-                }
-            });
-        } catch (e) {}
-    }
-
-    /**
-     * Fallback DOM Low-Bandwidth Quality Enforcement
-     */
-    function enforcePlayerQualityDOM() {
-        try {
-            const qualityItems = document.querySelectorAll('[data-a-target="player-settings-menu-item"]');
-            qualityItems.forEach(item => {
-                if (item && item.textContent && item.textContent.includes("160p") && item.offsetParent !== null) {
-                    triggerSyntheticClick(item);
-                }
-            });
-        } catch (e) {}
-    }
-
-    /**
      * Auto Claim Channel Points Bonus Chests in Chat
      */
     function autoClaimPointsChests() {
@@ -151,7 +116,7 @@ if (!window._originalFetch) {
                 const btn = document.querySelector(selector);
                 if (btn && btn.offsetParent !== null) {
                     triggerSyntheticClick(btn);
-                    if (!isDuplicateClaim("dom-chest-claim", 10000)) {
+                    if (!isDuplicateClaim("dom-chest-claim", 15000)) {
                         window.postMessage({
                             autoTwitchDrops: {
                                 type: "points-earned",
@@ -165,19 +130,11 @@ if (!window._originalFetch) {
         } catch (e) {}
     }
 
-    // Run throttled watchdog every 5 seconds
-    const watchdogInterval = setInterval(() => {
-        safePlaybackWatchdog();
-        autoClaimPointsChests();
-        enforcePlayerQualityDOM();
-    }, 5000);
-    activeIntervals.push(watchdogInterval);
+    // Run bonus chest claim check every 15 seconds
+    const chestInterval = setInterval(autoClaimPointsChests, 15000);
+    activeIntervals.push(chestInterval);
 
-    setTimeout(() => {
-        safePlaybackWatchdog();
-        autoClaimPointsChests();
-        enforcePlayerQualityDOM();
-    }, 1500);
+    setTimeout(autoClaimPointsChests, 3000);
 
     // Garbage collection on unload
     window.addEventListener('beforeunload', () => {

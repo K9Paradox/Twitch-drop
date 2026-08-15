@@ -397,31 +397,7 @@ async function handleWatchdogTick() {
     if (activeStream && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaign.status === "watching") {
         if (!client) await fetchTwitchCookiesAndInitClient();
         if (client) {
-            // 1. Offline Streamer Failover & Dynamic Category Rotation
-            if (activeStream.campaign.curWatching) {
-                const streamStatus = await client.getStream(activeStream.campaign.curWatching).catch(() => null);
-                const meta = await client.getStreamMetadata(activeStream.campaign.curWatching).catch(() => null);
-
-                const activeGameLower = (activeStream.campaign.game?.name || "").toLowerCase();
-                const streamerGameLower = (meta?.game || "").toLowerCase();
-
-                const isOffline = streamStatus === null;
-                const switchedGame = !isOffline && streamerGameLower && activeGameLower &&
-                    !streamerGameLower.includes(activeGameLower) &&
-                    !activeGameLower.includes(streamerGameLower);
-
-                if (isOffline || switchedGame) {
-                    console.log(`Streamer ${activeStream.campaign.curWatching} is ${isOffline ? 'offline' : 'playing ' + meta?.game}. Triggering failover.`);
-                    activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
-                    if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
-                        activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
-                    }
-                    await runCampaign(true);
-                    return;
-                }
-            }
-
-            // 2. Inventory Sync & Drop Claiming
+            // 1. Inventory Sync & Drop Claiming
             const inventory = await client.getInventory().catch(() => null);
             if (inventory) {
                 const isDone = syncCampaignProgressWithInventory(inventory);
@@ -449,7 +425,7 @@ async function handleWatchdogTick() {
                     }
                 }
 
-                // 3. Stream Stall & Auto-Recovery Watchdog
+                // 2. Stream Stall Watchdog (15-minute threshold)
                 if (settings.autoRefresh !== false && activeStream.campaign) {
                     const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
                     const currentMinutes = curCamp ? (curCamp.minutesWatched || 0) : 0;
@@ -465,16 +441,16 @@ async function handleWatchdogTick() {
                         activeStream.campaign.lastProgressTimestamp = now;
                         activeStream.campaign.stallCount = 0;
                     } else {
-                        // Progress has stalled
+                        // Progress has stalled for >15 minutes
                         const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
-                        const stallThresholdMs = 2 * 60 * 1000; // 2-minute stall threshold
+                        const stallThresholdMs = 15 * 60 * 1000;
 
                         if (elapsedMs >= stallThresholdMs) {
                             activeStream.campaign.stallCount = (activeStream.campaign.stallCount || 0) + 1;
                             activeStream.campaign.lastProgressTimestamp = now;
 
                             if (activeStream.campaign.stallCount === 1) {
-                                console.log(`Stream stall detected for ${activeStream.campaign.curWatching} (${elapsedMs}ms). Reloading stream tab.`);
+                                console.log(`Stream stall detected for ${activeStream.campaign.curWatching}. Reloading stream tab.`);
                                 if (curWindow.id !== 0) {
                                     chrome.tabs.reload(curWindow.id).catch(() => {});
                                 }
