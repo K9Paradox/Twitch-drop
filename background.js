@@ -235,7 +235,7 @@ function syncCampaignProgressWithInventory(inventory) {
     for (const curCamp of activeStream.campaigns) {
         const matchedDropCamp = inProgressList.find(c =>
             c.id === curCamp.id ||
-            (c.game && (c.game.displayName === activeStream.campaign.game.name || c.game.name === activeStream.campaign.game.name))
+            (c.game && (c.game.displayName?.toLowerCase() === activeStream.campaign.game?.name?.toLowerCase() || c.game.name?.toLowerCase() === activeStream.campaign.game?.name?.toLowerCase()))
         );
 
         if (matchedDropCamp && matchedDropCamp.timeBasedDrops) {
@@ -456,33 +456,80 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "sessionContext":
-                if (message.data && activeStream.campaign && activeStream.campaign !== "none") {
-                    const session = message.data;
-                    if (session.currentDrop && activeStream.campaigns && activeStream.campaigns.length > 0) {
+                if (message.data) {
+                    const payload = message.data;
+                    let extractedItems = [];
+                    let currentDrop = null;
+
+                    if (payload.operation === "DropCurrentSessionContext") {
+                        const session = payload.data?.currentUser?.dropCurrentSession;
+                        if (session && session.currentDrop) {
+                            currentDrop = session.currentDrop;
+                        }
+                    } else if (payload.operation === "DropChannelCampaignsProgress") {
+                        const camps = payload.data?.user?.dropCampaignsProgress || payload.data?.channel?.dropCampaignsProgress || [];
+                        for (const c of camps) {
+                            if (c.timeBasedDrops) {
+                                for (const d of c.timeBasedDrops) {
+                                    extractedItems.push({
+                                        id: d.id,
+                                        name: d.name || "Drop Reward",
+                                        picture: d.benefitEdges?.[0]?.benefit?.imageAssetURL || d.imageURL || "assets/img/atd-48.png",
+                                        reqTime: d.requiredMinutesWatched || 60,
+                                        self: {
+                                            isClaimed: Boolean(d.self?.isClaimed),
+                                            currentMinutesWatched: d.self?.currentMinutesWatched || 0
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    } else if (payload.operation === "Inventory") {
+                        const inProg = payload.data?.currentUser?.inventory?.dropCampaignsInProgress || [];
+                        for (const c of inProg) {
+                            if (c.timeBasedDrops) {
+                                for (const d of c.timeBasedDrops) {
+                                    extractedItems.push({
+                                        id: d.id,
+                                        name: d.name || "Drop Reward",
+                                        picture: d.benefitEdges?.[0]?.benefit?.imageAssetURL || d.imageURL || "assets/img/atd-48.png",
+                                        reqTime: d.requiredMinutesWatched || 60,
+                                        self: {
+                                            isClaimed: Boolean(d.self?.isClaimed),
+                                            currentMinutesWatched: d.self?.currentMinutesWatched || 0
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    if (activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns?.length > 0) {
                         const curCamp = activeStream.campaigns[activeStream.campaign.onCamp || 0];
                         if (curCamp) {
-                            curCamp.minutesWatched = session.currentDrop.currentMinutesWatched || curCamp.minutesWatched;
-                            curCamp.minutesNeeded = session.currentDrop.requiredMinutesWatched || curCamp.minutesNeeded;
-
-                            if (!curCamp.items || curCamp.items.length === 0) {
-                                curCamp.items = [{
-                                    id: session.currentDrop.id,
-                                    name: session.currentDrop.name || "Drop Reward",
-                                    picture: session.currentDrop.imageURL || "assets/img/atd-48.png",
-                                    reqTime: session.currentDrop.requiredMinutesWatched || 60,
-                                    self: {
-                                        isClaimed: Boolean(session.currentDrop.isClaimed),
-                                        currentMinutesWatched: session.currentDrop.currentMinutesWatched || 0
-                                    }
-                                }];
-                            } else {
-                                const matched = curCamp.items.find(i => i.id === session.currentDrop.id);
-                                if (matched) {
-                                    matched.self = matched.self || {};
-                                    matched.self.currentMinutesWatched = session.currentDrop.currentMinutesWatched;
-                                    matched.self.isClaimed = Boolean(session.currentDrop.isClaimed);
-                                    if (session.currentDrop.imageURL) matched.picture = session.currentDrop.imageURL;
+                            if (extractedItems.length > 0) {
+                                curCamp.items = extractedItems;
+                            } else if (currentDrop) {
+                                const existing = curCamp.items?.find(i => i.id === currentDrop.id);
+                                if (existing) {
+                                    existing.self = existing.self || {};
+                                    existing.self.currentMinutesWatched = currentDrop.currentMinutesWatched;
+                                    existing.self.isClaimed = Boolean(currentDrop.isClaimed);
+                                    if (currentDrop.imageURL) existing.picture = currentDrop.imageURL;
+                                } else {
+                                    curCamp.items = [{
+                                        id: currentDrop.id,
+                                        name: currentDrop.name || "Drop Reward",
+                                        picture: currentDrop.imageURL || "assets/img/atd-48.png",
+                                        reqTime: currentDrop.requiredMinutesWatched || 60,
+                                        self: {
+                                            isClaimed: Boolean(currentDrop.isClaimed),
+                                            currentMinutesWatched: currentDrop.currentMinutesWatched || 0
+                                        }
+                                    }];
                                 }
+                                curCamp.minutesWatched = currentDrop.currentMinutesWatched || curCamp.minutesWatched;
+                                curCamp.minutesNeeded = currentDrop.requiredMinutesWatched || curCamp.minutesNeeded;
                             }
                             await saveState();
                             chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
@@ -999,7 +1046,7 @@ async function createCampaign(game) {
     } else {
         // Look in user inventory for matching in-progress drops
         const inProgCamp = inventory.dropCampaignsInProgress?.find(c =>
-            c.game && (c.game.displayName.toLowerCase() === game.toLowerCase() || c.game.name.toLowerCase() === game.toLowerCase())
+            c.game && (c.game.displayName?.toLowerCase() === game.toLowerCase() || c.game.name?.toLowerCase() === game.toLowerCase())
         );
 
         const items = [];

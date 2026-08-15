@@ -1,7 +1,7 @@
 // Auto Twitch Drops Pro - Page-level Interceptor & Stream Automation Engine
 
 if (!window._originalFetch) {
-    // 1. Force Twitch player volume & Low-bandwidth 160p preset in localStorage
+    // 1. Set Low-bandwidth 160p preset and safe player volume in localStorage
     try {
         localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
         localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
@@ -16,14 +16,6 @@ if (!window._originalFetch) {
                 get: function () { return false; },
                 configurable: true
             });
-        } else {
-            const docHidden = Object.getOwnPropertyDescriptor(document, 'hidden');
-            if (docHidden && docHidden.configurable) {
-                Object.defineProperty(document, 'hidden', {
-                    get: function () { return false; },
-                    configurable: true
-                });
-            }
         }
     } catch (e) {}
 
@@ -34,14 +26,6 @@ if (!window._originalFetch) {
                 get: function () { return 'visible'; },
                 configurable: true
             });
-        } else {
-            const docVis = Object.getOwnPropertyDescriptor(document, 'visibilityState');
-            if (docVis && docVis.configurable) {
-                Object.defineProperty(document, 'visibilityState', {
-                    get: function () { return 'visible'; },
-                    configurable: true
-                });
-            }
         }
     } catch (e) {}
 
@@ -66,50 +50,28 @@ if (!window._originalFetch) {
     }
 
     /**
-     * Auto Unmute & Autoplay Watchdog
+     * Safe Playback Watchdog (No aggressive unmuting loop)
      */
-    function autoBypassUnmuteOverlay() {
+    function safePlaybackWatchdog() {
         try {
-            const unmuteSelectors = [
-                '[data-a-target="player-overlay-click-to-unmute"]',
-                '[data-a-target="player-unmute-button"]',
-                'button[data-a-target="player-mute-unmute-button"][aria-label*="Unmute"]',
-                'button[data-a-target="player-mute-unmute-button"][data-a-label*="Unmute"]',
-                '.player-overlay-background button',
-                '[data-test-selector="unmute-button"]'
-            ];
+            // Dismiss static Twitch prompt overlays if present
+            const promptBtns = document.querySelectorAll('[data-a-target="player-overlay-click-to-unmute"], [data-test-selector="unmute-button"]');
+            promptBtns.forEach(btn => {
+                if (btn && btn.offsetParent !== null) triggerSyntheticClick(btn);
+            });
 
-            for (const selector of unmuteSelectors) {
-                const btn = document.querySelector(selector);
-                if (btn && btn.offsetParent !== null) {
-                    triggerSyntheticClick(btn);
-                }
-            }
-
+            // Ensure video element is playing (never force unmuted playback without interaction)
             const videos = document.querySelectorAll('video');
             videos.forEach(v => {
-                if (v) {
-                    if (v.muted) {
-                        v.muted = false;
-                    }
-                    if (v.volume < 0.1) {
-                        v.volume = 0.5;
-                    }
-                    if (v.paused) {
-                        v.play().catch(() => {
-                            v.muted = true;
-                            v.play().then(() => {
-                                setTimeout(() => { v.muted = false; }, 500);
-                            }).catch(() => {});
-                        });
-                    }
+                if (v && v.paused) {
+                    v.play().catch(() => {});
                 }
             });
         } catch (e) {}
     }
 
     /**
-     * Auto Claim Channel Points Bonus Chests in DOM
+     * Auto Claim Channel Points Bonus Chests in Chat
      */
     function autoClaimPointsChests() {
         try {
@@ -136,25 +98,19 @@ if (!window._originalFetch) {
         } catch (e) {}
     }
 
-    // Run active watchdogs continuously
+    // Run throttled watchdog every 5 seconds (no heavy MutationObserver hammer)
     setInterval(() => {
-        autoBypassUnmuteOverlay();
+        safePlaybackWatchdog();
         autoClaimPointsChests();
-    }, 1500);
+    }, 5000);
 
-    const pageObserver = new MutationObserver(() => {
-        autoBypassUnmuteOverlay();
+    // Initial check after load
+    setTimeout(() => {
+        safePlaybackWatchdog();
         autoClaimPointsChests();
-    });
+    }, 2000);
 
-    try {
-        pageObserver.observe(document.documentElement || document.body, {
-            childList: true,
-            subtree: true
-        });
-    } catch (e) {}
-
-    // Network Interceptors
+    // Network Interceptor (GraphQL & Hermes WebSocket)
     window._originalFetch = window._originalFetch || fetch;
     window.fetch = new Proxy(fetch, {
         apply: (f, s, r) => {
@@ -173,20 +129,19 @@ if (!window._originalFetch) {
                 if (res && res.url === "https://gql.twitch.tv/gql") {
                     res.clone().json().then(data => {
                         try {
-                            if (Array.isArray(data)) {
-                                data.forEach(dat => {
-                                    if (dat && dat.extensions && dat.extensions.operationName === "DropCurrentSessionContext") {
-                                        if (dat.data && dat.data.currentUser && dat.data.currentUser.dropCurrentSession) {
-                                            window.postMessage({
-                                                autoTwitchDrops: {
-                                                    type: "sessionContext",
-                                                    session: dat.data.currentUser.dropCurrentSession
-                                                }
-                                            }, "*");
+                            const operations = Array.isArray(data) ? data : [data];
+                            operations.forEach(dat => {
+                                const opName = dat?.extensions?.operationName;
+                                if (opName === "DropCurrentSessionContext" || opName === "DropChannelCampaignsProgress" || opName === "Inventory" || opName === "ViewerDropsDashboard") {
+                                    window.postMessage({
+                                        autoTwitchDrops: {
+                                            type: "sessionContext",
+                                            operation: opName,
+                                            data: dat.data
                                         }
-                                    }
-                                });
-                            }
+                                    }, "*");
+                                }
+                            });
                         } catch (err) {}
                     }).catch(() => {});
                 }
