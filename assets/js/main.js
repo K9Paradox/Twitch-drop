@@ -16,6 +16,7 @@ let gameSelectOpen = false;
 let currentAllGames = [];
 let currentActiveStream = null;
 let currentAutoGamesData = null;
+let tabAudioMuted = true;
 
 $(() => {
     // Set Manifest Version
@@ -61,12 +62,17 @@ $(() => {
             { game: { displayName: "World of Warcraft" } }
         ]);
 
-        // Request live connected games & current status
+        // Request live connected games, audio state, and current status
         if (extEnabled) {
             chrome.runtime.sendMessage({ type: "p:getConnectedGames" }).catch(() => {});
             chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
             chrome.runtime.sendMessage({ type: "getAutoDropGames" }).catch(() => {});
             chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
+            chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
+                if (res && res.muted !== undefined) {
+                    updateAudioButtonUI(res.muted);
+                }
+            }).catch(() => {});
             chrome.runtime.sendMessage({ type: "getActivityHistory" }).then((res) => {
                 if (res && res.activityHistory) renderActivityHistory(res.activityHistory);
             }).catch(() => {});
@@ -103,18 +109,27 @@ $(() => {
         btn.find("span").text("Skipping...");
         btn.attr("disabled", true);
         chrome.runtime.sendMessage({ type: "p:skipStreamer" }).catch(() => {});
-        showToast("⏭️ Switching to next live channel");
+        showToast("Switching to next live channel");
 
         setTimeout(() => {
-            btn.find("span").text("Next Streamer");
+            btn.find("span").text("Next");
             btn.removeAttr("disabled");
             chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
         }, 3000);
     });
 
+    $("#toggleAudioBtn").on("click", () => {
+        chrome.runtime.sendMessage({ type: "p:toggleTabAudio" }).then((res) => {
+            if (res && res.success) {
+                updateAudioButtonUI(res.muted);
+                showToast(res.muted ? "Muted stream tab audio" : "Unmuted stream tab audio");
+            }
+        }).catch(() => {});
+    });
+
     $("#reloadStreamBtn").on("click", () => {
         chrome.runtime.sendMessage({ type: "p:reloadStream" }).catch(() => {});
-        showToast("🔄 Stream tab reloaded");
+        showToast("Stream tab reloaded");
     });
 
     $("#focusStreamTabBtn").on("click", () => {
@@ -281,6 +296,9 @@ $(() => {
             updateDropProgressUI(message.data);
             renderActiveDropsList(currentActiveStream);
             updateLastCheckTime();
+            chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
+                if (res && res.muted !== undefined) updateAudioButtonUI(res.muted);
+            }).catch(() => {});
         } else if (message.type === "setAutoDropGames") {
             currentAutoGamesData = message.data;
             populateAutoGamesGrid(message.data);
@@ -294,6 +312,22 @@ $(() => {
         }
     });
 });
+
+function updateAudioButtonUI(isMuted) {
+    tabAudioMuted = isMuted;
+    const btn = $("#toggleAudioBtn");
+    const textSpan = $("#audioBtnText");
+
+    if (isMuted) {
+        textSpan.text("Unmute");
+        btn.attr("title", "Unmute stream tab audio to listen");
+        btn.find(".audioGlyph").html('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>');
+    } else {
+        textSpan.text("Mute");
+        btn.attr("title", "Mute stream tab audio for silence");
+        btn.find(".audioGlyph").html('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>');
+    }
+}
 
 function playClaimChime() {
     try {

@@ -527,9 +527,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             case "p:skipStreamer":
                 if (activeStream.campaign && activeStream.campaign !== "none") {
-                    console.log("Skipping current streamer on demand...");
-                    gettingStreamObj.lastPull = 0; // Force fresh streamer pull
-                    await runCampaign(true); // Skip to next
+                    console.log("Skipping to next streamer on demand...");
+                    activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                    if (activeStream.campaign.curWatching) {
+                        activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                    }
+                    await runCampaign(true);
                 }
                 sendResponse({ success: true });
                 break;
@@ -546,6 +549,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
                 }
                 sendResponse({ success: true });
+                break;
+
+            case "p:toggleTabAudio":
+                if (curWindow.id !== 0) {
+                    try {
+                        const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
+                        if (tab) {
+                            const currentlyMuted = Boolean(tab.mutedInfo && tab.mutedInfo.muted);
+                            const newMuted = !currentlyMuted;
+                            await chrome.tabs.update(curWindow.id, { muted: newMuted });
+                            sendResponse({ success: true, muted: newMuted });
+                            return;
+                        }
+                    } catch (e) {}
+                }
+                sendResponse({ success: false });
+                break;
+
+            case "p:getTabAudioState":
+                if (curWindow.id !== 0) {
+                    try {
+                        const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
+                        if (tab && tab.mutedInfo) {
+                            sendResponse({ muted: tab.mutedInfo.muted });
+                            return;
+                        }
+                    } catch (e) {}
+                }
+                sendResponse({ muted: true });
                 break;
 
             case "p:settingsChanged":
@@ -670,36 +702,31 @@ async function runCampaign(forceNextStreamer = false) {
     activeStream.campaign.isCompleted = false;
     await fetchTwitchCookiesAndInitClient();
 
-    if (!curCamp.streamers || curCamp.streamers.length === 0) {
-        const stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug);
-        if (stream === "nostream" || !stream || !stream.broadcaster) {
-            activeStream.campaign.onCamp = (activeStream.campaigns.length - 1) === activeStream.campaign.onCamp ? 0 : activeStream.campaign.onCamp + 1;
-            await saveState();
-            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
-            await windowManager("wait");
-            return;
-        }
-        activeStream.campaign.curWatching = stream.broadcaster.login;
-        await saveState();
+    let targetStreamer = null;
+
+    // 1. Fetch live channels playing the game
+    const streamInfo = await getStreamForGame(forceNextStreamer);
+    if (streamInfo && streamInfo.login) {
+        targetStreamer = streamInfo.login;
     } else {
-        const streamInfo = await getStreamForGame(forceNextStreamer);
-        if (streamInfo === null || !streamInfo.login) {
-            const stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug);
-            if (stream !== "nostream" && stream && stream.broadcaster) {
-                activeStream.campaign.curWatching = stream.broadcaster.login;
-                await saveState();
-            } else {
-                activeStream.campaign.onCamp = (activeStream.campaigns.length - 1) === activeStream.campaign.onCamp ? 0 : activeStream.campaign.onCamp + 1;
-                await saveState();
-                return;
-            }
-        } else {
-            activeStream.campaign.curWatching = streamInfo.login;
-            await saveState();
+        // Fallback to directory query
+        const stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug);
+        if (stream && stream !== "nostream" && stream.broadcaster) {
+            targetStreamer = stream.broadcaster.login;
         }
     }
 
-    const streamUrl = `https://www.twitch.tv/${activeStream.campaign.curWatching}`;
+    if (!targetStreamer) {
+        console.warn("No active live stream found for game, rotating campaign...");
+        activeStream.campaign.onCamp = (activeStream.campaigns.length - 1) === activeStream.campaign.onCamp ? 0 : activeStream.campaign.onCamp + 1;
+        await saveState();
+        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+        await windowManager("wait");
+        return;
+    }
+
+    activeStream.campaign.curWatching = targetStreamer;
+    const streamUrl = `https://www.twitch.tv/${targetStreamer}`;
     const tab = await windowManager("open", { active: true, url: streamUrl });
 
     if (settings.autoMute && tab && tab.id) {
@@ -752,7 +779,8 @@ async function createCampaign(game) {
         slug: null,
         status: "starting",
         reOpening: false,
-        isCompleted: false
+        isCompleted: false,
+        skippedStreamers: []
     };
     activeStream.campaigns = [];
 
@@ -914,7 +942,6 @@ async function checkForDrops() {
             }
 
             if (gamesToRun.length !== 0) {
-                // Priority to campaigns ending soonest!
                 gamesToRun.sort((a, b) => a.endsAt - b.endsAt);
                 console.log(`Auto queue selecting next priority game: ${gamesToRun[0].game}`);
                 await createCampaign(gamesToRun[0].game);
@@ -926,33 +953,47 @@ async function checkForDrops() {
 }
 
 async function getStreamForGame(forceNext = false) {
-    if (gettingStreamObj.lastPull + 60 <= Date.now() / 1000 || forceNext) {
+    if (gettingStreamObj.lastPull + 45 <= Date.now() / 1000 || forceNext || !gettingStreamObj.allStreamers.length) {
         gettingStreamObj.allStreamers = await client.getAllLiveForGame(activeStream.campaign.game.name).catch(() => []);
         gettingStreamObj.lastPull = Date.now() / 1000;
     }
     if (!gettingStreamObj.allStreamers || gettingStreamObj.allStreamers.length === 0) return null;
 
-    let currentWatching = activeStream.campaign ? activeStream.campaign.curWatching : "";
-    let candidates = [];
+    const skipped = activeStream.campaign?.skippedStreamers || [];
+    const curCamp = activeStream.campaigns?.[activeStream.campaign?.onCamp || 0];
+    const allowedStreamers = curCamp?.streamers || [];
+
+    let candidateLogins = [];
 
     for (const stream of gettingStreamObj.allStreamers) {
         if (stream && stream.data && stream.data.userOrError && stream.data.userOrError.login) {
             const login = stream.data.userOrError.login;
-            if (forceNext && login === currentWatching) continue;
-            candidates.push(login);
+            if (allowedStreamers.length > 0 && !allowedStreamers.includes(login)) continue;
+            candidateLogins.push(login);
         }
     }
 
-    if (candidates.length === 0) {
-        candidates = gettingStreamObj.allStreamers.map(s => s?.data?.userOrError?.login).filter(Boolean);
+    if (candidateLogins.length === 0) {
+        candidateLogins = gettingStreamObj.allStreamers.map(s => s?.data?.userOrError?.login).filter(Boolean);
     }
 
-    let selectedStream = candidates[0] || null;
-    if (!selectedStream) return null;
+    // Filter out previously skipped streamers
+    let freshCandidates = candidateLogins.filter(login => !skipped.includes(login));
 
-    const currentStreamInfo = await client.getStreamMetadata(selectedStream).catch(() => null);
+    // If all candidates have been skipped, reset skipped list
+    if (freshCandidates.length === 0) {
+        activeStream.campaign.skippedStreamers = [];
+        freshCandidates = candidateLogins;
+    }
+
+    const selectedLogin = freshCandidates[0] || null;
+    if (!selectedLogin) return null;
+
+    const currentStreamInfo = await client.getStreamMetadata(selectedLogin).catch(() => null);
     if (currentStreamInfo) {
-        currentStreamInfo.login = selectedStream;
+        currentStreamInfo.login = selectedLogin;
+    } else {
+        return { login: selectedLogin };
     }
     return currentStreamInfo;
 }

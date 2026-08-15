@@ -24,14 +24,62 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
             }
         });
 
-        chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-            if (message && message.type === "setFavicon") {
-                const fav1 = document.querySelector("link[rel~='icon'][sizes~='32x32']");
-                if (fav1) fav1.href = chrome.runtime.getURL("/assets/img/atd-32.png");
-                const fav2 = document.querySelector("link[rel~='icon'][sizes~='16x16']");
-                if (fav2) fav2.href = chrome.runtime.getURL("/assets/img/atd-16.png");
+        // Add Tab Title Prefix indicator
+        function updateTabTitleIndicator() {
+            if (document.title && !document.title.startsWith("[⚡ ATD Pro]")) {
+                document.title = `[⚡ ATD Pro] ${document.title}`;
             }
-        });
+        }
+        setInterval(updateTabTitleIndicator, 3000);
+        setTimeout(updateTabTitleIndicator, 1000);
+
+        // Inject in-page floating glassmorphic badge
+        function injectFloatingBadge() {
+            if (document.getElementById("atd-pro-indicator")) return;
+            const badge = document.createElement("div");
+            badge.id = "atd-pro-indicator";
+            badge.innerHTML = `
+                <div style="
+                    position: fixed;
+                    bottom: 18px;
+                    right: 18px;
+                    z-index: 999999;
+                    background: rgba(24, 24, 27, 0.92);
+                    backdrop-filter: blur(8px);
+                    border: 1px solid #9146FF;
+                    box-shadow: 0 4px 16px rgba(0,0,0,0.6), 0 0 10px rgba(145, 70, 255, 0.35);
+                    border-radius: 20px;
+                    padding: 6px 12px;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: #efeff1;
+                    user-select: none;
+                    cursor: default;
+                    transition: transform 0.2s ease, opacity 0.2s ease;
+                ">
+                    <span style="
+                        width: 7px;
+                        height: 7px;
+                        border-radius: 50%;
+                        background-color: #00F59B;
+                        box-shadow: 0 0 6px #00F59B;
+                        display: inline-block;
+                    "></span>
+                    <span>⚡ Auto Drops Pro Active</span>
+                </div>
+            `;
+            document.body.appendChild(badge);
+        }
+
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", injectFloatingBadge);
+        } else {
+            injectFloatingBadge();
+        }
 
         injectScript("onPage.js");
     }
@@ -58,38 +106,39 @@ setTimeout(() => {
         try {
             const rawUuid = localStorage.getItem("local_storage_app_session_id");
             if (rawUuid) {
-                uuid = rawUuid.replace(/"/g, '');
+                const parsed = JSON.parse(rawUuid);
+                if (parsed && parsed.session_id) uuid = parsed.session_id;
             }
         } catch (err) {
             console.warn("Could not read local_storage_app_session_id from localStorage", err);
         }
 
-        if (authToken || deviceId) {
-            chrome.runtime.sendMessage({
-                type: "clientInfo",
-                data: {
-                    oauthToken: authToken,
-                    userId: userId,
-                    deviceId: deviceId,
-                    uuid: uuid
-                }
-            }).catch(() => {});
-        }
+        chrome.runtime.sendMessage({
+            type: "clientInfo",
+            data: {
+                oauthToken: authToken,
+                deviceId: deviceId,
+                userId: userId,
+                uuid: uuid
+            }
+        }).catch(() => {});
     } catch (e) {
-        console.error("Error sending clientInfo in inject.js:", e);
+        console.warn("Error grabbing auth cookies in inject.js:", e);
     }
-}, 1000);
+}, 1500);
 
-function getCookieValue(name) {
-    const regex = new RegExp(`(^| )${name}=([^;]+)`);
-    const match = document.cookie.match(regex);
-    return match ? match[2] : null;
+function getCookieValue(cookieName) {
+    const cookies = document.cookie ? document.cookie.split("; ") : [];
+    for (let c of cookies) {
+        const [name, val] = c.split("=");
+        if (name === cookieName) return val;
+    }
+    return "";
 }
 
 function injectScript(src) {
-    const s = document.createElement('script');
+    const s = document.createElement("script");
     s.src = chrome.runtime.getURL(src);
-    s.type = "module";
     s.onload = () => s.remove();
-    (document.head || document.documentElement).append(s);
+    (document.head || document.documentElement).appendChild(s);
 }
