@@ -1,12 +1,14 @@
-// Auto Twitch Drops Pro - Page-level Interceptor & Autoplay Unmute Bypass
+// Auto Twitch Drops Pro - Page-level Interceptor & Stream Automation Engine
 
 if (!window._originalFetch) {
-    // Force Twitch player volume in localStorage to unmuted and active
+    // 1. Force Twitch player volume & Low-bandwidth 160p preset in localStorage
     try {
         localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
+        localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
+        localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
     } catch (e) {}
 
-    // Safely override Page Visibility API so Twitch never pauses background/minimized streams
+    // 2. Safely override Page Visibility API so Twitch never pauses background/minimized streams
     try {
         const protoHidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
         if (protoHidden && protoHidden.configurable) {
@@ -50,8 +52,7 @@ if (!window._originalFetch) {
     } catch (e) {}
 
     /**
-     * Automatic "Click to Unmute" Overlay & Autoplay Bypass
-     * Automatically simulates clicks on Twitch's unmute overlay and player controls
+     * Synthetic Click Trigger
      */
     function triggerSyntheticClick(element) {
         if (!element) return;
@@ -64,6 +65,9 @@ if (!window._originalFetch) {
         } catch (err) {}
     }
 
+    /**
+     * Auto Unmute & Autoplay Watchdog
+     */
     function autoBypassUnmuteOverlay() {
         try {
             // 1. Twitch "Click to Unmute" overlays
@@ -95,7 +99,7 @@ if (!window._originalFetch) {
                     }
                     if (v.paused) {
                         v.play().catch(() => {
-                            // If browser blocks unmuted play, briefly mute to start stream and immediately unmute
+                            // If browser blocks unmuted play, briefly start muted then unmute
                             v.muted = true;
                             v.play().then(() => {
                                 setTimeout(() => { v.muted = false; }, 500);
@@ -107,16 +111,48 @@ if (!window._originalFetch) {
         } catch (e) {}
     }
 
-    // Run immediately and continuously every 1.5s
-    setInterval(autoBypassUnmuteOverlay, 1500);
+    /**
+     * Auto Claim Channel Points Bonus Chests in DOM
+     */
+    function autoClaimPointsChests() {
+        try {
+            const chestButtons = [
+                '[aria-label="Claim Bonus"]',
+                '[aria-label="Claim bonus"]',
+                '[data-a-target="claim-channel-points-button"]',
+                '.community-points-summary button',
+                '[data-test-selector="community-points-summary"] button'
+            ];
 
-    // Watch DOM mutations to instantly catch and click Twitch unmute overlays when injected
-    const unmuteObserver = new MutationObserver(() => {
+            for (const selector of chestButtons) {
+                const btn = document.querySelector(selector);
+                if (btn && btn.offsetParent !== null) {
+                    triggerSyntheticClick(btn);
+                    window.postMessage({
+                        autoTwitchDrops: {
+                            type: "points-earned",
+                            points: 50
+                        }
+                    }, "*");
+                }
+            }
+        } catch (e) {}
+    }
+
+    // Run active watchdogs continuously
+    setInterval(() => {
         autoBypassUnmuteOverlay();
+        autoClaimPointsChests();
+    }, 1500);
+
+    // Watch DOM mutations for instant overlay / chest detection
+    const pageObserver = new MutationObserver(() => {
+        autoBypassUnmuteOverlay();
+        autoClaimPointsChests();
     });
 
     try {
-        unmuteObserver.observe(document.documentElement || document.body, {
+        pageObserver.observe(document.documentElement || document.body, {
             childList: true,
             subtree: true
         });

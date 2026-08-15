@@ -1,6 +1,16 @@
 // Auto Twitch Drops Pro - Popup UI Controller
 const maniData = chrome.runtime.getManifest();
-let settings = {};
+let settings = {
+    autoRefresh: true,
+    showAllGames: true,
+    autoGetToken: true,
+    watchPopout: true,
+    autoMute: true,
+    setShowBadges: true,
+    soundOnClaim: false,
+    desktopNotifications: true,
+    lowQualityMode: true
+};
 let extEnabled = true;
 let gameSelectOpen = false;
 let currentAllGames = [];
@@ -23,7 +33,7 @@ $(() => {
         }
 
         if (val.settings) {
-            settings = val.settings;
+            settings = { ...settings, ...val.settings };
             for (let k in settings) {
                 $(`#set${k}`).prop("checked", settings[k]);
             }
@@ -85,6 +95,30 @@ $(() => {
             chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
             renderActiveDropsList(currentActiveStream);
         }
+    });
+
+    // Stream Quick Control Toolbar Buttons
+    $("#skipStreamerBtn").on("click", () => {
+        const btn = $("#skipStreamerBtn");
+        btn.find("span").text("Skipping...");
+        btn.attr("disabled", true);
+        chrome.runtime.sendMessage({ type: "p:skipStreamer" }).catch(() => {});
+        showToast("⏭️ Switching to next live channel");
+
+        setTimeout(() => {
+            btn.find("span").text("Next Streamer");
+            btn.removeAttr("disabled");
+            chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+        }, 3000);
+    });
+
+    $("#reloadStreamBtn").on("click", () => {
+        chrome.runtime.sendMessage({ type: "p:reloadStream" }).catch(() => {});
+        showToast("🔄 Stream tab reloaded");
+    });
+
+    $("#focusStreamTabBtn").on("click", () => {
+        chrome.runtime.sendMessage({ type: "p:focusStreamTab" }).catch(() => {});
     });
 
     // Open Twitch Drops Inventory Button
@@ -255,9 +289,32 @@ $(() => {
             updateLastCheckTime();
         } else if (message.type === "p:activityUpdated") {
             renderActivityHistory(message.data);
+        } else if (message.type === "p:rewardClaimedSound") {
+            if (settings.soundOnClaim) playClaimChime();
         }
     });
 });
+
+function playClaimChime() {
+    try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // D5
+        osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.15); // A5
+
+        gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.35);
+
+        osc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.35);
+    } catch (e) {}
+}
 
 function showToast(text) {
     let toast = $("#toastNotification");
@@ -380,6 +437,7 @@ function updateDropProgressUI(data) {
         $(".progressBarInner").css({ "width": "0%", "background": "var(--twitch-purple)" });
         $(".progressPercentText").text("0%");
         $("#activeDropDetails").empty();
+        $("#streamToolbar").hide();
         return;
     }
 
@@ -437,6 +495,7 @@ function updateDropProgressUI(data) {
         $("#headerStatusPill").html('<span class="statusDot activeDot"></span><span>Completed</span>').addClass("activePill");
         $(".progressBarInner").css({ "width": "100%", "background": "linear-gradient(90deg, #00f59b 0%, #00d684 100%)" });
         $(".progressPercentText").text("100% (All Rewards Claimed)");
+        $("#streamToolbar").hide();
 
         const iconsHtml = allItems.map(item => {
             const img = item.picture || item.imageAssetURL || item.imageURL || "assets/img/atd-48.png";
@@ -467,9 +526,11 @@ function updateDropProgressUI(data) {
     if (camp.curWatching) {
         $("#dropGame").html(`Watching: <a href="https://www.twitch.tv/${camp.curWatching}" target="_blank" class="streamerLink">@${camp.curWatching} ↗</a>`);
         $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>@${camp.curWatching}</span>`).addClass("activePill");
+        $("#streamToolbar").show();
     } else {
         $("#dropGame").text(`Finding live stream for ${gameName}...`);
         $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>${gameName}</span>`).addClass("activePill");
+        $("#streamToolbar").hide();
     }
     $("#dropStatus").text(`Farming: ${gameName}`);
 

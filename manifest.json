@@ -15,7 +15,8 @@
       "storage",
       "tabs",
       "cookies",
-      "contentSettings"
+      "contentSettings",
+      "notifications"
    ],
    "host_permissions": [
       "*://*.twitch.tv/*",

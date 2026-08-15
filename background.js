@@ -11,7 +11,9 @@ let settings = {
     watchPopout: true,
     autoMute: true,
     setShowBadges: true,
-    soundOnClaim: false
+    soundOnClaim: false,
+    desktopNotifications: true,
+    lowQualityMode: true
 };
 let listOfConnected = [];
 let autoDropGames = [];
@@ -97,6 +99,20 @@ async function hydrateState() {
     }
 }
 
+function notifyUser(title, message) {
+    if (settings.desktopNotifications && chrome.notifications) {
+        try {
+            chrome.notifications.create({
+                type: "basic",
+                iconUrl: "assets/img/atd-128.png",
+                title: title,
+                message: message,
+                priority: 2
+            });
+        } catch (e) {}
+    }
+}
+
 function logActivity(type, title, game, points = 0, imgUrl = "assets/img/atd-48.png") {
     const entry = {
         id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -163,20 +179,14 @@ async function fetchTwitchCookiesAndInitClient() {
     }
 }
 
-/**
- * Accurately check if a drop item is claimed based on explicit Twitch API data.
- * Does NOT do loose/fuzzy string matching against historical event drops.
- */
 function isDropItemClaimedStrict(item, eventDropsList) {
     if (!item) return false;
-    // 1. Direct explicit claim flag on self object
     if (item.self && item.self.isClaimed === true) return true;
     if (!eventDropsList || eventDropsList.length === 0) return false;
 
     const itemId = (item.id || "").toLowerCase();
     const benefitId = (item.benefitId || "").toLowerCase();
 
-    // 2. Strict ID matching only against gameEventDrops
     for (const evt of eventDropsList) {
         if (!evt) continue;
         const evtId = (evt.id || "").toLowerCase();
@@ -211,7 +221,6 @@ function syncCampaignProgressWithInventory(inventory) {
                     curCamp.minutesNeeded = reqMinutes;
                 }
 
-                // Check strict claim state:
                 const isExplicitlyClaimed = (drop.self && drop.self.isClaimed === true) || isDropItemClaimedStrict(drop, eventDropsList);
                 const currentWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
                     ? drop.self.currentMinutesWatched
@@ -221,7 +230,6 @@ function syncCampaignProgressWithInventory(inventory) {
                     maxWatchedInCamp = currentWatched;
                 }
 
-                // If not claimed and watched time hasn't reached required minutes, it is NOT completed
                 if (!isExplicitlyClaimed && currentWatched < reqMinutes) {
                     allDropsClaimedInCamp = false;
                 }
@@ -313,7 +321,9 @@ async function handleWatchdogTick() {
                     });
 
                     if (allDone) {
-                        console.log("All campaigns strictly completed! Preserving finished state...");
+                        console.log("All campaigns strictly completed!");
+                        const gameName = activeStream.campaign.game ? activeStream.campaign.game.name : "Target Game";
+                        notifyUser("Drop Campaign Completed", `All available drops for ${gameName} have been claimed!`);
                         if (activeStream.campaign) {
                             activeStream.campaign.isCompleted = true;
                             activeStream.campaign.curWatching = null;
@@ -458,7 +468,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     console.error("Error fetching connected games:", e);
                 }
 
-                // Fallback default games
+                // Default popular games
                 const defaultGames = [
                     { game: { displayName: "Overwatch 2" }, self: { isAccountConnected: true } },
                     { game: { displayName: "World of Warcraft" }, self: { isAccountConnected: true } },
@@ -513,6 +523,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
                 sendResponse({ activeStream });
+                break;
+
+            case "p:skipStreamer":
+                if (activeStream.campaign && activeStream.campaign !== "none") {
+                    console.log("Skipping current streamer on demand...");
+                    gettingStreamObj.lastPull = 0; // Force fresh streamer pull
+                    await runCampaign(true); // Skip to next
+                }
+                sendResponse({ success: true });
+                break;
+
+            case "p:reloadStream":
+                if (curWindow.id !== 0) {
+                    chrome.tabs.reload(curWindow.id).catch(() => {});
+                }
+                sendResponse({ success: true });
+                break;
+
+            case "p:focusStreamTab":
+                if (curWindow.id !== 0) {
+                    chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
+                }
+                sendResponse({ success: true });
                 break;
 
             case "p:settingsChanged":
@@ -605,7 +638,7 @@ async function startup() {
 
 // --- Campaign Execution Engine ---
 
-async function runCampaign() {
+async function runCampaign(forceNextStreamer = false) {
     if (!activeStream.campaign || !activeStream.campaigns || activeStream.campaigns.length === 0) return;
     if (activeStream.campaign.reOpening) activeStream.campaign.reOpening = false;
 
@@ -615,7 +648,6 @@ async function runCampaign() {
         return;
     }
 
-    // Check if truly all drops are completed
     let allDropsGot = activeStream.campaigns.every(camp => {
         if (camp.items && camp.items.length > 0) {
             return camp.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)));
@@ -636,7 +668,6 @@ async function runCampaign() {
     }
 
     activeStream.campaign.isCompleted = false;
-
     await fetchTwitchCookiesAndInitClient();
 
     if (!curCamp.streamers || curCamp.streamers.length === 0) {
@@ -651,7 +682,7 @@ async function runCampaign() {
         activeStream.campaign.curWatching = stream.broadcaster.login;
         await saveState();
     } else {
-        const streamInfo = await getStreamForGame();
+        const streamInfo = await getStreamForGame(forceNextStreamer);
         if (streamInfo === null || !streamInfo.login) {
             const stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug);
             if (stream !== "nostream" && stream && stream.broadcaster) {
@@ -894,36 +925,30 @@ async function checkForDrops() {
     }
 }
 
-async function getStreamForGame() {
-    if (gettingStreamObj.lastPull + 60 <= Date.now() / 1000) {
+async function getStreamForGame(forceNext = false) {
+    if (gettingStreamObj.lastPull + 60 <= Date.now() / 1000 || forceNext) {
         gettingStreamObj.allStreamers = await client.getAllLiveForGame(activeStream.campaign.game.name).catch(() => []);
         gettingStreamObj.lastPull = Date.now() / 1000;
     }
     if (!gettingStreamObj.allStreamers || gettingStreamObj.allStreamers.length === 0) return null;
 
-    let selectedStream = "";
-    let dropLive = false;
+    let currentWatching = activeStream.campaign ? activeStream.campaign.curWatching : "";
+    let candidates = [];
 
     for (const stream of gettingStreamObj.allStreamers) {
         if (stream && stream.data && stream.data.userOrError && stream.data.userOrError.login) {
             const login = stream.data.userOrError.login;
-            const curCamp = activeStream.campaigns[activeStream.campaign.onCamp];
-            if (curCamp && curCamp.streamers && curCamp.streamers.includes(login) && stream.data.userOrError.stream != null) {
-                selectedStream = login;
-                dropLive = true;
-                break;
-            }
+            if (forceNext && login === currentWatching) continue;
+            candidates.push(login);
         }
     }
 
-    if (!dropLive) {
-        const first = gettingStreamObj.allStreamers[0];
-        if (first && first.data && first.data.userOrError) {
-            selectedStream = first.data.userOrError.login;
-        } else {
-            return null;
-        }
+    if (candidates.length === 0) {
+        candidates = gettingStreamObj.allStreamers.map(s => s?.data?.userOrError?.login).filter(Boolean);
     }
+
+    let selectedStream = candidates[0] || null;
+    if (!selectedStream) return null;
 
     const currentStreamInfo = await client.getStreamMetadata(selectedStream).catch(() => null);
     if (currentStreamInfo) {
@@ -943,12 +968,16 @@ async function checkClaimDrop() {
                 if (drop.requiredMinutesWatched !== 0 && drop.self && drop.requiredMinutesWatched <= drop.self.currentMinutesWatched && !drop.self.isClaimed) {
                     const dropClaim = await client.claimDropReward(drop.self.dropInstanceID);
                     if (dropClaim) {
-                        console.log("Claimed Drop successfully:", drop.name);
+                        const rewardTitle = drop.name || "Drop Reward";
+                        const gameName = camp.game ? camp.game.displayName : "Twitch Drop";
+                        console.log("Claimed Drop successfully:", rewardTitle);
                         extStats.claimedDrops++;
                         const img = drop.benefitEdges && drop.benefitEdges[0] ? drop.benefitEdges[0].benefit.imageAssetURL : "assets/img/atd-48.png";
-                        logActivity("drop", drop.name || "Drop Reward Claimed", camp.game ? camp.game.displayName : "Twitch Drop", 0, img);
+                        logActivity("drop", rewardTitle, gameName, 0, img);
+                        notifyUser("Drop Reward Claimed!", `Successfully claimed ${rewardTitle} for ${gameName}`);
                         await saveState();
                         chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
+                        chrome.runtime.sendMessage({ type: "p:rewardClaimedSound" }).catch(() => {});
                     }
                 }
             }
