@@ -2,7 +2,7 @@
     --bg-base: #0e0e10;
     --bg-card: #18181b;
     --bg-card-hover: #1f1f23;
-    --bg-input: #0e0e10;
+    --bg-input: #121214;
     --border-subtle: #26262c;
     --border-focus: #9146FF;
     --text-primary: #efeff1;
@@ -24,8 +24,8 @@
 }
 
 body {
-    width: 380px;
-    height: 560px;
+    width: 440px;
+    height: 580px;
     font-family: var(--font-stack);
     background-color: var(--bg-base);
     color: var(--text-primary);
@@ -44,7 +44,7 @@ body {
 /* Toast Notifications */
 .toastNotice {
     position: absolute;
-    top: 60px;
+    top: 55px;
     left: 50%;
     transform: translateX(-50%) translateY(-20px);
     background: rgba(24, 24, 27, 0.95);
@@ -52,9 +52,9 @@ body {
     color: var(--text-primary);
     border: 1px solid var(--twitch-purple);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6), 0 0 12px var(--twitch-purple-glow);
-    padding: 8px 14px;
+    padding: 8px 16px;
     border-radius: 8px;
-    font-size: 11px;
+    font-size: 11.5px;
     font-weight: 600;
     opacity: 0;
     pointer-events: none;
@@ -77,7 +77,7 @@ body {
     padding: 10px 14px;
     background-color: var(--bg-card);
     border-bottom: 1px solid var(--border-subtle);
-    height: 52px;
+    height: 50px;
     flex-shrink: 0;
 }
 
@@ -131,14 +131,14 @@ body {
 }
 
 .headerStatusPill {
-    font-size: 10px;
+    font-size: 10.5px;
     font-weight: 600;
-    padding: 3px 8px;
+    padding: 3px 10px;
     border-radius: 12px;
     background: var(--bg-base);
     border: 1px solid var(--border-subtle);
     color: var(--text-secondary);
-    max-width: 140px;
+    max-width: 170px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -199,35 +199,28 @@ body {
     transform: translateX(16px);
 }
 
-/* Main Layout */
-#bodyLayout {
+/* Top Navigation Bar */
+#topNav {
     display: flex;
-    flex: 1;
-    overflow: hidden;
-}
-
-/* Sidebar Navigation */
-#sidebar {
-    width: 62px;
+    align-items: center;
+    justify-content: space-around;
     background-color: var(--bg-card);
-    border-right: 1px solid var(--border-subtle);
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 4px;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 2px 6px;
     flex-shrink: 0;
 }
 
 .navItem {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    padding: 8px 2px;
-    border-radius: 8px;
+    gap: 6px;
+    padding: 8px 12px;
+    border-radius: 6px;
     cursor: pointer;
     transition: all 0.15s ease;
     color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
 }
 
 .navItem:hover {
@@ -236,18 +229,17 @@ body {
 }
 
 .navItem.active {
-    background-color: rgba(145, 70, 255, 0.12);
+    background-color: rgba(145, 70, 255, 0.15);
     color: var(--twitch-purple-light);
     font-weight: 700;
 }
 
 .navIcon {
-    font-size: 16px;
-    margin-bottom: 2px;
+    font-size: 14px;
 }
 
 .navLabel {
-    font-size: 9.5px;
+    font-size: 11px;
     letter-spacing: 0.2px;
 }
 
@@ -255,12 +247,12 @@ body {
 #contentArea {
     flex: 1;
     overflow-y: auto;
-    padding: 10px;
+    padding: 12px 14px;
     background-color: var(--bg-base);
 }
 
 #contentArea::-webkit-scrollbar {
-    width: 5px;
+    width: 6px;
 }
 
 #contentArea::-webkit-scrollbar-track {
@@ -279,7 +271,7 @@ body {
 .page {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
 }
 
 /* Cards */
@@ -287,7 +279,7 @@ body {
     background-color: var(--bg-card);
     border: 1px solid var(--border-subtle);
     border-radius: 10px;
-    padding: 12px;
+    padding: 12px 14px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     transition: border-color 0.2s ease;
 }
@@ -300,7 +292,7 @@ body {
 }
 
 .cardTitle {
-    font-size: 12px;
+    font-size: 12.5px;
     font-weight: 700;
     color: var(--text-primary);
     letter-spacing: 0.3px;
@@ -312,32 +304,32 @@ body {
 }
 
 .cardSubtext {
-    font-size: 11px;
+    font-size: 11.5px;
     color: var(--text-secondary);
     line-height: 1.45;
 }
 
 .subText {
-    font-size: 11px;
+    font-size: 11.5px;
     color: var(--text-muted);
     text-align: center;
-    padding: 14px 6px;
-    line-height: 1.4;
+    padding: 18px 8px;
+    line-height: 1.45;
 }
 
 /* Status Card */
 .statusCard {
-    background: linear-gradient(135deg, rgba(145, 70, 255, 0.1) 0%, rgba(24, 24, 27, 0.9) 100%);
-    border: 1px solid rgba(145, 70, 255, 0.3);
+    background: linear-gradient(135deg, rgba(145, 70, 255, 0.12) 0%, rgba(24, 24, 27, 0.95) 100%);
+    border: 1px solid rgba(145, 70, 255, 0.35);
     border-radius: 10px;
-    padding: 10px 12px;
+    padding: 12px 14px;
 }
 
 .statusHeader {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
 }
 
 .statusPulse {
@@ -356,7 +348,7 @@ body {
 }
 
 .statusTitle {
-    font-size: 12px;
+    font-size: 12.5px;
     font-weight: 700;
     color: var(--text-primary);
     overflow: hidden;
@@ -368,21 +360,22 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--text-secondary);
+    gap: 8px;
 }
 
 .statusSub {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 170px;
+    flex: 1;
 }
 
 .streamerLink {
     color: var(--twitch-purple-light);
     text-decoration: none;
-    font-weight: 600;
+    font-weight: 700;
 }
 
 .streamerLink:hover {
@@ -390,8 +383,9 @@ body {
 }
 
 .lastCheckTime {
-    font-size: 9.5px;
+    font-size: 10px;
     color: var(--text-muted);
+    flex-shrink: 0;
 }
 
 /* Custom Select Dropdown */
@@ -406,8 +400,8 @@ body {
     background-color: var(--bg-input);
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 11.5px;
+    padding: 9px 12px;
+    font-size: 12px;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.2s ease;
@@ -437,7 +431,7 @@ body {
 .dropdownSearchBox {
     display: flex;
     align-items: center;
-    padding: 6px;
+    padding: 6px 8px;
     border-bottom: 1px solid var(--border-subtle);
     background-color: var(--bg-input);
 }
@@ -448,7 +442,7 @@ body {
     border: none;
     outline: none;
     color: var(--text-primary);
-    font-size: 11px;
+    font-size: 11.5px;
     padding: 4px 6px;
 }
 
@@ -473,7 +467,7 @@ body {
 
 .dropdownList li {
     padding: 8px 12px;
-    font-size: 11px;
+    font-size: 11.5px;
     color: var(--text-primary);
     cursor: pointer;
     transition: background 0.15s ease;
@@ -488,41 +482,43 @@ body {
 .dropProgressContainer {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
 }
 
 .activeDropMetaRow {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
 }
 
 .activeRewardItem {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     background: var(--bg-input);
-    padding: 8px 10px;
+    padding: 10px 12px;
     border-radius: 8px;
     border: 1px solid var(--border-subtle);
 }
 
 .activeRewardThumb {
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     border-radius: 6px;
     object-fit: cover;
     background: #000;
+    flex-shrink: 0;
 }
 
 .activeRewardMeta {
     display: flex;
     flex-direction: column;
+    flex: 1;
     overflow: hidden;
 }
 
 .activeRewardTitle {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 700;
     color: var(--text-primary);
     overflow: hidden;
@@ -531,9 +527,9 @@ body {
 }
 
 .activeRewardSub {
-    font-size: 10px;
+    font-size: 10.5px;
     color: var(--text-secondary);
-    margin-top: 2px;
+    margin-top: 3px;
 }
 
 .dropBox {
@@ -542,17 +538,17 @@ body {
 
 .progressBarOuter {
     position: relative;
-    height: 20px;
+    height: 22px;
     background-color: var(--bg-input);
     border: 1px solid var(--border-subtle);
-    border-radius: 10px;
+    border-radius: 11px;
     overflow: hidden;
 }
 
 .progressBarInner {
     height: 100%;
     background: linear-gradient(90deg, var(--twitch-purple) 0%, var(--twitch-purple-light) 100%);
-    border-radius: 10px;
+    border-radius: 11px;
     transition: width 0.4s ease;
 }
 
@@ -561,11 +557,12 @@ body {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    font-size: 10px;
+    font-size: 10.5px;
     font-weight: 700;
     color: #ffffff;
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
     pointer-events: none;
+    white-space: nowrap;
 }
 
 /* Completed Card Banner */
@@ -573,31 +570,31 @@ body {
     background: rgba(0, 245, 155, 0.08);
     border: 1px solid var(--emerald-green);
     border-radius: 8px;
-    padding: 10px;
+    padding: 12px;
 }
 
 .completedHeader {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
 }
 
 .completedTitle {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 700;
     color: var(--emerald-green);
 }
 
 .completedSub {
-    font-size: 10px;
+    font-size: 10.5px;
     color: var(--text-secondary);
 }
 
 .completedGridRow {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
-    gap: 6px;
+    grid-template-columns: repeat(auto-fill, minmax(65px, 1fr));
+    gap: 8px;
 }
 
 .completedRewardIconCard {
@@ -613,8 +610,8 @@ body {
 }
 
 .completedThumb {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     border-radius: 4px;
     object-fit: cover;
 }
@@ -627,7 +624,7 @@ body {
 }
 
 .completedRewardLabel {
-    font-size: 8.5px;
+    font-size: 9px;
     color: var(--text-secondary);
     margin-top: 4px;
     overflow: hidden;
@@ -642,8 +639,8 @@ body {
     color: #ffffff;
     border: none;
     border-radius: 6px;
-    padding: 5px 10px;
-    font-size: 10.5px;
+    padding: 6px 12px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
     transition: all 0.2s ease;
@@ -684,19 +681,19 @@ body {
 .dropsListContainer {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    max-height: 420px;
+    gap: 8px;
+    max-height: 440px;
     overflow-y: auto;
 }
 
 .dropRewardCard {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     background: var(--bg-input);
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
-    padding: 8px 10px;
+    padding: 10px 12px;
     transition: transform 0.15s ease;
 }
 
@@ -711,11 +708,12 @@ body {
 }
 
 .rewardImage {
-    width: 36px;
-    height: 36px;
+    width: 42px;
+    height: 42px;
     border-radius: 6px;
     object-fit: cover;
     background: #000;
+    flex-shrink: 0;
 }
 
 .rewardInfo {
@@ -726,7 +724,7 @@ body {
 }
 
 .rewardName {
-    font-size: 11px;
+    font-size: 11.5px;
     font-weight: 700;
     color: var(--text-primary);
     overflow: hidden;
@@ -735,17 +733,18 @@ body {
 }
 
 .rewardTime {
-    font-size: 9.5px;
+    font-size: 10px;
     color: var(--text-secondary);
-    margin-top: 2px;
+    margin-top: 3px;
 }
 
 .rewardBadge {
-    font-size: 9.5px;
+    font-size: 10px;
     font-weight: 700;
-    padding: 3px 6px;
+    padding: 4px 8px;
     border-radius: 4px;
     white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .claimedBadge {
@@ -776,14 +775,14 @@ body {
 }
 
 .noticeTitle {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 700;
     color: var(--twitch-purple-light);
 }
 
 .autoGamesToolbar {
     display: flex;
-    gap: 6px;
+    gap: 8px;
     margin-bottom: 10px;
 }
 
@@ -793,8 +792,8 @@ body {
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 11px;
-    padding: 6px 8px;
+    font-size: 11.5px;
+    padding: 6px 10px;
     outline: none;
 }
 
@@ -804,14 +803,14 @@ body {
 
 .toolbarButtons {
     display: flex;
-    gap: 4px;
+    gap: 6px;
 }
 
 .autoGamesGrid {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    max-height: 280px;
+    gap: 8px;
+    max-height: 320px;
     overflow-y: auto;
 }
 
@@ -822,7 +821,7 @@ body {
     background: var(--bg-input);
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
-    padding: 8px 10px;
+    padding: 10px 12px;
     transition: all 0.2s ease;
 }
 
@@ -838,11 +837,11 @@ body {
 .autoGameMeta {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
 }
 
 .autoGameIcon {
-    font-size: 16px;
+    font-size: 18px;
 }
 
 .autoGameTitleGroup {
@@ -851,13 +850,13 @@ body {
 }
 
 .autoGameName {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
     color: var(--text-primary);
 }
 
 .autoGameStatusTag {
-    font-size: 9.5px;
+    font-size: 10px;
     color: var(--text-secondary);
     margin-top: 2px;
 }
@@ -866,7 +865,7 @@ body {
 .statsGrid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 8px;
+    gap: 10px;
 }
 
 .statCard {
@@ -877,23 +876,23 @@ body {
     background: var(--bg-card);
     border: 1px solid var(--border-subtle);
     border-radius: 10px;
-    padding: 12px;
+    padding: 14px 10px;
     text-align: center;
 }
 
 .statIcon {
-    font-size: 20px;
+    font-size: 22px;
     margin-bottom: 4px;
 }
 
 .statNumber {
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 800;
     color: var(--text-primary);
 }
 
 .statLabel {
-    font-size: 10px;
+    font-size: 10.5px;
     color: var(--text-secondary);
     margin-top: 2px;
 }
@@ -901,26 +900,27 @@ body {
 .activityFeedContainer {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    max-height: 290px;
+    gap: 8px;
+    max-height: 320px;
     overflow-y: auto;
 }
 
 .activityItem {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     background: var(--bg-input);
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
-    padding: 8px 10px;
+    padding: 10px 12px;
 }
 
 .activityThumb {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     border-radius: 6px;
     object-fit: cover;
+    flex-shrink: 0;
 }
 
 .activityMeta {
@@ -931,7 +931,7 @@ body {
 }
 
 .activityTitle {
-    font-size: 11px;
+    font-size: 11.5px;
     font-weight: 700;
     color: var(--text-primary);
     overflow: hidden;
@@ -940,13 +940,13 @@ body {
 }
 
 .activitySub {
-    font-size: 9.5px;
+    font-size: 10px;
     color: var(--text-secondary);
     margin-top: 2px;
 }
 
 .activityTime {
-    font-size: 9px;
+    font-size: 9.5px;
     color: var(--text-muted);
 }
 
@@ -954,15 +954,15 @@ body {
 .settingsList {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
 }
 
 .settingRow {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
-    padding-bottom: 8px;
+    gap: 12px;
+    padding-bottom: 10px;
     border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -978,15 +978,15 @@ body {
 }
 
 .settingTitle {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 700;
     color: var(--text-primary);
 }
 
 .settingDesc {
-    font-size: 10px;
+    font-size: 10.5px;
     color: var(--text-secondary);
-    margin-top: 2px;
+    margin-top: 3px;
     line-height: 1.35;
 }
 
@@ -994,8 +994,8 @@ body {
 .switch {
     position: relative;
     display: inline-block;
-    width: 32px;
-    height: 18px;
+    width: 34px;
+    height: 19px;
     flex-shrink: 0;
 }
 
@@ -1014,14 +1014,14 @@ body {
     bottom: 0;
     background-color: #3b3b44;
     transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-    border-radius: 18px;
+    border-radius: 19px;
 }
 
 .slider:before {
     position: absolute;
     content: "";
-    height: 12px;
-    width: 12px;
+    height: 13px;
+    width: 13px;
     left: 3px;
     bottom: 3px;
     background-color: white;
@@ -1034,11 +1034,11 @@ body {
 }
 
 .switch input:checked + .slider:before {
-    transform: translateX(14px);
+    transform: translateX(15px);
 }
 
 .proStatusText {
-    font-size: 11px;
+    font-size: 11.5px;
     color: var(--text-secondary);
     line-height: 1.45;
 }
@@ -1050,22 +1050,22 @@ body {
     align-items: center;
     justify-content: center;
     text-align: center;
-    padding: 60px 20px;
+    padding: 70px 20px;
 }
 
 .emptyIcon {
-    font-size: 36px;
+    font-size: 38px;
     margin-bottom: 12px;
 }
 
 .emptyState h3 {
-    font-size: 14px;
+    font-size: 15px;
     color: var(--text-primary);
     margin-bottom: 6px;
 }
 
 .emptyState p {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--text-secondary);
-    line-height: 1.4;
+    line-height: 1.45;
 }

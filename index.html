@@ -13,7 +13,7 @@
         <!-- Toast Notification Container -->
         <div id="toastNotification" class="toastNotice"></div>
 
-        <!-- Header -->
+        <!-- Top Header -->
         <header id="topHeader">
             <div class="logoArea">
                 <img src="assets/img/atd-32.png" alt="Logo" class="appLogo">
@@ -31,256 +31,253 @@
             </div>
         </header>
 
-        <!-- Main Body -->
-        <div id="bodyLayout">
-            <!-- Sidebar Navigation -->
-            <nav id="sidebar">
-                <div class="navItem active" data-page="mainPage" title="Home Dashboard">
-                    <span class="navIcon">🏠</span>
-                    <span class="navLabel">Home</span>
-                </div>
-                <div class="navItem" data-page="dropsPage" title="Active Rewards">
-                    <span class="navIcon">🎁</span>
-                    <span class="navLabel">Drops</span>
-                </div>
-                <div class="navItem" data-page="autoDropsPage" title="Automated Queue">
-                    <span class="navIcon">⚡</span>
-                    <span class="navLabel">Queue</span>
-                </div>
-                <div class="navItem" data-page="activityPage" title="Claim History & Stats">
-                    <span class="navIcon">📜</span>
-                    <span class="navLabel">Activity</span>
-                </div>
-                <div class="navItem" data-page="settingsPage" title="Settings">
-                    <span class="navIcon">⚙️</span>
-                    <span class="navLabel">Settings</span>
-                </div>
-            </nav>
+        <!-- Top Navigation Bar (Full Width & Spacious) -->
+        <nav id="topNav">
+            <div class="navItem active" data-page="mainPage" title="Live Dashboard">
+                <span class="navIcon">🏠</span>
+                <span class="navLabel">Home</span>
+            </div>
+            <div class="navItem" data-page="dropsPage" title="Campaign Rewards">
+                <span class="navIcon">🎁</span>
+                <span class="navLabel">Drops</span>
+            </div>
+            <div class="navItem" data-page="autoDropsPage" title="Automated Queue">
+                <span class="navIcon">⚡</span>
+                <span class="navLabel">Queue</span>
+            </div>
+            <div class="navItem" data-page="activityPage" title="Claim History & Stats">
+                <span class="navIcon">📜</span>
+                <span class="navLabel">Activity</span>
+            </div>
+            <div class="navItem" data-page="settingsPage" title="Settings">
+                <span class="navIcon">⚙️</span>
+                <span class="navLabel">Settings</span>
+            </div>
+        </nav>
 
-            <!-- Main Content Area -->
-            <main id="contentArea">
-                
-                <!-- Disabled Page Overlay -->
-                <div class="page" id="extDisabled" style="display: none;">
-                    <div class="emptyState">
-                        <span class="emptyIcon">💤</span>
-                        <h3>Extension Paused</h3>
-                        <p>Turn on the master switch in the top right to resume automatic drop farming and point claims.</p>
+        <!-- Main Content Area -->
+        <main id="contentArea">
+            
+            <!-- Disabled Page Overlay -->
+            <div class="page" id="extDisabled" style="display: none;">
+                <div class="emptyState">
+                    <span class="emptyIcon">💤</span>
+                    <h3>Extension Paused</h3>
+                    <p>Turn on the master switch in the top right to resume automatic drop farming and point claims.</p>
+                </div>
+            </div>
+
+            <!-- Main Home Dashboard Page -->
+            <div class="page" id="mainPage">
+                <!-- Live Status Banner -->
+                <div class="statusCard">
+                    <div class="statusHeader">
+                        <span class="statusPulse active" id="statusIndicator"></span>
+                        <span class="statusTitle" id="dropStatus">Status: Ready & Monitoring</span>
+                    </div>
+                    <div class="statusDetailsRow">
+                        <p class="statusSub" id="dropGame">Game: Select a campaign below or enable Auto Games</p>
+                        <span class="lastCheckTime" id="lastCheckTime">Last check: Just now</span>
                     </div>
                 </div>
 
-                <!-- Main Home Dashboard Page -->
-                <div class="page" id="mainPage">
-                    <!-- Status Banner -->
-                    <div class="statusCard">
-                        <div class="statusHeader">
-                            <span class="statusPulse active" id="statusIndicator"></span>
-                            <span class="statusTitle" id="dropStatus">Status: Ready & Monitoring</span>
-                        </div>
-                        <div class="statusDetailsRow">
-                            <p class="statusSub" id="dropGame">Game: Select a campaign below or enable Auto Games</p>
-                            <span class="lastCheckTime" id="lastCheckTime">Last check: Just now</span>
-                        </div>
+                <!-- Target Game Selector -->
+                <div class="card">
+                    <div class="cardHeader">
+                        <span class="cardTitle">🎯 Target Game Campaign</span>
                     </div>
-
-                    <!-- Target Game Selector -->
-                    <div class="card">
-                        <div class="cardHeader">
-                            <span class="cardTitle">🎯 Target Game Campaign</span>
+                    <div class="customSelectWrapper">
+                        <div id="selGame">
+                            <span class="selectedGame">Select a Game...</span>
+                            <span class="arrow">▼</span>
                         </div>
-                        <div class="customSelectWrapper">
-                            <div id="selGame">
-                                <span class="selectedGame">Select a Game...</span>
-                                <span class="arrow">▼</span>
+                        <div class="selectDropdown hidden">
+                            <div class="dropdownSearchBox">
+                                <input type="text" id="gameSearchInput" placeholder="🔍 Search games..." />
+                                <button class="searchClearBtn" id="clearSearchBtn" title="Clear search">✕</button>
                             </div>
-                            <div class="selectDropdown hidden">
-                                <div class="dropdownSearchBox">
-                                    <input type="text" id="gameSearchInput" placeholder="🔍 Search games..." />
-                                    <button class="searchClearBtn" id="clearSearchBtn" title="Clear search">✕</button>
-                                </div>
-                                <ul id="gameDropdownItems" class="dropdownList"></ul>
-                            </div>
+                            <ul id="gameDropdownItems" class="dropdownList"></ul>
                         </div>
                     </div>
+                </div>
 
-                    <!-- Active Drop Progress -->
-                    <div class="card">
-                        <div class="cardHeader">
-                            <span class="cardTitle">📊 Current Drop Progress</span>
-                            <button class="actionBtn claimNowBtn" id="manualClaimBtn" title="Check and claim pending rewards">✨ Claim Drops</button>
-                        </div>
-                        <div id="curDrops">
-                            <div class="dropProgressContainer">
-                                <div id="activeDropDetails" class="activeDropMetaRow"></div>
-                                <div class="dropBox current">
-                                    <div class="progressBarOuter">
-                                        <div class="progressBarInner" style="width: 0%;"></div>
-                                        <span class="progressPercentText">0%</span>
-                                    </div>
+                <!-- Active Drop Progress -->
+                <div class="card">
+                    <div class="cardHeader">
+                        <span class="cardTitle">📊 Current Drop Progress</span>
+                        <button class="actionBtn claimNowBtn" id="manualClaimBtn" title="Check and claim pending rewards">✨ Claim Drops</button>
+                    </div>
+                    <div id="curDrops">
+                        <div class="dropProgressContainer">
+                            <div id="activeDropDetails" class="activeDropMetaRow"></div>
+                            <div class="dropBox current">
+                                <div class="progressBarOuter">
+                                    <div class="progressBarInner" style="width: 0%;"></div>
+                                    <span class="progressPercentText">0%</span>
                                 </div>
                             </div>
                         </div>
                     </div>
-
-                    <div id="badgesAvailable" class="badgeAlert"></div>
                 </div>
 
-                <!-- Active Drops Page -->
-                <div class="page" id="dropsPage" style="display: none;">
-                    <div class="card">
-                        <div class="cardHeader">
-                            <span class="cardTitle">🎁 Campaign Rewards</span>
-                            <div class="headerButtonRow">
-                                <button class="actionBtn secondaryBtn" id="refreshRewardsBtn" title="Sync Rewards from Twitch">🔄 Sync</button>
-                                <button class="actionBtn secondaryBtn" id="openTwitchInventoryBtn" title="Open Twitch Drops Inventory">🔗 Inventory</button>
-                            </div>
+                <div id="badgesAvailable" class="badgeAlert"></div>
+            </div>
+
+            <!-- Active Drops Page -->
+            <div class="page" id="dropsPage" style="display: none;">
+                <div class="card">
+                    <div class="cardHeader">
+                        <span class="cardTitle">🎁 Campaign Rewards</span>
+                        <div class="headerButtonRow">
+                            <button class="actionBtn secondaryBtn" id="refreshRewardsBtn" title="Sync Rewards from Twitch">🔄 Sync</button>
+                            <button class="actionBtn secondaryBtn" id="openTwitchInventoryBtn" title="Open Twitch Drops Inventory">🔗 Inventory</button>
                         </div>
-                        <div id="allDrops" class="dropsListContainer">
-                            <p class="subText">No active campaign selected. Choose a game on the Home tab.</p>
-                        </div>
+                    </div>
+                    <div id="allDrops" class="dropsListContainer">
+                        <p class="subText">No active campaign selected. Choose a game on the Home tab.</p>
                     </div>
                 </div>
+            </div>
 
-                <!-- Auto Games Queue Page -->
-                <div class="page" id="autoDropsPage" style="display: none;">
-                    <!-- Platform Rule Banner -->
-                    <div class="card autoGamesNoticeCard">
-                        <div class="noticeHeader">
-                            <span class="noticeIcon">💡</span>
-                            <span class="noticeTitle">Smart Auto-Queue</span>
-                        </div>
-                        <p class="cardSubtext">
-                            Twitch tracks drop progress on <strong>1 stream at a time</strong>. Auto-Queue automatically sequences your enabled games, prioritizing campaigns ending soonest!
-                        </p>
+            <!-- Auto Games Queue Page -->
+            <div class="page" id="autoDropsPage" style="display: none;">
+                <!-- Platform Rule Banner -->
+                <div class="card autoGamesNoticeCard">
+                    <div class="noticeHeader">
+                        <span class="noticeIcon">💡</span>
+                        <span class="noticeTitle">Smart Auto-Queue</span>
                     </div>
-
-                    <!-- Auto Games Management Box -->
-                    <div class="card">
-                        <div class="cardHeader">
-                            <span class="cardTitle">Queue Selection</span>
-                            <span class="proBadge" id="autoGameCountBadge">0 / 0 Active Queue</span>
-                        </div>
-
-                        <!-- Search & Quick Action Bar -->
-                        <div class="autoGamesToolbar">
-                            <input type="text" id="autoGameSearchInput" placeholder="🔍 Filter games in queue..." />
-                            <div class="toolbarButtons">
-                                <button class="actionBtn secondaryBtn" id="autoGameSelectAllBtn">Select All</button>
-                                <button class="actionBtn secondaryBtn" id="autoGameDeselectAllBtn">Clear All</button>
-                            </div>
-                        </div>
-
-                        <!-- Auto Games Cards List -->
-                        <div id="autoGamesList" class="autoGamesGrid">
-                            <p class="subText">Loading connected games...</p>
-                        </div>
-                    </div>
+                    <p class="cardSubtext">
+                        Twitch tracks drop progress on <strong>1 stream at a time</strong>. Auto-Queue automatically sequences your enabled games, prioritizing campaigns ending soonest!
+                    </p>
                 </div>
 
-                <!-- Activity & Statistics Page -->
-                <div class="page" id="activityPage" style="display: none;">
-                    <!-- Lifetime Stat Counters -->
-                    <div class="statsGrid">
-                        <div class="statCard">
-                            <span class="statIcon">🎁</span>
-                            <span class="statNumber" id="totalClaimedDrops">0</span>
-                            <span class="statLabel">Drops Claimed</span>
-                        </div>
-                        <div class="statCard">
-                            <span class="statIcon">💎</span>
-                            <span class="statNumber" id="totalClaimedPoints">0</span>
-                            <span class="statLabel">Channel Points</span>
+                <!-- Auto Games Management Box -->
+                <div class="card">
+                    <div class="cardHeader">
+                        <span class="cardTitle">Queue Selection</span>
+                        <span class="proBadge" id="autoGameCountBadge">0 / 0 Active Queue</span>
+                    </div>
+
+                    <!-- Search & Quick Action Bar -->
+                    <div class="autoGamesToolbar">
+                        <input type="text" id="autoGameSearchInput" placeholder="🔍 Filter games in queue..." />
+                        <div class="toolbarButtons">
+                            <button class="actionBtn secondaryBtn" id="autoGameSelectAllBtn">Select All</button>
+                            <button class="actionBtn secondaryBtn" id="autoGameDeselectAllBtn">Clear All</button>
                         </div>
                     </div>
 
-                    <!-- Live Activity History Feed -->
-                    <div class="card" style="margin-top: 12px;">
-                        <div class="cardHeader">
-                            <span class="cardTitle">📜 Claim History</span>
-                            <button class="actionBtn secondaryBtn" id="clearHistoryBtn" title="Clear Claim History">Clear</button>
-                        </div>
-                        <div id="activityHistoryList" class="activityFeedContainer">
-                            <p class="subText">No claims recorded yet. As rewards and points are claimed, they will appear here in real time.</p>
-                        </div>
+                    <!-- Auto Games Cards List -->
+                    <div id="autoGamesList" class="autoGamesGrid">
+                        <p class="subText">Loading connected games...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Activity & Statistics Page -->
+            <div class="page" id="activityPage" style="display: none;">
+                <!-- Lifetime Stat Counters -->
+                <div class="statsGrid">
+                    <div class="statCard">
+                        <span class="statIcon">🎁</span>
+                        <span class="statNumber" id="totalClaimedDrops">0</span>
+                        <span class="statLabel">Drops Claimed</span>
+                    </div>
+                    <div class="statCard">
+                        <span class="statIcon">💎</span>
+                        <span class="statNumber" id="totalClaimedPoints">0</span>
+                        <span class="statLabel">Channel Points</span>
                     </div>
                 </div>
 
-                <!-- Settings Page -->
-                <div class="page" id="settingsPage" style="display: none;">
-                    <div class="card">
-                        <div class="cardHeader">
-                            <span class="cardTitle">⚙️ Farming Settings</span>
-                        </div>
-                        <div class="settingsList">
-                            <div class="settingRow">
-                                <div class="settingInfo">
-                                    <span class="settingTitle">Auto Mute Stream Tabs</span>
-                                    <span class="settingDesc">Mutes tab audio while keeping internal video unmuted so Twitch drop timers never stall.</span>
-                                </div>
-                                <label class="switch">
-                                    <input id="setautoMute" class="settingsBool" type="checkbox">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-
-                            <div class="settingRow">
-                                <div class="settingInfo">
-                                    <span class="settingTitle">Auto Refresh Stalled Streams</span>
-                                    <span class="settingDesc">Automatically refreshes stream tab if no watch progress is recorded after 2 minutes.</span>
-                                </div>
-                                <label class="switch">
-                                    <input id="setautoRefresh" class="settingsBool" type="checkbox">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-
-                            <div class="settingRow">
-                                <div class="settingInfo">
-                                    <span class="settingTitle">Show All Twitch Games</span>
-                                    <span class="settingDesc">Show all Twitch campaigns in the dropdown, not just linked account games.</span>
-                                </div>
-                                <label class="switch">
-                                    <input id="setshowAllGames" class="settingsBool" type="checkbox">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-
-                            <div class="settingRow">
-                                <div class="settingInfo">
-                                    <span class="settingTitle">Auto Token Refresh</span>
-                                    <span class="settingDesc">Automatically refreshes Twitch OAuth/Integrity tokens when expired.</span>
-                                </div>
-                                <label class="switch">
-                                    <input id="setautoGetToken" class="settingsBool" type="checkbox">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-
-                            <div class="settingRow">
-                                <div class="settingInfo">
-                                    <span class="settingTitle">Badge Notifications</span>
-                                    <span class="settingDesc">Display extension badge counter when chat badge drop campaigns are available.</span>
-                                </div>
-                                <label class="switch">
-                                    <input id="setsetShowBadges" class="settingsBool" type="checkbox">
-                                    <span class="slider"></span>
-                                </label>
-                            </div>
-                        </div>
+                <!-- Live Activity History Feed -->
+                <div class="card" style="margin-top: 10px;">
+                    <div class="cardHeader">
+                        <span class="cardTitle">📜 Claim History</span>
+                        <button class="actionBtn secondaryBtn" id="clearHistoryBtn" title="Clear Claim History">Clear</button>
                     </div>
+                    <div id="activityHistoryList" class="activityFeedContainer">
+                        <p class="subText">No claims recorded yet. As rewards and points are claimed, they will appear here in real time.</p>
+                    </div>
+                </div>
+            </div>
 
-                    <div class="card" style="margin-top: 12px;">
-                        <div class="cardHeader">
-                            <span class="cardTitle">⚡ Pro Status</span>
+            <!-- Settings Page -->
+            <div class="page" id="settingsPage" style="display: none;">
+                <div class="card">
+                    <div class="cardHeader">
+                        <span class="cardTitle">⚙️ Farming Settings</span>
+                    </div>
+                    <div class="settingsList">
+                        <div class="settingRow">
+                            <div class="settingInfo">
+                                <span class="settingTitle">Auto Mute Stream Tabs</span>
+                                <span class="settingDesc">Mutes tab audio while keeping internal HTML5 player unmuted so watch progress never stalls.</span>
+                            </div>
+                            <label class="switch">
+                                <input id="setautoMute" class="settingsBool" type="checkbox">
+                                <span class="slider"></span>
+                            </label>
                         </div>
-                        <p class="proStatusText">
-                            Auto Twitch Drops Pro is running in full unlocked mode with background workers, multi-game sequencing, and automatic channel point claiming.
-                        </p>
+
+                        <div class="settingRow">
+                            <div class="settingInfo">
+                                <span class="settingTitle">Auto Refresh Stalled Streams</span>
+                                <span class="settingDesc">Automatically refreshes stream tab if no watch progress is recorded after 2 minutes.</span>
+                            </div>
+                            <label class="switch">
+                                <input id="setautoRefresh" class="settingsBool" type="checkbox">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="settingRow">
+                            <div class="settingInfo">
+                                <span class="settingTitle">Show All Twitch Games</span>
+                                <span class="settingDesc">Show all Twitch campaigns in the dropdown, not just linked account games.</span>
+                            </div>
+                            <label class="switch">
+                                <input id="setshowAllGames" class="settingsBool" type="checkbox">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="settingRow">
+                            <div class="settingInfo">
+                                <span class="settingTitle">Auto Token Refresh</span>
+                                <span class="settingDesc">Automatically refreshes Twitch OAuth/Integrity tokens when expired.</span>
+                            </div>
+                            <label class="switch">
+                                <input id="setautoGetToken" class="settingsBool" type="checkbox">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="settingRow">
+                            <div class="settingInfo">
+                                <span class="settingTitle">Badge Notifications</span>
+                                <span class="settingDesc">Display extension badge counter when chat badge drop campaigns are available.</span>
+                            </div>
+                            <label class="switch">
+                                <input id="setsetShowBadges" class="settingsBool" type="checkbox">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
 
-            </main>
-        </div>
+                <div class="card" style="margin-top: 10px;">
+                    <div class="cardHeader">
+                        <span class="cardTitle">⚡ Pro Status</span>
+                    </div>
+                    <p class="proStatusText">
+                        Auto Twitch Drops Pro is running with high-priority background scheduling, multi-game queueing, and automated channel point claims.
+                    </p>
+                </div>
+            </div>
+
+        </main>
     </div>
 </body>
 </html>

@@ -39,12 +39,12 @@ $(() => {
 
         // Pre-populate default popular games (Alphabetical)
         populateGameDropdown([
+            { game: { displayName: "Overwatch 2" } },
             { game: { displayName: "Apex Legends" } },
             { game: { displayName: "Counter-Strike 2" } },
             { game: { displayName: "Dead by Daylight" } },
             { game: { displayName: "Escape from Tarkov" } },
             { game: { displayName: "Fortnite" } },
-            { game: { displayName: "Overwatch 2" } },
             { game: { displayName: "Palworld" } },
             { game: { displayName: "Rust" } },
             { game: { displayName: "Valorant" } },
@@ -57,11 +57,13 @@ $(() => {
             chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
             chrome.runtime.sendMessage({ type: "getAutoDropGames" }).catch(() => {});
             chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
-            chrome.runtime.sendMessage({ type: "getActivityHistory" }).catch(() => {});
+            chrome.runtime.sendMessage({ type: "getActivityHistory" }).then((res) => {
+                if (res && res.activityHistory) renderActivityHistory(res.activityHistory);
+            }).catch(() => {});
         }
     }).catch(() => {});
 
-    // Sidebar Navigation
+    // Top Navigation Tabs
     $(".navItem").on("click", (e) => {
         const target = $(e.currentTarget);
         const pageId = target.data("page");
@@ -383,8 +385,6 @@ function updateDropProgressUI(data) {
     const camp = active.campaign;
     const gameName = camp.game ? (camp.game.name || camp.game.displayName) : "Twitch Drop";
 
-    let minutesWatched = 0;
-    let targetMins = 60;
     let currentRewardItem = null;
     let allItems = [];
     let allClaimed = true;
@@ -392,7 +392,6 @@ function updateDropProgressUI(data) {
     if (data.activeStream.campaigns && data.activeStream.campaigns.length > 0) {
         const curCamp = data.activeStream.campaigns[camp.onCamp || 0];
         if (curCamp) {
-            minutesWatched = curCamp.minutesWatched || 0;
             const items = curCamp.items || curCamp.drops || curCamp.timeBasedDrops || [];
             if (items.length > 0) {
                 allItems = [...items].sort((a, b) => {
@@ -403,12 +402,19 @@ function updateDropProgressUI(data) {
 
                 allItems.forEach(i => {
                     const req = i.reqTime || i.requiredMinutesWatched || 60;
-                    const itemWatched = (i.self && i.self.currentMinutesWatched !== undefined) ? i.self.currentMinutesWatched : minutesWatched;
-                    const isClaimed = Boolean((i.self && i.self.isClaimed === true) || (itemWatched >= req && req > 0) || (curCamp.minutesWatched >= curCamp.minutesNeeded && curCamp.minutesNeeded > 0));
+                    const itemWatched = (i.self && i.self.currentMinutesWatched !== undefined) ? i.self.currentMinutesWatched : (curCamp.minutesWatched || 0);
+                    // Explicit claim check only:
+                    const isClaimed = Boolean((i.self && i.self.isClaimed === true) || (itemWatched >= req && req > 0));
                     i._computedClaimed = isClaimed;
-                    if (!isClaimed) allClaimed = false;
+                    i._computedWatched = itemWatched;
+                    i._computedReq = req;
+
+                    if (!isClaimed) {
+                        allClaimed = false;
+                    }
                 });
 
+                // Pick the first unclaimed / in-progress reward
                 currentRewardItem = allItems.find(i => !i._computedClaimed) || allItems[allItems.length - 1];
             } else {
                 if ((curCamp.minutesWatched || 0) < (curCamp.minutesNeeded || 1)) allClaimed = false;
@@ -424,8 +430,8 @@ function updateDropProgressUI(data) {
         $(".dropProgressContainer").prepend(detailsBox);
     }
 
-    // ALL DROPS FOR GAME COMPLETED
-    if (allClaimed || camp.isCompleted) {
+    // ONLY SHOW ALL COMPLETED IF ALL ITEMS ARE GENUINELY CLAIMED
+    if (allItems.length > 0 && allClaimed) {
         $("#dropStatus").text(`🎉 All running drops for ${gameName} are completed!`);
         $("#dropGame").html(`Game: <strong style="color:var(--emerald-green);">${gameName}</strong> &bull; All Rewards Claimed!`);
         $("#headerStatusPill").html(`🎉 ${gameName} Done`).addClass("activePill");
@@ -467,15 +473,14 @@ function updateDropProgressUI(data) {
     }
     $("#dropStatus").text(`Farming: ${gameName}`);
 
-    if (currentRewardItem) {
-        targetMins = currentRewardItem.reqTime || currentRewardItem.requiredMinutesWatched || 60;
-    }
+    const itemWatched = currentRewardItem ? (currentRewardItem._computedWatched || 0) : 0;
+    const targetMins = currentRewardItem ? (currentRewardItem._computedReq || 60) : 60;
 
-    const minsLeft = Math.max(0, targetMins - minutesWatched);
+    const minsLeft = Math.max(0, targetMins - itemWatched);
     const etaText = minsLeft > 0 ? `~${minsLeft}m remaining` : "Ready to claim!";
-    const percent = Math.min(100, Math.round((minutesWatched / Math.max(1, targetMins)) * 100));
+    const percent = Math.min(100, Math.round((itemWatched / Math.max(1, targetMins)) * 100));
     $(".progressBarInner").css({ "width": `${percent}%`, "background": "linear-gradient(90deg, var(--twitch-purple) 0%, var(--twitch-purple-light) 100%)" });
-    $(".progressPercentText").text(`${percent}% (${minutesWatched}/${targetMins} min)`);
+    $(".progressPercentText").text(`${percent}% (${itemWatched}/${targetMins} min)`);
 
     const rewardName = currentRewardItem ? (currentRewardItem.name || currentRewardItem.title || "Reward") : `${gameName} Drop Reward`;
     let rewardImg = "assets/img/atd-48.png";
@@ -517,12 +522,8 @@ function renderActiveDropsList(activeStream) {
                 ? drop.self.currentMinutesWatched
                 : (campaignObj.minutesWatched || 0);
 
-            const isClaimed = Boolean(
-                camp.isCompleted === true ||
-                (drop.self && drop.self.isClaimed === true) ||
-                (itemMinsWatched >= minsNeeded && minsNeeded > 0) ||
-                (campaignObj.minutesWatched >= minsNeeded && minsNeeded > 0)
-            );
+            // Strict claim verification:
+            const isClaimed = Boolean((drop.self && drop.self.isClaimed === true) || (itemMinsWatched >= minsNeeded && minsNeeded > 0));
 
             let imgUrl = "assets/img/atd-48.png";
             if (drop.picture) {
@@ -554,7 +555,7 @@ function renderActiveDropsList(activeStream) {
         return;
     }
 
-    // Sort: In-Progress & Unclaimed FIRST, Claimed LAST
+    // Sort: In-Progress & Unclaimed FIRST (by requirement ascending), Claimed LAST
     allRewardsList.sort((a, b) => {
         if (a.isClaimed !== b.isClaimed) {
             return a.isClaimed ? 1 : -1;
@@ -566,10 +567,9 @@ function renderActiveDropsList(activeStream) {
         const statusClass = reward.isClaimed ? "claimedBadge" : "pendingBadge";
         let statusText = reward.isClaimed ? "Claimed ✅" : "In Progress ⏳";
 
-        if (reward.minsWatched > 0 && !reward.isClaimed) {
-            statusText = `${reward.minsWatched}/${reward.minsNeeded} min`;
-        } else if (!reward.isClaimed) {
-            statusText = `0/${reward.minsNeeded} min`;
+        if (!reward.isClaimed) {
+            const pct = Math.min(100, Math.round((reward.minsWatched / Math.max(1, reward.minsNeeded)) * 100));
+            statusText = `${pct}% (${reward.minsWatched}/${reward.minsNeeded}m)`;
         }
 
         const card = $(`
@@ -577,7 +577,7 @@ function renderActiveDropsList(activeStream) {
                 <img src="${reward.imgUrl}" class="rewardImage" alt="Reward" onerror="this.onerror=null; this.src='assets/img/atd-48.png';">
                 <div class="rewardInfo">
                     <span class="rewardName" title="${reward.title}">${reward.title}</span>
-                    <span class="rewardTime">Watch requirement: ${reward.minsNeeded} minutes</span>
+                    <span class="rewardTime">Requirement: ${reward.minsNeeded} minutes</span>
                 </div>
                 <span class="rewardBadge ${statusClass}">${statusText}</span>
             </div>
