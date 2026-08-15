@@ -1,38 +1,35 @@
-let dropPool = {};
+// Auto Twitch Drops Pro - Content Script (inject.js)
 
 chrome.storage.local.get(["exEnabled"]).then((val) => {
-    // Default to true if not set
     const isEnabled = val.exEnabled !== undefined ? val.exEnabled : true;
     if (isEnabled) {
         window.addEventListener("message", (e) => {
-            if (!e.data) return;
+            if (!e.data || !chrome.runtime?.id) return;
             if (e.data.autoTwitchDrops) {
                 const dropData = e.data.autoTwitchDrops;
                 if (dropData.type === "integ") {
-                    chrome.runtime.sendMessage(chrome.runtime.id, { type: "sendInteg", data: dropData.integrity }).catch(() => {});
+                    chrome.runtime.sendMessage({ type: "sendInteg", data: dropData.integrity }).catch(() => {});
                 }
                 if (dropData.type === "claim-points") {
-                    chrome.runtime.sendMessage(chrome.runtime.id, { type: "claim-points", data: dropData }).catch(() => {});
+                    chrome.runtime.sendMessage({ type: "claim-points", data: dropData }).catch(() => {});
                 }
                 if (dropData.type === "checkDrop") {
-                    chrome.runtime.sendMessage(chrome.runtime.id, { type: "claim-drop", data: dropData }).catch(() => {});
+                    chrome.runtime.sendMessage({ type: "claim-drop", data: dropData }).catch(() => {});
                 }
                 if (dropData.type === "points-earned") {
-                    chrome.runtime.sendMessage(chrome.runtime.id, { type: "points-earned", data: dropData }).catch(() => {});
+                    chrome.runtime.sendMessage({ type: "points-earned", data: dropData }).catch(() => {});
                 }
             } else if (e.data.autoTwitchBrowserExtension && e.data.autoTwitchBrowserExtension.integrity) {
-                chrome.runtime.sendMessage(chrome.runtime.id, { type: "sendInteg", data: e.data.autoTwitchBrowserExtension.integrity }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "sendInteg", data: e.data.autoTwitchBrowserExtension.integrity }).catch(() => {});
             }
         });
 
         chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (message && message.type === "setFavicon") {
                 const fav1 = document.querySelector("link[rel~='icon'][sizes~='32x32']");
-                if (fav1) fav1.href = chrome.runtime.getURL("/assets/img/twitch-logo-yellow-32.png");
+                if (fav1) fav1.href = chrome.runtime.getURL("/assets/img/atd-32.png");
                 const fav2 = document.querySelector("link[rel~='icon'][sizes~='16x16']");
-                if (fav2) fav2.href = chrome.runtime.getURL("/assets/img/twitch-logo-yellow-16.png");
-                const btn = document.querySelector(".startDropsBtn");
-                if (btn) btn.remove();
+                if (fav2) fav2.href = chrome.runtime.getURL("/assets/img/atd-16.png");
             }
         });
 
@@ -42,6 +39,7 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
 
 setTimeout(() => {
     try {
+        if (!chrome.runtime?.id) return;
         const authToken = getCookieValue("auth-token");
         const deviceId = getCookieValue("unique_id");
         
@@ -67,7 +65,7 @@ setTimeout(() => {
         }
 
         if (authToken || deviceId) {
-            chrome.runtime.sendMessage(chrome.runtime.id, {
+            chrome.runtime.sendMessage({
                 type: "clientInfo",
                 data: {
                     oauthToken: authToken,

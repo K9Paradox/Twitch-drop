@@ -1,8 +1,8 @@
 {
    "manifest_version": 3,
    "name": "Auto Twitch Drops Pro",
-   "version": "1.4.2.2",
-   "description": "Automatically claim Twitch drops, channel points, and monitor drop campaigns.",
+   "version": "1.5.0",
+   "description": "Automatically claim Twitch drops, channel points, and monitor drop campaigns in the background.",
    "action": {
       "default_popup": "index.html"
    },

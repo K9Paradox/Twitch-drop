@@ -1,4 +1,5 @@
-let maniData = chrome.runtime.getManifest();
+// Auto Twitch Drops Pro - Popup UI Controller
+const maniData = chrome.runtime.getManifest();
 let settings = {};
 let extEnabled = true;
 let gameSelectOpen = false;
@@ -8,13 +9,13 @@ let currentAutoGamesData = null;
 
 $(() => {
     // Set Manifest Version
-    $("#extVersion").html(`v${maniData.version}`);
+    $("#extVersion").text(`v${maniData.version}`);
 
     // Load initial state
-    chrome.storage.local.get(["exEnabled", "settings", "extStats"]).then((val) => {
+    chrome.storage.local.get(["exEnabled", "settings", "extStats", "activityHistory"]).then((val) => {
         extEnabled = val.exEnabled !== undefined ? val.exEnabled : true;
         $(".enableEx").prop("checked", extEnabled);
-        
+
         if (!extEnabled) {
             showPage("extDisabled");
         } else {
@@ -30,6 +31,10 @@ $(() => {
 
         if (val.extStats) {
             updateStatsUI(val.extStats);
+        }
+
+        if (val.activityHistory) {
+            renderActivityHistory(val.activityHistory);
         }
 
         // Pre-populate default popular games (Alphabetical)
@@ -52,6 +57,7 @@ $(() => {
             chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
             chrome.runtime.sendMessage({ type: "getAutoDropGames" }).catch(() => {});
             chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
+            chrome.runtime.sendMessage({ type: "getActivityHistory" }).catch(() => {});
         }
     }).catch(() => {});
 
@@ -68,8 +74,11 @@ $(() => {
 
         if (pageId === "autoDropsPage") {
             chrome.runtime.sendMessage({ type: "getAutoDropGames" }).catch(() => {});
-        } else if (pageId === "statsPage") {
+        } else if (pageId === "activityPage") {
             chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
+            chrome.runtime.sendMessage({ type: "getActivityHistory" }).then((res) => {
+                if (res && res.activityHistory) renderActivityHistory(res.activityHistory);
+            }).catch(() => {});
         } else if (pageId === "dropsPage") {
             chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
             renderActiveDropsList(currentActiveStream);
@@ -88,6 +97,14 @@ $(() => {
         showToast("🔄 Synced rewards with Twitch");
     });
 
+    // Clear Activity History Button
+    $("#clearHistoryBtn").on("click", () => {
+        chrome.runtime.sendMessage({ type: "clearActivityHistory" }).then(() => {
+            renderActivityHistory([]);
+            showToast("🗑️ Claim history cleared");
+        }).catch(() => {});
+    });
+
     // Auto Games Search Filter
     $("#autoGameSearchInput").on("input", (e) => {
         const query = $(e.target).val().toLowerCase().trim();
@@ -102,6 +119,7 @@ $(() => {
             chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [g, true] }).catch(() => {});
         });
         $(".autoGameToggle").prop("checked", true);
+        $(".autoGameCard").addClass("activeQueueCard").find(".autoGameStatusTag").text("⚡ Queued for Farming");
         updateAutoGamesBadge(allGames.length, allGames.length);
         showToast("✅ All games enabled for Auto Farming");
     });
@@ -114,6 +132,7 @@ $(() => {
             chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [g, false] }).catch(() => {});
         });
         $(".autoGameToggle").prop("checked", false);
+        $(".autoGameCard").removeClass("activeQueueCard").find(".autoGameStatusTag").text("⏸️ Inactive");
         updateAutoGamesBadge(0, allGames.length);
         showToast("⏸️ Auto Farming queue cleared");
     });
@@ -126,6 +145,7 @@ $(() => {
 
         if (extEnabled) {
             showPage("mainPage");
+            $(".navItem").removeClass("active");
             $('[data-page="mainPage"]').addClass("active");
             chrome.runtime.sendMessage({ type: "p:getConnectedGames" }).catch(() => {});
             chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
@@ -178,6 +198,8 @@ $(() => {
     // Select Item from Dropdown
     $(document).on("click", "#gameDropdownItems li", (e) => {
         const selectedGame = $(e.target).text();
+        if (selectedGame === "No Connected Games Found" || selectedGame === "No matching games") return;
+
         $(".selectedGame").text(selectedGame);
         $(".selectDropdown").addClass("hidden");
         gameSelectOpen = false;
@@ -203,11 +225,11 @@ $(() => {
         btn.text("⏳ Checking Claims...").attr("disabled", true);
         chrome.runtime.sendMessage({ type: "claim-drop" }).catch(() => {});
         updateLastCheckTime();
-        showToast("✨ Checked for claimable drops");
+        showToast("✨ Checking and claiming eligible drops");
 
         setTimeout(() => {
-            btn.text("✨ Claim Drops Now").removeAttr("disabled");
-        }, 3000);
+            btn.text("✨ Claim Drops").removeAttr("disabled");
+        }, 2500);
     });
 
     // Background Message Listener
@@ -227,6 +249,8 @@ $(() => {
         } else if (message.type === "p:statsUpdated") {
             updateStatsUI(message.data);
             updateLastCheckTime();
+        } else if (message.type === "p:activityUpdated") {
+            renderActivityHistory(message.data);
         }
     });
 });
@@ -250,18 +274,56 @@ function showPage(pageId) {
 
 function updateLastCheckTime() {
     const now = new Date();
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     $("#lastCheckTime").text(`Last check: ${timeStr}`);
 }
 
 function updateStatsUI(stats) {
     if (!stats) return;
     if (stats.claimedDrops !== undefined) {
-        $("#totalClaimedDrops").text(stats.claimedDrops);
+        $("#totalClaimedDrops").text(stats.claimedDrops.toLocaleString());
     }
     if (stats.claimedPoints !== undefined) {
         $("#totalClaimedPoints").text(stats.claimedPoints.toLocaleString());
     }
+}
+
+function renderActivityHistory(history) {
+    const list = $("#activityHistoryList");
+    list.empty();
+
+    if (!history || history.length === 0) {
+        list.html(`<p class="subText">No claims recorded yet. As rewards and points are claimed, they will appear here in real time.</p>`);
+        return;
+    }
+
+    history.forEach(item => {
+        const timeAgo = formatTimeAgo(new Date(item.timestamp));
+        const iconBadge = item.type === "points" ? "💎" : "🎁";
+        const thumb = item.imgUrl || "assets/img/atd-48.png";
+
+        const card = $(`
+            <div class="activityItem">
+                <img src="${thumb}" class="activityThumb" alt="${item.title}" onerror="this.onerror=null; this.src='assets/img/atd-48.png';">
+                <div class="activityMeta">
+                    <span class="activityTitle" title="${item.title}">${iconBadge} ${item.title}</span>
+                    <span class="activitySub">${item.game} &bull; <span class="activityTime">${timeAgo}</span></span>
+                </div>
+            </div>
+        `);
+        list.append(card);
+    });
+}
+
+function formatTimeAgo(date) {
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (seconds < 60) return "just now";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
 }
 
 function populateGameDropdown(data) {
@@ -312,14 +374,14 @@ function updateDropProgressUI(data) {
         $("#dropStatus").text("Status: Ready & Monitoring");
         $("#dropGame").text("Game: Select a campaign or turn on Auto Games");
         $("#headerStatusPill").text("⚪ Idle").removeClass("activePill");
-        $(".progressBarInner").css({"width": "0%", "background": "var(--twitch-purple)"});
+        $(".progressBarInner").css({ "width": "0%", "background": "var(--twitch-purple)" });
         $(".progressPercentText").text("0%");
         $("#activeDropDetails").empty();
         return;
     }
 
     const camp = active.campaign;
-    const gameName = camp.game ? (camp.game.name || camp.game.displayName) : 'Twitch Drop';
+    const gameName = camp.game ? (camp.game.name || camp.game.displayName) : "Twitch Drop";
 
     let minutesWatched = 0;
     let targetMins = 60;
@@ -362,18 +424,18 @@ function updateDropProgressUI(data) {
         $(".dropProgressContainer").prepend(detailsBox);
     }
 
-    // ALL DROPS FOR GAME X ARE COMPLETED
+    // ALL DROPS FOR GAME COMPLETED
     if (allClaimed || camp.isCompleted) {
         $("#dropStatus").text(`🎉 All running drops for ${gameName} are completed!`);
-        $("#dropGame").html(`Game: <strong style="color:#00f59b;">${gameName}</strong> &bull; All Rewards Claimed!`);
-        $("#headerStatusPill").html(`🎉 ${gameName} Complete`).addClass("activePill");
-        $(".progressBarInner").css({"width": "100%", "background": "linear-gradient(90deg, #00f59b 0%, #00d684 100%)"});
+        $("#dropGame").html(`Game: <strong style="color:var(--emerald-green);">${gameName}</strong> &bull; All Rewards Claimed!`);
+        $("#headerStatusPill").html(`🎉 ${gameName} Done`).addClass("activePill");
+        $(".progressBarInner").css({ "width": "100%", "background": "linear-gradient(90deg, #00f59b 0%, #00d684 100%)" });
         $(".progressPercentText").text(`100% (All Rewards Claimed! ✅)`);
 
-        let iconsHtml = allItems.map(item => {
-            let img = item.picture || item.imageAssetURL || item.imageURL || "assets/img/atd-48.png";
-            let title = item.name || item.title || "Reward";
-            let reqMins = item.reqTime || item.requiredMinutesWatched || 60;
+        const iconsHtml = allItems.map(item => {
+            const img = item.picture || item.imageAssetURL || item.imageURL || "assets/img/atd-48.png";
+            const title = item.name || item.title || "Reward";
+            const reqMins = item.reqTime || item.requiredMinutesWatched || 60;
             return `
                 <div class="completedRewardIconCard" title="${title} (${reqMins} min requirement)">
                     <img src="${img}" class="completedThumb" onerror="this.onerror=null; this.src='assets/img/atd-48.png';">
@@ -387,9 +449,9 @@ function updateDropProgressUI(data) {
             <div class="allCompletedCardBox">
                 <div class="completedHeader">
                     <span class="completedTitle">✨ All Running Drops for ${gameName} Completed</span>
-                    <span class="completedSub">All ${allItems.length > 0 ? allItems.length : ''} rewards claimed & in your inventory</span>
+                    <span class="completedSub">All ${allItems.length > 0 ? allItems.length : ""} rewards claimed & in your inventory</span>
                 </div>
-                ${allItems.length > 0 ? `<div class="completedGridRow">${iconsHtml}</div>` : ''}
+                ${allItems.length > 0 ? `<div class="completedGridRow">${iconsHtml}</div>` : ""}
             </div>
         `);
         return;
@@ -397,10 +459,10 @@ function updateDropProgressUI(data) {
 
     // Normal In-Progress Mode:
     if (camp.curWatching) {
-        $("#dropGame").html(`Watching Streamer: <a href="https://www.twitch.tv/${camp.curWatching}" target="_blank" class="streamerLink">@${camp.curWatching} ↗</a>`);
+        $("#dropGame").html(`Watching: <a href="https://www.twitch.tv/${camp.curWatching}" target="_blank" class="streamerLink">@${camp.curWatching} ↗</a>`);
         $("#headerStatusPill").html(`🟢 @${camp.curWatching}`).addClass("activePill");
     } else {
-        $("#dropGame").text(`Finding active stream...`);
+        $("#dropGame").text(`Finding live stream for ${gameName}...`);
         $("#headerStatusPill").text(`🟢 Farming ${gameName}`).addClass("activePill");
     }
     $("#dropStatus").text(`Farming: ${gameName}`);
@@ -412,10 +474,10 @@ function updateDropProgressUI(data) {
     const minsLeft = Math.max(0, targetMins - minutesWatched);
     const etaText = minsLeft > 0 ? `~${minsLeft}m remaining` : "Ready to claim!";
     const percent = Math.min(100, Math.round((minutesWatched / Math.max(1, targetMins)) * 100));
-    $(".progressBarInner").css({"width": `${percent}%`, "background": "linear-gradient(90deg, var(--twitch-purple) 0%, #a970ff 100%)"});
+    $(".progressBarInner").css({ "width": `${percent}%`, "background": "linear-gradient(90deg, var(--twitch-purple) 0%, var(--twitch-purple-light) 100%)" });
     $(".progressPercentText").text(`${percent}% (${minutesWatched}/${targetMins} min)`);
 
-    let rewardName = currentRewardItem ? (currentRewardItem.name || currentRewardItem.title || "Reward") : `${gameName} Drop Reward`;
+    const rewardName = currentRewardItem ? (currentRewardItem.name || currentRewardItem.title || "Reward") : `${gameName} Drop Reward`;
     let rewardImg = "assets/img/atd-48.png";
     if (currentRewardItem) {
         rewardImg = currentRewardItem.picture || currentRewardItem.imageAssetURL || currentRewardItem.imageURL || rewardImg;
@@ -443,8 +505,7 @@ function renderActiveDropsList(activeStream) {
 
     const camp = activeStream.campaign;
     const campaigns = activeStream.campaigns || [];
-
-    let allRewardsList = [];
+    const allRewardsList = [];
 
     campaigns.forEach((campaignObj) => {
         const dropList = campaignObj.items || campaignObj.drops || campaignObj.timeBasedDrops || [];
@@ -452,13 +513,13 @@ function renderActiveDropsList(activeStream) {
         dropList.forEach((drop, index) => {
             const title = drop.name || drop.title || `Reward #${index + 1}`;
             const minsNeeded = drop.reqTime || drop.minutesNeeded || drop.requiredMinutesWatched || campaignObj.minutesNeeded || 60;
-            const itemMinsWatched = (drop.self && drop.self.currentMinutesWatched !== undefined) 
-                ? drop.self.currentMinutesWatched 
+            const itemMinsWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
+                ? drop.self.currentMinutesWatched
                 : (campaignObj.minutesWatched || 0);
-            
+
             const isClaimed = Boolean(
                 camp.isCompleted === true ||
-                (drop.self && drop.self.isClaimed === true) || 
+                (drop.self && drop.self.isClaimed === true) ||
                 (itemMinsWatched >= minsNeeded && minsNeeded > 0) ||
                 (campaignObj.minutesWatched >= minsNeeded && minsNeeded > 0)
             );
@@ -488,12 +549,12 @@ function renderActiveDropsList(activeStream) {
     });
 
     if (allRewardsList.length === 0) {
-        const gameName = camp.game ? (camp.game.name || camp.game.displayName) : 'selected game';
+        const gameName = camp.game ? (camp.game.name || camp.game.displayName) : "selected game";
         container.html(`<p class="subText">Active campaign selected (${gameName}). Twitch GQL is fetching reward details, items will display momentarily.</p>`);
         return;
     }
 
-    // Sort: In-Progress & Unclaimed FIRST (by reqTime ascending), Claimed LAST
+    // Sort: In-Progress & Unclaimed FIRST, Claimed LAST
     allRewardsList.sort((a, b) => {
         if (a.isClaimed !== b.isClaimed) {
             return a.isClaimed ? 1 : -1;
@@ -502,8 +563,8 @@ function renderActiveDropsList(activeStream) {
     });
 
     allRewardsList.forEach((reward) => {
-        let statusClass = reward.isClaimed ? 'claimedBadge' : 'pendingBadge';
-        let statusText = reward.isClaimed ? 'Claimed ✅' : 'In Progress ⏳';
+        const statusClass = reward.isClaimed ? "claimedBadge" : "pendingBadge";
+        let statusText = reward.isClaimed ? "Claimed ✅" : "In Progress ⏳";
 
         if (reward.minsWatched > 0 && !reward.isClaimed) {
             statusText = `${reward.minsWatched}/${reward.minsNeeded} min`;
@@ -512,7 +573,7 @@ function renderActiveDropsList(activeStream) {
         }
 
         const card = $(`
-            <div class="dropRewardCard ${reward.isClaimed ? 'isClaimedCard' : ''}">
+            <div class="dropRewardCard ${reward.isClaimed ? "isClaimedCard" : ""}">
                 <img src="${reward.imgUrl}" class="rewardImage" alt="Reward" onerror="this.onerror=null; this.src='assets/img/atd-48.png';">
                 <div class="rewardInfo">
                     <span class="rewardName" title="${reward.title}">${reward.title}</span>
@@ -545,20 +606,20 @@ function populateAutoGamesGrid(data) {
 
     updateAutoGamesBadge(enabledSet.size, sortedGames.length);
 
-    sortedGames.forEach((gameName, idx) => {
+    sortedGames.forEach((gameName) => {
         const isChecked = enabledSet.has(gameName);
-        
+
         const card = $(`
-            <div class="autoGameCard ${isChecked ? 'activeQueueCard' : ''}" data-gamename="${gameName.toLowerCase()}">
+            <div class="autoGameCard ${isChecked ? "activeQueueCard" : ""}" data-gamename="${gameName.toLowerCase()}">
                 <div class="autoGameMeta">
                     <span class="autoGameIcon">🎮</span>
                     <div class="autoGameTitleGroup">
                         <span class="autoGameName">${gameName}</span>
-                        <span class="autoGameStatusTag">${isChecked ? '⚡ Queued for Farming' : '⏸️ Inactive'}</span>
+                        <span class="autoGameStatusTag">${isChecked ? "⚡ Queued for Farming" : "⏸️ Inactive"}</span>
                     </div>
                 </div>
                 <label class="switch">
-                    <input type="checkbox" class="autoGameToggle" data-game="${gameName}" ${isChecked ? 'checked' : ''}>
+                    <input type="checkbox" class="autoGameToggle" data-game="${gameName}" ${isChecked ? "checked" : ""}>
                     <span class="slider"></span>
                 </label>
             </div>
@@ -579,11 +640,10 @@ function populateAutoGamesGrid(data) {
         }
 
         chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [game, checked] }).catch(() => {});
-        
-        // Update badge count
+
         const newCheckedCount = $(".autoGameToggle:checked").length;
         updateAutoGamesBadge(newCheckedCount, sortedGames.length);
-        
+
         showToast(checked ? `+ Added ${game} to Auto Queue` : `- Removed ${game} from Auto Queue`);
     });
 }

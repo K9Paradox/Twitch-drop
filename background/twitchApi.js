@@ -1,13 +1,10 @@
-let tempVar = [];
-
 export class Client {
-
     constructor(options) {
         this.clientId = options?.clientId ?? "kimne78kx3ncx6brgo4mv6wki5h1ko";
-        this.oauthToken = options?.oauthToken;
-        this.userId = options?.userId;
-        this.deviceId = options?.deviceId;
-        this.uuid = options?.uuid;
+        this.oauthToken = options?.oauthToken ?? null;
+        this.userId = options?.userId ?? null;
+        this.deviceId = options?.deviceId ?? null;
+        this.uuid = options?.uuid ?? null;
 
         this.integrity = {
             token: "",
@@ -17,18 +14,25 @@ export class Client {
 
         this.getIntegFromStorage();
 
-        if (!this.userId) {
+        if (!this.userId && this.oauthToken) {
             this.getUserId();
         }
     }
 
-    async postWraper(data, headers) {
+    async postWrapper(data, headers = {}) {
         try {
-            let post = await fetch("https://gql.twitch.tv/gql", {
+            const res = await fetch("https://gql.twitch.tv/gql", {
                 headers: headers,
                 method: "POST",
                 body: JSON.stringify(data)
-            }).then((res) => res.json());
+            });
+
+            if (!res.ok) {
+                console.warn(`GQL HTTP Error: ${res.status} ${res.statusText}`);
+                return null;
+            }
+
+            const post = await res.json();
 
             if (!Array.isArray(post)) {
                 if (post && "error" in post) {
@@ -42,20 +46,19 @@ export class Client {
             }
             return Array.isArray(post) ? post : (post ? post.data : null);
         } catch (e) {
-            console.warn("postWraper network error:", e);
+            console.warn("postWrapper network error:", e);
             return null;
         }
     }
 
     async post(data) {
-        return this.postWraper(data, {
+        return this.postWrapper(data, {
             "Content-Type": "text/plain;charset=UTF-8",
             "Client-Id": this.clientId
         });
     }
 
-    async postAuthorized(data, headers) {
-        if (!headers) headers = {};
+    async postAuthorized(data, headers = {}) {
         headers["Content-Type"] = "text/plain;charset=UTF-8";
         headers["Client-Id"] = this.clientId;
         if (this.oauthToken) {
@@ -63,53 +66,33 @@ export class Client {
         }
         if (this.integrity && this.integrity.token) {
             headers["Client-Integrity"] = this.integrity.token;
-            headers["X-Device-Id"] = this.deviceId;
+            if (this.deviceId) {
+                headers["X-Device-Id"] = this.deviceId;
+            }
         }
-        return await this.postWraper(data, headers);
-    }
-
-    async postIntegrity() {
-        if (!this.deviceId) return null;
-        try {
-            let headers = {
-                "Client-Id": "ue6666qo983tsx6so1t0vnawi233wa",
-                "Authorization": `OAuth ${this.oauthToken}`,
-                "X-Device-Id": this.deviceId,
-                "Client-Session-Id": this.uuid,
-                "Client-Version": "da69d5f2-ac48-4169-9574-48fee4a96513",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 7.1; Smart Box C1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
-            };
-            let post = await fetch("https://gql.twitch.tv/integrity", {
-                headers,
-                method: "POST"
-            }).then((res) => res.json());
-            return post;
-        } catch (e) {
-            console.warn("postIntegrity error:", e);
-            return null;
-        }
+        return await this.postWrapper(data, headers);
     }
 
     async ensureIntegrity() {
-        if (this.integrity && this.integrity.expiration > new Date().getTime()) {
+        if (this.integrity && this.integrity.expiration > Date.now()) {
             return true;
-        } else {
-            return false;
         }
+        return false;
     }
 
     async getIntegFromStorage() {
         try {
-            const data = await chrome.storage.sync.get(["twitchInteg"]);
-            if (data && data.twitchInteg && data.twitchInteg.token !== undefined)
+            const data = await chrome.storage.local.get(["twitchInteg"]);
+            if (data && data.twitchInteg && data.twitchInteg.token !== undefined) {
                 this.integrity = data.twitchInteg;
+            }
         } catch (e) {}
         return this.integrity;
     }
 
     async setInteg(integ) {
         this.integrity = integ;
-        chrome.storage.sync.set({ twitchInteg: integ });
+        await chrome.storage.local.set({ twitchInteg: integ }).catch(() => {});
     }
 
     async updateUserInfo(options) {
@@ -121,13 +104,13 @@ export class Client {
     }
 
     async getUserId() {
-        await this.autoDetectUserId();
+        return await this.autoDetectUserId();
     }
 
     async autoDetectUserId() {
         if (!this.oauthToken) return null;
         try {
-            let data = await this.postAuthorized({
+            const data = await this.postAuthorized({
                 "operationName": "CoreActionsCurrentUser",
                 "extensions": {
                     "persistedQuery": {
@@ -136,9 +119,9 @@ export class Client {
                     }
                 }
             });
-            if (data && data.currentUser) {
+            if (data && data.currentUser && data.currentUser.id) {
                 this.userId = data.currentUser.id;
-                chrome.storage.sync.set({ userId: data.currentUser.id });
+                await chrome.storage.local.set({ userId: data.currentUser.id }).catch(() => {});
             }
         } catch (e) {}
         return this.userId;
@@ -209,7 +192,7 @@ export class Client {
 
     async getConnectedGames() {
         const campaigns = await this.getDropCampaigns();
-        let games = [];
+        const games = [];
         if (Array.isArray(campaigns)) {
             for (const campaign of campaigns) {
                 if (campaign && campaign.game && campaign.status !== "EXPIRED") {
@@ -222,7 +205,7 @@ export class Client {
 
     async getDropCampaignDetails(dropId) {
         try {
-            if (typeof dropId == "string") {
+            if (typeof dropId === "string") {
                 const data = await this.postAuthorized({
                     "operationName": "DropCampaignDetails",
                     "extensions": {
@@ -233,33 +216,31 @@ export class Client {
                     },
                     "variables": {
                         "dropID": dropId,
-                        "channelLogin": this.userId
+                        "channelLogin": this.userId || ""
                     }
                 });
                 return data && data.user ? data.user.dropCampaign : null;
-            } else {
-                let dataAry = [];
-                for (const camp of dropId) {
-                    dataAry.push({
-                        "operationName": "DropCampaignDetails",
-                        "extensions": {
-                            "persistedQuery": {
-                                "version": 1,
-                                "sha256Hash": "039277bf98f3130929262cc7c6efd9c141ca3749cb6dca442fc8ead9a53f77c1"
-                            }
-                        },
-                        "variables": {
-                            "dropID": camp,
-                            "channelLogin": this.userId
+            } else if (Array.isArray(dropId)) {
+                const dataAry = dropId.map(camp => ({
+                    "operationName": "DropCampaignDetails",
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": "039277bf98f3130929262cc7c6efd9c141ca3749cb6dca442fc8ead9a53f77c1"
                         }
-                    });
-                }
-                let data = await this.postAuthorized(dataAry);
+                    },
+                    "variables": {
+                        "dropID": camp,
+                        "channelLogin": this.userId || ""
+                    }
+                }));
+                const data = await this.postAuthorized(dataAry);
                 return data || [];
             }
         } catch (e) {
             return null;
         }
+        return null;
     }
 
     async getInventory() {
@@ -310,10 +291,12 @@ export class Client {
             });
 
             const streams = data && data.game ? data.game.streams : null;
-            if (streams == null) return [];
+            if (streams == null || !streams.edges) return [];
             const result = [];
             for (const stream of streams.edges) {
-                result.push(stream.node);
+                if (stream && stream.node) {
+                    result.push(stream.node);
+                }
             }
             return result;
         } catch (e) {
@@ -321,13 +304,13 @@ export class Client {
         }
     }
 
-    async claimDropReward(dropId) {
+    async claimDropReward(dropInstanceId) {
         try {
             return await this.postAuthorized({
                 "operationName": "DropsPage_ClaimDropRewards",
                 "variables": {
                     "input": {
-                        "dropInstanceID": dropId
+                        "dropInstanceID": dropInstanceId
                     }
                 },
                 "extensions": {
@@ -359,10 +342,13 @@ export class Client {
                     }
                 }
             });
-            if (data && data.claimCommunityPoints && data.claimCommunityPoints.error == null)
-                return { success: true, points: data.claimCommunityPoints.claim.pointsEarnedTotal };
-            else
-                return false;
+            if (data && data.claimCommunityPoints && data.claimCommunityPoints.error == null) {
+                return {
+                    success: true,
+                    points: data.claimCommunityPoints.claim?.pointsEarnedTotal ?? 50
+                };
+            }
+            return false;
         } catch (e) {
             return false;
         }
@@ -370,7 +356,7 @@ export class Client {
 
     async getStream(username) {
         try {
-            if (typeof username == "string") {
+            if (typeof username === "string") {
                 const data = await this.post({
                     "operationName": "ChannelShell",
                     "variables": {
@@ -384,27 +370,25 @@ export class Client {
                     }
                 });
                 return data && data.userOrError ? data.userOrError.stream : null;
-            } else {
-                let dataAry = [];
-                for (const user of username) {
-                    dataAry.push({
-                        "operationName": "ChannelShell",
-                        "variables": {
-                            "login": user
-                        },
-                        "extensions": {
-                            "persistedQuery": {
-                                "version": 1,
-                                "sha256Hash": "580ab410bcd0c1ad194224957ae2241e5d252b2c5173d8e0cce9d32d5bb14efe"
-                            }
+            } else if (Array.isArray(username)) {
+                const dataAry = username.map(user => ({
+                    "operationName": "ChannelShell",
+                    "variables": {
+                        "login": user
+                    },
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": "580ab410bcd0c1ad194224957ae2241e5d252b2c5173d8e0cce9d32d5bb14efe"
                         }
-                    });
-                }
+                    }
+                }));
                 return await this.post(dataAry);
             }
         } catch (e) {
             return null;
         }
+        return null;
     }
 
     async getAllLiveForGame(gameName) {
@@ -431,10 +415,10 @@ export class Client {
                 }
             });
 
-            if (data && data.game && data.game.streams) {
-                let userAry = [];
+            if (data && data.game && data.game.streams && data.game.streams.edges) {
+                const userAry = [];
                 for (const edge of data.game.streams.edges) {
-                    if (edge && edge.node && edge.node.broadcaster) {
+                    if (edge && edge.node && edge.node.broadcaster && edge.node.broadcaster.login) {
                         userAry.push(edge.node.broadcaster.login);
                     }
                 }
@@ -447,7 +431,7 @@ export class Client {
     }
 
     async getChannelWithDrops(gameName, campaignId, slug) {
-        let streams = await this.getActiveStreams(gameName, slug);
+        const streams = await this.getActiveStreams(gameName, slug);
         if (Array.isArray(streams) && streams.length > 0) {
             for (const stream of streams) {
                 if (stream && stream.broadcaster) {
@@ -456,10 +440,9 @@ export class Client {
             }
         }
 
-        // Fallback: Query live streams by game name directly
-        let liveUsers = await this.getAllLiveForGame(gameName);
+        const liveUsers = await this.getAllLiveForGame(gameName);
         if (Array.isArray(liveUsers) && liveUsers.length > 0) {
-            let first = liveUsers[0];
+            const first = liveUsers[0];
             if (first && first.data && first.data.userOrError && first.data.userOrError.login) {
                 return {
                     broadcaster: {
