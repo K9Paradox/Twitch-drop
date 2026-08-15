@@ -236,30 +236,40 @@ export class Client {
 
     async getActiveStreams(gameName, slug) {
         try {
-            const gameSlug = slug || gameName.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
-            const data = await this.post({
-                "operationName": "DirectoryPage_Game",
-                "variables": {
-                    "name": gameSlug,
-                    "options": {
-                        "includeRestricted": [
-                            "SUB_ONLY_LIVE"
-                        ],
-                        "sort": "VIEWER_COUNT",
-                        "tags": ["c2542d6d-cd10-4532-919b-3d19f30a768b"]
+            let gameSlug = slug;
+            if (!gameSlug) {
+                gameSlug = gameName.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
+                if (gameSlug.startsWith("-")) gameSlug = gameSlug.slice(1);
+                if (gameSlug.endsWith("-")) gameSlug = gameSlug.slice(0, -1);
+            }
+
+            const data = await this.post([
+                {
+                    "operationName": "DirectoryPage_Game",
+                    "variables": {
+                        "slug": gameSlug,
+                        "options": {
+                            "sort": "VIEWER_COUNT",
+                            "tags": ["c2542d6d-cd10-4532-919b-3d19f30a768b"],
+                            "recommendationsContext": {
+                                "platform": "web"
+                            },
+                            "requestID": "JIRA-VXP-2397"
+                        },
+                        "sortTypeIsRecency": false,
+                        "includeCostreaming": true,
+                        "limit": 30
                     },
-                    "sortTypeIsRecency": false,
-                    "limit": 50
-                },
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 1,
-                        "sha256Hash": "76cb069d835b8a02914c08dc42c421d0dafda8af5b113a3f19141824b901402f"
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": "76cb069d835b8a02914c08dc42c421d0dafda8af5b113a3f19141824b901402f"
+                        }
                     }
                 }
-            });
+            ]);
 
-            const edges = data?.game?.streams?.edges || data?.data?.game?.streams?.edges || [];
+            const edges = data?.[0]?.data?.game?.streams?.edges || [];
             const result = [];
             for (const edge of edges) {
                 const broadcaster = edge?.node?.broadcaster;

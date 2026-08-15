@@ -116,7 +116,7 @@ function notifyUser(title, message) {
 function logActivity(type, title, game, points = 0, imgUrl = "assets/img/atd-48.png") {
     const entry = {
         id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        type, // 'drop' or 'points'
+        type,
         title,
         game,
         points,
@@ -358,7 +358,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 enableAutoplayForTwitch();
                 await fetchTwitchCookiesAndInitClient();
                 setupAlarms();
-                setTimeout(checkForDrops, 2000);
+                setTimeout(checkForDrops, 1500);
             } else {
                 chrome.alarms.clearAll();
                 if (activeStream.campaign !== "none" && curWindow.id !== 0) {
@@ -630,7 +630,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
     })();
 
-    return true; // Keep sendResponse open
+    return true;
 });
 
 // --- Tab Watchdog ---
@@ -647,7 +647,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
                 if (activeStream.campaign !== "none" && !activeStream.campaign.isCompleted) {
                     await runCampaign();
                 }
-            }, 5000);
+            }, 3000);
         }
     }
 });
@@ -709,7 +709,12 @@ async function runCampaign(forceNextStreamer = false) {
 
     if (curCamp.streamers && curCamp.streamers.length > 0) {
         const available = curCamp.streamers.filter(s => !skipped.includes(s));
-        targetStreamer = available.length > 0 ? available[0] : curCamp.streamers[0];
+        if (available.length > 0) {
+            targetStreamer = available[0];
+        } else {
+            activeStream.campaign.skippedStreamers = [];
+            targetStreamer = curCamp.streamers[0];
+        }
     } else {
         const stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug, skipped);
         if (stream && stream.broadcaster && stream.broadcaster.login) {
@@ -717,14 +722,16 @@ async function runCampaign(forceNextStreamer = false) {
         }
     }
 
-    if (!targetStreamer) {
-        console.warn("No active live stream found for game, waiting...");
-        await windowManager("wait");
-        return;
+    let streamUrl = "";
+    if (targetStreamer) {
+        activeStream.campaign.curWatching = targetStreamer;
+        streamUrl = `https://www.twitch.tv/${targetStreamer}`;
+    } else {
+        // Fallback to Twitch game directory with drops filter
+        const gameSlug = activeStream.campaign.slug || activeStream.campaign.game.name.toLowerCase().replace(/[^a-z0-9]/g, "-");
+        activeStream.campaign.curWatching = "";
+        streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops`;
     }
-
-    activeStream.campaign.curWatching = targetStreamer;
-    const streamUrl = `https://www.twitch.tv/${targetStreamer}`;
 
     // Force active tab navigation directly
     if (curWindow.id !== 0) {
@@ -1052,19 +1059,6 @@ async function windowManager(func, data) {
             curWindow.type = "none";
             await saveState();
         }
-    } else if (func === "wait") {
-        const waitingURL = chrome.runtime.getURL("waiting.html");
-        if (curWindow.id !== 0) {
-            await chrome.tabs.update(curWindow.id, { url: waitingURL }).catch(async () => {
-                const tab = await chrome.tabs.create({ active: true, url: waitingURL });
-                curWindow.id = tab.id;
-                await saveState();
-            });
-        } else {
-            const tab = await chrome.tabs.create({ active: true, url: waitingURL });
-            curWindow.id = tab.id;
-            await saveState();
-        }
     }
 }
 
@@ -1074,6 +1068,5 @@ function updateBadgeUI() {
         chrome.action.setBadgeBackgroundColor({ color: "#666666" }).catch(() => {});
         return;
     }
-    // Clean, unblocked icon in Chrome toolbar
     chrome.action.setBadgeText({ text: "" }).catch(() => {});
 }
