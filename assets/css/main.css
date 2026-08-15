@@ -838,6 +838,31 @@ body {
     flex-shrink: 0;
 }
 
+.rewardGlyphBox {
+    width: 42px;
+    height: 42px;
+    min-width: 42px;
+    border-radius: 6px;
+    background: rgba(145, 70, 255, 0.12);
+    border: 1px solid rgba(145, 70, 255, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--twitch-purple-light);
+    flex-shrink: 0;
+}
+
+.rewardGlyphBox.miniGlyph {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+}
+
+.rewardFallbackGlyph {
+    width: 20px;
+    height: 20px;
+}
+
 .rewardInfo {
     flex: 1;
     display: flex;

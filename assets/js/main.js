@@ -38,6 +38,15 @@ let currentActiveStream = null;
 let currentAutoGamesData = { allConnected: [...POPULAR_DROP_GAMES], enabled: [] };
 let tabAudioMuted = true;
 
+const GIFT_SVG_ICON = `
+<svg class="rewardFallbackGlyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <polyline points="20 12 20 22 4 22 4 12"></polyline>
+    <rect x="2" y="7" width="20" height="5"></rect>
+    <line x1="12" y1="22" x2="12" y2="7"></line>
+    <path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"></path>
+    <path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"></path>
+</svg>`;
+
 $(() => {
     // Set Manifest Version
     $("#extVersion").text(`v${maniData.version}`);
@@ -153,7 +162,6 @@ $(() => {
                 updateAudioButtonUI(res.muted);
                 showToast(res.muted ? "Muted stream tab audio" : "Unmuted stream tab audio");
             } else {
-                // If no tab response, flip local UI state
                 tabAudioMuted = !tabAudioMuted;
                 updateAudioButtonUI(tabAudioMuted);
                 showToast(tabAudioMuted ? "Muted stream tab audio" : "Unmuted stream tab audio");
@@ -447,11 +455,16 @@ function renderActivityHistory(history) {
 
     history.forEach(item => {
         const timeAgo = formatTimeAgo(new Date(item.timestamp));
-        const thumb = item.imgUrl || "assets/img/atd-48.png";
+        const hasValidImg = item.imgUrl && (item.imgUrl.startsWith("http://") || item.imgUrl.startsWith("https://"));
+
+        const imgHtml = hasValidImg
+            ? `<img src="${item.imgUrl}" class="activityThumb" alt="${item.title}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+               <div class="rewardGlyphBox miniGlyph" style="display:none;">${GIFT_SVG_ICON}</div>`
+            : `<div class="rewardGlyphBox miniGlyph">${GIFT_SVG_ICON}</div>`;
 
         const card = $(`
             <div class="activityItem">
-                <img src="${thumb}" class="activityThumb" alt="${item.title}" onerror="this.onerror=null; this.src='assets/img/atd-48.png';">
+                ${imgHtml}
                 <div class="activityMeta">
                     <span class="activityTitle" title="${item.title}">${item.title}</span>
                     <span class="activitySub">${item.game} &bull; <span class="activityTime">${timeAgo}</span></span>
@@ -578,12 +591,18 @@ function updateDropProgressUI(data) {
         $("#streamToolbar").hide();
 
         const iconsHtml = allItems.map(item => {
-            const img = item.picture || item.imageAssetURL || item.imageURL || "assets/img/atd-48.png";
+            const hasImg = item.picture && (item.picture.startsWith("http://") || item.picture.startsWith("https://"));
             const title = item.name || item.title || "Reward";
             const reqMins = item.reqTime || item.requiredMinutesWatched || 60;
+
+            const imgMarkup = hasImg
+                ? `<img src="${item.picture}" class="completedThumb" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                   <div class="rewardGlyphBox miniGlyph" style="display:none;">${GIFT_SVG_ICON}</div>`
+                : `<div class="rewardGlyphBox miniGlyph">${GIFT_SVG_ICON}</div>`;
+
             return `
                 <div class="completedRewardIconCard" title="${title} (${reqMins} min requirement)">
-                    <img src="${img}" class="completedThumb" onerror="this.onerror=null; this.src='assets/img/atd-48.png';">
+                    ${imgMarkup}
                     <svg class="completedBadgeCheck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
                     <span class="completedRewardLabel">${title}</span>
                 </div>
@@ -624,13 +643,18 @@ function updateDropProgressUI(data) {
     $(".progressBarInner").css({ "width": `${percent}%`, "background": "linear-gradient(90deg, var(--twitch-purple) 0%, var(--twitch-purple-light) 100%)" });
     $(".progressPercentText").text(`${percent}% (${itemWatched}/${targetMins} min)`);
 
-    const rewardName = currentRewardItem ? (currentRewardItem.name || currentRewardItem.title || `${gameName} Reward`) : `${gameName} Drop Reward`;
-    let rewardImg = currentRewardItem ? (currentRewardItem.picture || currentRewardItem.imageAssetURL || currentRewardItem.imageURL) : "assets/img/atd-48.png";
-    if (!rewardImg) rewardImg = "assets/img/atd-48.png";
+    const rewardName = currentRewardItem ? (currentRewardItem.name || currentRewardItem.title || `${gameName} Drop Reward`) : `${gameName} Drop Reward`;
+    const rewardImg = currentRewardItem ? (currentRewardItem.picture || currentRewardItem.imageAssetURL || currentRewardItem.imageURL) : "";
+    const hasValidImg = rewardImg && (rewardImg.startsWith("http://") || rewardImg.startsWith("https://"));
+
+    const imageHtml = hasValidImg
+        ? `<img src="${rewardImg}" class="activeRewardThumb" alt="Reward" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+           <div class="rewardGlyphBox" style="display:none;">${GIFT_SVG_ICON}</div>`
+        : `<div class="rewardGlyphBox">${GIFT_SVG_ICON}</div>`;
 
     detailsBox.html(`
         <div class="activeRewardItem">
-            <img src="${rewardImg}" class="activeRewardThumb" alt="Reward" onerror="this.onerror=null; this.src='assets/img/atd-48.png';">
+            ${imageHtml}
             <div class="activeRewardMeta">
                 <span class="activeRewardTitle" title="${rewardName}">${rewardName}</span>
                 <span class="activeRewardSub">${percent}% completed &bull; ${etaText}</span>
@@ -665,7 +689,7 @@ function renderActiveDropsList(activeStream) {
 
             const isClaimed = Boolean((drop.self && drop.self.isClaimed === true) || (itemMinsWatched >= minsNeeded && minsNeeded > 0));
 
-            let imgUrl = drop.picture || drop.imageAssetURL || drop.imageURL || "assets/img/atd-48.png";
+            let imgUrl = drop.picture || drop.imageAssetURL || drop.imageURL || "";
             if (drop.benefitEdges && drop.benefitEdges[0]) {
                 const benefit = drop.benefitEdges[0].benefit || drop.benefitEdges[0].node;
                 if (benefit && benefit.imageAssetURL) {
@@ -684,11 +708,10 @@ function renderActiveDropsList(activeStream) {
     });
 
     if (allRewardsList.length === 0) {
-        // Render Active Campaign Status Card with Sync
         container.html(`
             <div class="emptyDropsCard" style="padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; text-align: center;">
                 <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 8px;">
-                    <img src="assets/img/atd-32.png" style="width: 24px; height: 24px;">
+                    <div class="rewardGlyphBox miniGlyph" style="width: 28px; height: 28px; min-width: 28px;">${GIFT_SVG_ICON}</div>
                     <strong style="color: var(--text-primary); font-size: 14px;">${gameName} Drops Active</strong>
                 </div>
                 <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Watch progress is actively accumulating. Rewards will appear as they update from your Twitch Inventory.</p>
@@ -722,9 +745,15 @@ function renderActiveDropsList(activeStream) {
             statusText = `${pct}% (${reward.minsWatched}/${reward.minsNeeded}m)`;
         }
 
+        const hasValidImg = reward.imgUrl && (reward.imgUrl.startsWith("http://") || reward.imgUrl.startsWith("https://"));
+        const imgMarkup = hasValidImg
+            ? `<img src="${reward.imgUrl}" class="rewardImage" alt="Reward" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+               <div class="rewardGlyphBox" style="display:none;">${GIFT_SVG_ICON}</div>`
+            : `<div class="rewardGlyphBox">${GIFT_SVG_ICON}</div>`;
+
         const card = $(`
             <div class="dropRewardCard ${reward.isClaimed ? "isClaimedCard" : ""}">
-                <img src="${reward.imgUrl}" class="rewardImage" alt="Reward" onerror="this.onerror=null; this.src='assets/img/atd-48.png';">
+                ${imgMarkup}
                 <div class="rewardInfo">
                     <span class="rewardName" title="${reward.title}">${reward.title}</span>
                     <span class="rewardTime">Requirement: ${reward.minsNeeded} minutes</span>

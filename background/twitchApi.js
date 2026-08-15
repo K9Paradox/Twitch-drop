@@ -18,7 +18,10 @@ export class Client {
                 "Content-Type": "application/json"
             };
             if (this.deviceId) headers["X-Device-Id"] = this.deviceId;
-            if (this.integrity?.token) headers["Client-Integrity"] = this.integrity.token;
+            if (this.integrity) {
+                const integToken = typeof this.integrity === "string" ? this.integrity : this.integrity?.token;
+                if (integToken) headers["Client-Integrity"] = integToken;
+            }
             if (this.uuid) headers["Client-Session-Id"] = this.uuid;
 
             const res = await fetch("https://gql.twitch.tv/gql", {
@@ -42,7 +45,10 @@ export class Client {
                 "Content-Type": "application/json"
             };
             if (this.deviceId) headers["X-Device-Id"] = this.deviceId;
-            if (this.integrity?.token) headers["Client-Integrity"] = this.integrity.token;
+            if (this.integrity) {
+                const integToken = typeof this.integrity === "string" ? this.integrity : this.integrity?.token;
+                if (integToken) headers["Client-Integrity"] = integToken;
+            }
             if (this.uuid) headers["Client-Session-Id"] = this.uuid;
 
             const res = await fetch("https://gql.twitch.tv/gql", {
@@ -58,7 +64,8 @@ export class Client {
     }
 
     async getInteg() {
-        if (!this.integrity || this.integrity.expiration - 960000 < Date.now()) {
+        if (!this.integrity) return false;
+        if (typeof this.integrity === "object" && this.integrity.expiration && this.integrity.expiration - 960000 < Date.now()) {
             return false;
         }
         return this.integrity;
@@ -75,6 +82,7 @@ export class Client {
         this.deviceId = options?.deviceId ?? this.deviceId;
         this.userId = options?.userId ?? this.userId;
         this.uuid = options?.uuid ?? this.uuid;
+        if (options?.integrity) this.integrity = options.integrity;
     }
 
     async getUserId() {
@@ -141,6 +149,9 @@ export class Client {
                 if (data && data.currentUser && data.currentUser.dropCampaigns) {
                     return data.currentUser.dropCampaigns;
                 }
+                if (data && data.rewardCampaignsAvailableToUser) {
+                    return data.rewardCampaignsAvailableToUser;
+                }
             } catch (e) {}
         }
 
@@ -158,6 +169,7 @@ export class Client {
                 }
             });
             if (data && data.dropCampaigns) return data.dropCampaigns;
+            if (data && data.rewardCampaignsAvailableToUser) return data.rewardCampaignsAvailableToUser;
             if (data && data.currentUser && data.currentUser.dropCampaigns) return data.currentUser.dropCampaigns;
         } catch (e) {}
 
