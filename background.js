@@ -255,9 +255,9 @@ function syncCampaignProgressWithInventory(inventory) {
             if (!curCamp.items || curCamp.items.length === 0) {
                 curCamp.items = [];
                 for (const d of matchedDropCamp.timeBasedDrops) {
-                    const benefit = d.benefitEdges && d.benefitEdges[0] ? d.benefitEdges[0].benefit : null;
+                    const benefit = d.benefitEdges && d.benefitEdges[0] ? (d.benefitEdges[0].benefit || d.benefitEdges[0].node) : null;
                     const req = d.requiredMinutesWatched || 60;
-                    const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (d.imageURL || "");
+                    const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (d.imageURL || d.imageAssetURL || "");
                     const benefitName = (benefit && benefit.name) ? (d.name ? `${d.name} - ${benefit.name}` : benefit.name) : (d.name || "Drop Reward");
                     
                     curCamp.items.push({
@@ -485,7 +485,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             if (c.timeBasedDrops && c.timeBasedDrops.length > 0) {
                                 for (const d of c.timeBasedDrops) {
                                     const benefit = d.benefitEdges?.[0]?.benefit || d.benefitEdges?.[0]?.node;
-                                    const benefitImg = benefit?.imageAssetURL || benefit?.imageURL || d.imageURL || "";
+                                    const benefitImg = benefit?.imageAssetURL || benefit?.imageURL || d.imageURL || d.imageAssetURL || "";
                                     const benefitName = benefit?.name ? (d.name ? `${d.name} - ${benefit.name}` : benefit.name) : (d.name || "Drop Reward");
                                     
                                     extractedItems.push({
@@ -509,7 +509,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             if (c.timeBasedDrops && c.timeBasedDrops.length > 0) {
                                 for (const d of c.timeBasedDrops) {
                                     const benefit = d.benefitEdges?.[0]?.benefit || d.benefitEdges?.[0]?.node;
-                                    const benefitImg = benefit?.imageAssetURL || benefit?.imageURL || d.imageURL || "";
+                                    const benefitImg = benefit?.imageAssetURL || benefit?.imageURL || d.imageURL || d.imageAssetURL || "";
                                     const benefitName = benefit?.name ? (d.name ? `${d.name} - ${benefit.name}` : benefit.name) : (d.name || "Drop Reward");
 
                                     extractedItems.push({
@@ -541,7 +541,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 curCamp.minutesWatched = highestWatched;
                                 curCamp.minutesNeeded = highestReq;
                             } else if (currentDrop) {
-                                const benefit = currentDrop.benefitEdges?.[0]?.benefit;
+                                const benefit = (currentDrop.benefitEdges && currentDrop.benefitEdges[0]) ? (currentDrop.benefitEdges[0].benefit || currentDrop.benefitEdges[0].node) : null;
                                 const dropImg = benefit?.imageAssetURL || currentDrop.imageURL || currentDrop.imageAssetURL || "";
                                 const dropTitle = benefit?.name ? (currentDrop.name ? `${currentDrop.name} - ${benefit.name}` : benefit.name) : (currentDrop.name || "Drop Reward");
 
@@ -996,7 +996,7 @@ async function createCampaign(game) {
         let itemsToProcess = [];
         if (Array.isArray(campDeets) && campDeets.length > 0) {
             for (const c of campDeets) {
-                const dropCamp = c?.data?.user?.dropCampaign || c?.data?.dropCampaign;
+                const dropCamp = c?.data?.user?.dropCampaign || c?.data?.dropCampaign || c?.user?.dropCampaign || c?.dropCampaign;
                 if (dropCamp) itemsToProcess.push(dropCamp);
             }
         }
@@ -1021,10 +1021,10 @@ async function createCampaign(game) {
                 if (reqMins > maxTime) maxTime = reqMins;
 
                 if (reqMins !== 0) {
-                    const benefit = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit : null;
+                    const benefit = (drop.benefitEdges && drop.benefitEdges[0]) ? (drop.benefitEdges[0].benefit || drop.benefitEdges[0].node) : null;
                     const benefitId = benefit ? benefit.id : "";
                     const benefitName = (benefit && benefit.name) ? (drop.name ? `${drop.name} - ${benefit.name}` : benefit.name) : (drop.name || "Drop Reward");
-                    const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (drop.imageURL || "");
+                    const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (drop.imageURL || drop.imageAssetURL || "");
 
                     const isClaimedInEvents = isDropItemClaimedStrict(drop, eventDropsList);
                     const isClaimedInSelf = Boolean(drop.self && drop.self.isClaimed);
@@ -1068,7 +1068,7 @@ async function createCampaign(game) {
             if (maxTime === 0) maxTime = 60;
 
             activeStream.campaigns.push({
-                game: dropCamp.game ? dropCamp.game.name : game,
+                game: dropCamp.game ? (dropCamp.game.displayName || dropCamp.game.name) : game,
                 id: dropCamp.id,
                 minutesNeeded: maxTime,
                 minutesWatched: timeWatched,
@@ -1089,11 +1089,11 @@ async function createCampaign(game) {
             for (const d of inProgCamp.timeBasedDrops) {
                 const req = d.requiredMinutesWatched || 60;
                 if (req > maxTime) maxTime = req;
-                const benefit = d.benefitEdges && d.benefitEdges[0] ? d.benefitEdges[0].benefit : null;
+                const benefit = d.benefitEdges && d.benefitEdges[0] ? (d.benefitEdges[0].benefit || d.benefitEdges[0].node) : null;
                 const isClaimed = Boolean(d.self && d.self.isClaimed);
                 const watched = d.self?.currentMinutesWatched || 0;
                 if (watched > timeWatched) timeWatched = watched;
-                const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (d.imageURL || "");
+                const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (d.imageURL || d.imageAssetURL || "");
                 const benefitName = (benefit && benefit.name) ? (d.name ? `${d.name} - ${benefit.name}` : benefit.name) : (d.name || "Drop Reward");
 
                 items.push({
@@ -1135,6 +1135,7 @@ async function createCampaign(game) {
     }
 
     await saveState();
+    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
     await runCampaign();
 }
 

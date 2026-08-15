@@ -30,7 +30,9 @@ export class Client {
                 body: JSON.stringify(data)
             });
             if (!res.ok) return null;
-            return await res.json();
+            const json = await res.json();
+            if (Array.isArray(json)) return json;
+            return (json && json.data) ? json.data : json;
         } catch (e) {
             return null;
         }
@@ -57,7 +59,9 @@ export class Client {
                 body: JSON.stringify(data)
             });
             if (!res.ok) return null;
-            return await res.json();
+            const json = await res.json();
+            if (Array.isArray(json)) return json;
+            return (json && json.data) ? json.data : json;
         } catch (e) {
             return null;
         }
@@ -151,6 +155,9 @@ export class Client {
                 }
                 if (data && data.rewardCampaignsAvailableToUser) {
                     return data.rewardCampaignsAvailableToUser;
+                }
+                if (data && data.dropCampaigns) {
+                    return data.dropCampaigns;
                 }
             } catch (e) {}
         }
