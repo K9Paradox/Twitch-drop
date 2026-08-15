@@ -248,15 +248,23 @@ $(() => {
 
     // Select Item from Dropdown
     $(document).on("click", "#gameDropdownItems li", (e) => {
-        const selectedGame = $(e.target).text();
+        const selectedGame = $(e.target).text().trim();
         if (selectedGame === "No Connected Games Found" || selectedGame === "No matching games") return;
 
         $(".selectedGame").text(selectedGame);
         $(".selectDropdown").addClass("hidden");
         gameSelectOpen = false;
 
-        chrome.runtime.sendMessage({ type: "p:startCampaign", data: { campaign: selectedGame } }).catch(() => {});
-        $("#dropStatus").text(`Starting Campaign: ${selectedGame}...`);
+        $("#dropStatus").text(`Farming: ${selectedGame}`);
+        $("#dropGame").text(`Finding live drop stream for ${selectedGame}...`);
+        $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>${selectedGame}</span>`).addClass("activePill");
+
+        chrome.runtime.sendMessage({ type: "p:startCampaign", data: { campaign: selectedGame } }).then(() => {
+            setTimeout(() => {
+                chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+            }, 1000);
+        }).catch(() => {});
+
         updateLastCheckTime();
         showToast(`Target Game: ${selectedGame}`);
     });

@@ -150,8 +150,13 @@ function enableAutoplayForTwitch() {
 
 async function fetchTwitchCookiesAndInitClient() {
     try {
-        const authCookie = await chrome.cookies.get({ url: "https://www.twitch.tv", name: "auth-token" }).catch(() => null);
-        const deviceCookie = await chrome.cookies.get({ url: "https://www.twitch.tv", name: "unique_id" }).catch(() => null);
+        const allAuthCookies = await chrome.cookies.getAll({ name: "auth-token" }).catch(() => []);
+        let authCookie = allAuthCookies.find(c => c.domain.includes("twitch.tv") && c.value);
+        if (!authCookie && allAuthCookies.length > 0) authCookie = allAuthCookies[0];
+
+        const allDeviceCookies = await chrome.cookies.getAll({ name: "unique_id" }).catch(() => []);
+        let deviceCookie = allDeviceCookies.find(c => c.domain.includes("twitch.tv") && c.value);
+        if (!deviceCookie && allDeviceCookies.length > 0) deviceCookie = allDeviceCookies[0];
 
         let oauthToken = authCookie ? authCookie.value : null;
         let deviceId = deviceCookie ? deviceCookie.value : null;
@@ -727,7 +732,6 @@ async function runCampaign(forceNextStreamer = false) {
         activeStream.campaign.curWatching = targetStreamer;
         streamUrl = `https://www.twitch.tv/${targetStreamer}`;
     } else {
-        // Fallback to Twitch game directory with drops filter
         const gameSlug = activeStream.campaign.slug || activeStream.campaign.game.name.toLowerCase().replace(/[^a-z0-9]/g, "-");
         activeStream.campaign.curWatching = "";
         streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops`;
@@ -773,30 +777,26 @@ async function endCampaign() {
 async function createCampaign(game) {
     await fetchTwitchCookiesAndInitClient();
 
+    const gameSlug = game.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
     let campaigns = await client.getDropCampaigns().catch(() => []);
-    if (!campaigns || campaigns.length === 0) return;
+    if (!campaigns) campaigns = [];
 
+    let matchingCampaigns = [];
     if (game === "Badges") {
-        campaigns = campaigns.filter(c => c.detailsURL && c.detailsURL.includes("twitch-chat-badges"));
+        matchingCampaigns = campaigns.filter(c => c.detailsURL && c.detailsURL.includes("twitch-chat-badges"));
     } else {
-        campaigns = campaigns.filter(c => c.game != null && (c.game.displayName === game || c.game.name === game) && c.status === "ACTIVE");
+        matchingCampaigns = campaigns.filter(c => c.game != null && (c.game.displayName.toLowerCase() === game.toLowerCase() || c.game.name.toLowerCase() === game.toLowerCase()) && c.status === "ACTIVE");
     }
 
-    if (campaigns.length === 0) {
-        console.warn(`No active campaign found for game: ${game}`);
-        return;
-    }
-
-    const campAry = campaigns.map(c => c.id);
     activeStream.campaign = {
         game: {
-            name: game === "Badges" ? "Badges" : campaigns[0].game.displayName
+            name: game
         },
         onCamp: 0,
         curWatching: "",
         lastLoop: 0,
         allowGen: true,
-        slug: null,
+        slug: gameSlug,
         status: "starting",
         reOpening: false,
         isCompleted: false,
@@ -804,117 +804,123 @@ async function createCampaign(game) {
     };
     activeStream.campaigns = [];
 
-    const campDeets = await client.getDropCampaignDetails(campAry).catch(() => []);
-    let inventory = await client.getInventory().catch(() => ({ dropCampaignsInProgress: [], gameEventDrops: [] }));
-    if (!inventory) inventory = { dropCampaignsInProgress: [], gameEventDrops: [] };
+    if (matchingCampaigns.length > 0) {
+        const campAry = matchingCampaigns.map(c => c.id);
+        const campDeets = await client.getDropCampaignDetails(campAry).catch(() => []);
+        let inventory = await client.getInventory().catch(() => ({ dropCampaignsInProgress: [], gameEventDrops: [] }));
+        if (!inventory) inventory = { dropCampaignsInProgress: [], gameEventDrops: [] };
 
-    let itemsToProcess = [];
-    if (Array.isArray(campDeets) && campDeets.length > 0) {
-        for (const c of campDeets) {
-            const dropCamp = c?.data?.user?.dropCampaign || c?.data?.dropCampaign;
-            if (dropCamp) itemsToProcess.push(dropCamp);
-        }
-    }
-
-    if (itemsToProcess.length === 0) {
-        itemsToProcess = campaigns;
-    }
-
-    const eventDropsList = (inventory && inventory.gameEventDrops) ? inventory.gameEventDrops : [];
-
-    for (const dropCamp of itemsToProcess) {
-        if (!dropCamp) continue;
-        const streams = [];
-        if (activeStream.campaign.slug === null && dropCamp.game) {
-            activeStream.campaign.slug = dropCamp.game.slug;
-        }
-        if (dropCamp.allow && dropCamp.allow.channels) {
-            for (const stream of dropCamp.allow.channels) {
-                if (stream && stream.name) streams.push(stream.name);
+        let itemsToProcess = [];
+        if (Array.isArray(campDeets) && campDeets.length > 0) {
+            for (const c of campDeets) {
+                const dropCamp = c?.data?.user?.dropCampaign || c?.data?.dropCampaign;
+                if (dropCamp) itemsToProcess.push(dropCamp);
             }
         }
-        activeStream.campaign.allowGen = false;
-        let maxTime = 0;
-        let timeWatched = 0;
-        const allDrops = [];
+        if (itemsToProcess.length === 0) itemsToProcess = matchingCampaigns;
 
-        for (const drop of (dropCamp.timeBasedDrops || [])) {
-            const reqMins = drop.requiredMinutesWatched || 60;
-            if (reqMins > maxTime) maxTime = reqMins;
+        const eventDropsList = (inventory && inventory.gameEventDrops) ? inventory.gameEventDrops : [];
 
-            if (reqMins !== 0) {
-                const benefitId = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit.id : "";
-                const benefitName = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit.name : (drop.name || "Reward");
-                const benefitImg = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit.imageAssetURL : (drop.imageURL || "assets/img/atd-48.png");
-
-                const isClaimedInEvents = isDropItemClaimedStrict(drop, eventDropsList);
-                const isClaimedInSelf = Boolean(drop.self && drop.self.isClaimed);
-                const isClaimed = isClaimedInEvents || isClaimedInSelf;
-                const currentWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
-                    ? drop.self.currentMinutesWatched
-                    : (isClaimed ? reqMins : 0);
-
-                allDrops.push({
-                    name: drop.name ? `${drop.name} - ${benefitName}` : benefitName,
-                    picture: benefitImg,
-                    reqTime: reqMins,
-                    id: drop.id,
-                    benefitId: benefitId,
-                    badge: dropCamp.owner && dropCamp.owner.name === "Twitch Gaming",
-                    self: { isClaimed, currentMinutesWatched: currentWatched }
-                });
+        for (const dropCamp of itemsToProcess) {
+            if (!dropCamp) continue;
+            const streams = [];
+            if (dropCamp.allow && dropCamp.allow.channels) {
+                for (const stream of dropCamp.allow.channels) {
+                    if (stream && stream.name) streams.push(stream.name);
+                }
             }
-        }
+            let maxTime = 0;
+            let timeWatched = 0;
+            const allDrops = [];
 
-        const dropStarted = inventory.dropCampaignsInProgress ? inventory.dropCampaignsInProgress.some(obj => obj.id === dropCamp.id) : false;
-        if (dropStarted) {
-            const inProg = inventory.dropCampaignsInProgress.find(obj => obj.id === dropCamp.id);
-            if (inProg && inProg.timeBasedDrops && inProg.timeBasedDrops.length > 0) {
-                for (const drop of inProg.timeBasedDrops) {
-                    if (drop.self) {
-                        if (drop.self.currentMinutesWatched > timeWatched) {
-                            timeWatched = drop.self.currentMinutesWatched;
-                        }
-                        const matchedItem = allDrops.find(item => item.id === drop.id || (item.benefitId && item.benefitId === drop.id));
-                        if (matchedItem) {
-                            const isClaimed = Boolean(drop.self.isClaimed || (drop.self.currentMinutesWatched >= drop.requiredMinutesWatched && drop.requiredMinutesWatched > 0));
-                            matchedItem.self.isClaimed = isClaimed;
-                            matchedItem.self.currentMinutesWatched = drop.self.currentMinutesWatched;
+            for (const drop of (dropCamp.timeBasedDrops || [])) {
+                const reqMins = drop.requiredMinutesWatched || 60;
+                if (reqMins > maxTime) maxTime = reqMins;
+
+                if (reqMins !== 0) {
+                    const benefitId = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit.id : "";
+                    const benefitName = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit.name : (drop.name || "Reward");
+                    const benefitImg = (drop.benefitEdges && drop.benefitEdges[0]) ? drop.benefitEdges[0].benefit.imageAssetURL : (drop.imageURL || "assets/img/atd-48.png");
+
+                    const isClaimedInEvents = isDropItemClaimedStrict(drop, eventDropsList);
+                    const isClaimedInSelf = Boolean(drop.self && drop.self.isClaimed);
+                    const isClaimed = isClaimedInEvents || isClaimedInSelf;
+                    const currentWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
+                        ? drop.self.currentMinutesWatched
+                        : (isClaimed ? reqMins : 0);
+
+                    allDrops.push({
+                        name: drop.name ? `${drop.name} - ${benefitName}` : benefitName,
+                        picture: benefitImg,
+                        reqTime: reqMins,
+                        id: drop.id,
+                        benefitId: benefitId,
+                        badge: dropCamp.owner && dropCamp.owner.name === "Twitch Gaming",
+                        self: { isClaimed, currentMinutesWatched: currentWatched }
+                    });
+                }
+            }
+
+            const dropStarted = inventory.dropCampaignsInProgress ? inventory.dropCampaignsInProgress.some(obj => obj.id === dropCamp.id) : false;
+            if (dropStarted) {
+                const inProg = inventory.dropCampaignsInProgress.find(obj => obj.id === dropCamp.id);
+                if (inProg && inProg.timeBasedDrops && inProg.timeBasedDrops.length > 0) {
+                    for (const drop of inProg.timeBasedDrops) {
+                        if (drop.self) {
+                            if (drop.self.currentMinutesWatched > timeWatched) {
+                                timeWatched = drop.self.currentMinutesWatched;
+                            }
+                            const matchedItem = allDrops.find(item => item.id === drop.id || (item.benefitId && item.benefitId === drop.id));
+                            if (matchedItem) {
+                                const isClaimed = Boolean(drop.self.isClaimed || (drop.self.currentMinutesWatched >= drop.requiredMinutesWatched && drop.requiredMinutesWatched > 0));
+                                matchedItem.self.isClaimed = isClaimed;
+                                matchedItem.self.currentMinutesWatched = drop.self.currentMinutesWatched;
+                            }
                         }
                     }
                 }
             }
+
+            if (maxTime === 0) maxTime = 60;
+
+            activeStream.campaigns.push({
+                game: dropCamp.game ? dropCamp.game.name : game,
+                id: dropCamp.id,
+                minutesNeeded: maxTime,
+                minutesWatched: timeWatched,
+                streamers: streams,
+                items: allDrops
+            });
         }
 
-        if (maxTime === 0) maxTime = 60;
+        const isDone = syncCampaignProgressWithInventory(inventory);
+        if (isDone) {
+            const allDone = activeStream.campaigns.every(c => {
+                return (c.items && c.items.length > 0)
+                    ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
+                    : c.minutesWatched >= c.minutesNeeded;
+            });
 
+            if (allDone) {
+                console.log(`All drops for ${game} already claimed!`);
+                activeStream.campaign.isCompleted = true;
+                activeStream.campaign.curWatching = null;
+                await windowManager("close");
+                await saveState();
+                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                return;
+            }
+        }
+    } else {
+        // Fallback for direct directory search
         activeStream.campaigns.push({
-            game: dropCamp.game ? dropCamp.game.name : game,
-            id: dropCamp.id,
-            minutesNeeded: maxTime,
-            minutesWatched: timeWatched,
-            streamers: streams,
-            items: allDrops
+            game: game,
+            id: `camp-${gameSlug}`,
+            minutesNeeded: 60,
+            minutesWatched: 0,
+            streamers: [],
+            items: []
         });
-    }
-
-    const isDone = syncCampaignProgressWithInventory(inventory);
-    if (isDone) {
-        const allDone = activeStream.campaigns.every(c => {
-            return (c.items && c.items.length > 0)
-                ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
-                : c.minutesWatched >= c.minutesNeeded;
-        });
-
-        if (allDone) {
-            console.log(`All drops for ${game} already claimed!`);
-            activeStream.campaign.isCompleted = true;
-            activeStream.campaign.curWatching = null;
-            await windowManager("close");
-            await saveState();
-            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
-            return;
-        }
     }
 
     await saveState();
