@@ -123,9 +123,23 @@ if (!window._originalFetch) {
                     slider.dispatchEvent(new Event('input', { bubbles: true }));
                     slider.dispatchEvent(new Event('change', { bubbles: true }));
                 }
+                const muteBtn = document.querySelector('[data-a-target="player-mute-unmute-button"]');
+                if (muteBtn) {
+                    const isMutedBtn = muteBtn.getAttribute('aria-label')?.toLowerCase().includes('unmute');
+                    if (shouldMute && !isMutedBtn) {
+                        triggerSyntheticClick(muteBtn);
+                    } else if (!shouldMute && isMutedBtn) {
+                        triggerSyntheticClick(muteBtn);
+                    }
+                }
                 const videos = document.querySelectorAll('video');
                 videos.forEach(v => {
-                    if (v) v.muted = shouldMute;
+                    if (v) {
+                        v.muted = shouldMute;
+                        if (!shouldMute && v.volume < 0.1) {
+                            v.volume = 0.5;
+                        }
+                    }
                 });
             } catch (err) {}
         }

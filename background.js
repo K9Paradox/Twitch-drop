@@ -426,6 +426,20 @@ async function handleWatchdogTick() {
                     }
                 }
 
+                // Check if stream tab is still open and alive
+                if (curWindow.id !== 0) {
+                    const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
+                    if (!tab) {
+                        curWindow.id = 0;
+                        await saveState();
+                        await runCampaign();
+                        return;
+                    }
+                } else if (activeStream.campaign && activeStream.campaign.status === "watching" && !activeStream.campaign.isCompleted) {
+                    await runCampaign();
+                    return;
+                }
+
                 // 2. Stream Stall Watchdog (4-minute threshold)
                 if (settings.autoRefresh !== false && activeStream.campaign) {
                     const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
@@ -859,8 +873,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 if (curWindow.id !== 0) {
                     if (settings.autoMute) {
                         chrome.tabs.update(curWindow.id, { muted: true }).catch(() => {});
+                        chrome.tabs.sendMessage(curWindow.id, { type: "setTabAudio", muted: true }).catch(() => {});
                     } else if (settings.autoMute === false) {
                         chrome.tabs.update(curWindow.id, { muted: false }).catch(() => {});
+                        chrome.tabs.sendMessage(curWindow.id, { type: "setTabAudio", muted: false }).catch(() => {});
                     }
                 }
                 sendResponse({ success: true, settings });
@@ -912,6 +928,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     pendingPlaybackHandshake = null;
                     if (settings.autoMute !== false && targetTabId) {
                         chrome.tabs.update(targetTabId, { muted: true }).catch(() => {});
+                        chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: true }).catch(() => {});
+                    } else if (targetTabId) {
+                        chrome.tabs.update(targetTabId, { muted: false }).catch(() => {});
+                        chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: false }).catch(() => {});
                     }
                     if (prevActiveTabId && prevActiveTabId !== targetTabId) {
                         chrome.tabs.update(prevActiveTabId, { active: true }).catch(() => {});
@@ -944,21 +964,12 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
                 return;
             }
 
-            activeStream.campaign.reopenAttempts = (activeStream.campaign.reopenAttempts || 0) + 1;
-            if (activeStream.campaign.reopenAttempts > 5) {
-                console.warn("Too many tab restart attempts, pausing campaign");
-                activeStream.campaign.status = "paused";
-                await saveState();
-                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
-                return;
-            }
-
             setTimeout(async () => {
                 await hydrateState();
                 if (activeStream.campaign !== "none" && !activeStream.campaign.isCompleted && extEnabled && curWindow.id === 0) {
                     await runCampaign();
                 }
-            }, 3000);
+            }, 2500);
         }
     }
 });
