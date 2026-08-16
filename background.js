@@ -929,12 +929,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     if (settings.autoMute !== false && targetTabId) {
                         chrome.tabs.update(targetTabId, { muted: true }).catch(() => {});
                         chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: true }).catch(() => {});
+                        if (prevActiveTabId && prevActiveTabId !== targetTabId) {
+                            chrome.tabs.update(prevActiveTabId, { active: true }).catch(() => {});
+                        }
                     } else if (targetTabId) {
                         chrome.tabs.update(targetTabId, { muted: false }).catch(() => {});
                         chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: false }).catch(() => {});
-                    }
-                    if (prevActiveTabId && prevActiveTabId !== targetTabId) {
-                        chrome.tabs.update(prevActiveTabId, { active: true }).catch(() => {});
                     }
                     sendResponse({ success: true });
                     return;
@@ -1439,15 +1439,19 @@ async function windowManager(func, data = {}) {
             timestamp: Date.now()
         };
 
-        // Fallback safety timer (1.2s) to restore focus quickly
+        // Fallback safety timer (1.2s) to restore focus quickly if autoMute enabled
         if (targetTab && targetTab.id) {
             setTimeout(async () => {
                 if (pendingPlaybackHandshake && pendingPlaybackHandshake.targetTabId === targetTab.id) {
                     if (settings.autoMute !== false) {
                         chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
-                    }
-                    if (prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
-                        chrome.tabs.update(prevActiveTab.id, { active: true }).catch(() => {});
+                        chrome.tabs.sendMessage(targetTab.id, { type: "setTabAudio", muted: true }).catch(() => {});
+                        if (prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
+                            chrome.tabs.update(prevActiveTab.id, { active: true }).catch(() => {});
+                        }
+                    } else {
+                        chrome.tabs.update(targetTab.id, { muted: false }).catch(() => {});
+                        chrome.tabs.sendMessage(targetTab.id, { type: "setTabAudio", muted: false }).catch(() => {});
                     }
                     pendingPlaybackHandshake = null;
                 }

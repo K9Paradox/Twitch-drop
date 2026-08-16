@@ -32,6 +32,8 @@ if (!window._originalFetch) {
         }, "*");
     }
 
+    let hasAppliedInitialVolumePreset = false;
+
     // 2. Active DOM Watchdog & Continuous Playback Enforcement
     function checkAndEnforcePlayback() {
         try {
@@ -39,27 +41,26 @@ if (!window._originalFetch) {
             const overlay = document.querySelector('[data-a-target="player-overlay-click-to-unmute"], .player-overlay-click-to-unmute');
             if (overlay) triggerSyntheticClick(overlay);
 
-            // 2. Adjust volume slider via React native setter to ensure Twitch's internal store is unmuted
-            const slider = document.querySelector('[data-a-target="player-volume-slider"]');
-            if (slider) {
-                const proto = Object.getPrototypeOf(slider);
-                const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                if (setter) {
-                    setter.call(slider, "0.5");
-                } else {
-                    slider.value = "0.5";
+            // 2. Adjust volume slider on initial load only once if at 0
+            if (!hasAppliedInitialVolumePreset) {
+                const slider = document.querySelector('[data-a-target="player-volume-slider"]');
+                if (slider) {
+                    hasAppliedInitialVolumePreset = true;
+                    if (parseFloat(slider.value) === 0) {
+                        const proto = Object.getPrototypeOf(slider);
+                        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                        if (setter) {
+                            setter.call(slider, "0.5");
+                        } else {
+                            slider.value = "0.5";
+                        }
+                        slider.dispatchEvent(new Event('input', { bubbles: true }));
+                        slider.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
                 }
-                slider.dispatchEvent(new Event('input', { bubbles: true }));
-                slider.dispatchEvent(new Event('change', { bubbles: true }));
             }
 
-            // 3. If mute button still indicates 'Unmute', click it
-            const muteBtn = document.querySelector('[data-a-target="player-mute-unmute-button"]');
-            if (muteBtn && muteBtn.getAttribute('aria-label')?.toLowerCase().includes('unmute')) {
-                triggerSyntheticClick(muteBtn);
-            }
-
-            // 4. Ensure HTML5 video element is playing
+            // 3. Ensure HTML5 video element is playing
             const videos = document.querySelectorAll('video');
             videos.forEach(v => {
                 if (v) {
