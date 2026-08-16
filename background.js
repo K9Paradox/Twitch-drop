@@ -76,6 +76,7 @@ let gettingStreamObj = {
 let autoGetTokenWindow = 0;
 let isHydrated = false;
 let hydrationPromise = null;
+let pendingPlaybackHandshake = null;
 
 // --- State Persistence & Hydration ---
 
@@ -905,6 +906,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({ success: true });
                 break;
 
+            case "streamPlaybackStarted":
+                if (pendingPlaybackHandshake && curWindow.id !== 0) {
+                    const { targetTabId, prevActiveTabId } = pendingPlaybackHandshake;
+                    pendingPlaybackHandshake = null;
+                    if (settings.autoMute !== false && targetTabId) {
+                        chrome.tabs.update(targetTabId, { muted: true }).catch(() => {});
+                    }
+                    if (prevActiveTabId && prevActiveTabId !== targetTabId) {
+                        chrome.tabs.update(prevActiveTabId, { active: true }).catch(() => {});
+                    }
+                    sendResponse({ success: true });
+                    return;
+                }
+                sendResponse({ success: false });
+                break;
+
             default:
                 sendResponse({ status: "unhandled" });
         }
@@ -1404,16 +1421,26 @@ async function windowManager(func, data = {}) {
             }
         }
 
-        // Allow simulated user-click gesture on the active stream tab, then restore focus and apply tab-muting
+        // Store handshake state to switch back once stream actually starts playing
+        pendingPlaybackHandshake = {
+            targetTabId: targetTab?.id,
+            prevActiveTabId: prevActiveTab?.id,
+            timestamp: Date.now()
+        };
+
+        // Fallback safety timer (4s) in case network is slow to connect
         if (targetTab && targetTab.id) {
             setTimeout(async () => {
-                if (settings.autoMute !== false) {
-                    chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
+                if (pendingPlaybackHandshake && pendingPlaybackHandshake.targetTabId === targetTab.id) {
+                    if (settings.autoMute !== false) {
+                        chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
+                    }
+                    if (prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
+                        chrome.tabs.update(prevActiveTab.id, { active: true }).catch(() => {});
+                    }
+                    pendingPlaybackHandshake = null;
                 }
-                if (prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
-                    chrome.tabs.update(prevActiveTab.id, { active: true }).catch(() => {});
-                }
-            }, 1000);
+            }, 4000);
         }
 
         return targetTab;

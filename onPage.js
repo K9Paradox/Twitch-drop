@@ -3,20 +3,57 @@
 if (!window._originalFetch) {
     const activeIntervals = [];
 
-    // 1. Set Low-bandwidth 160p preset and unmuted player volume in localStorage
+    // 1. Set comprehensive Twitch player audio and quality presets in localStorage
     function applyLowBandwidthPresets(lowQuality = true) {
         try {
             if (lowQuality) {
                 localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
             }
+            localStorage.setItem("video-muted", JSON.stringify({ "default": false }));
+            localStorage.setItem("volume", "0.5");
             localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
             localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
         } catch (e) {}
     }
     applyLowBandwidthPresets(true);
 
-    // 2. Simulate User Click Gesture on Active Stream Tab to satisfy Chrome Autoplay & Twitch Watch Time
-    function simulateUserInteraction() {
+    let audioContext = null;
+    let gainNode = null;
+    let isGainRouted = false;
+    let hasSentPlaybackHandshake = false;
+
+    // Route audio through Web Audio GainNode to prevent audio spikes during active tab phase
+    function setupSilentGainRouting(video) {
+        if (!video || isGainRouted) return;
+        try {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (AudioContextClass) {
+                audioContext = audioContext || new AudioContextClass();
+                if (audioContext.state === "suspended") {
+                    audioContext.resume().catch(() => {});
+                }
+                const source = audioContext.createMediaElementSource(video);
+                gainNode = audioContext.createGain();
+                gainNode.gain.value = 0.0; // Completely silent
+                source.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                isGainRouted = true;
+            }
+        } catch (e) {}
+    }
+
+    function notifyPlaybackConfirmed() {
+        if (hasSentPlaybackHandshake) return;
+        hasSentPlaybackHandshake = true;
+        window.postMessage({
+            autoTwitchDrops: {
+                type: "streamPlaybackStarted"
+            }
+        }, "*");
+    }
+
+    // 2. Active DOM Watchdog & Synthetic Unmute Trigger
+    function checkAndEnforcePlayback() {
         try {
             const unmuteBtn = document.querySelector('[data-a-target="player-overlay-click-to-unmute"], [data-test-selector="unmute-button"], .player-overlay-click-to-unmute');
             if (unmuteBtn) {
@@ -25,17 +62,43 @@ if (!window._originalFetch) {
             const videos = document.querySelectorAll('video');
             videos.forEach(v => {
                 if (v) {
-                    v.muted = false;
-                    v.volume = 0.5;
-                    if (v.paused) v.play().catch(() => {});
+                    setupSilentGainRouting(v);
+                    if (v.muted) v.muted = false;
+                    if (v.volume < 0.1) v.volume = 0.5;
+                    if (v.paused) {
+                        v.play().catch(() => {
+                            v.muted = true;
+                            v.play().catch(() => {});
+                        });
+                    }
+                    if (!v.paused && v.currentTime > 0.2) {
+                        notifyPlaybackConfirmed();
+                    }
                 }
             });
         } catch (e) {}
     }
 
-    setTimeout(simulateUserInteraction, 300);
-    setTimeout(simulateUserInteraction, 700);
-    setTimeout(simulateUserInteraction, 1400);
+    // MutationObserver to catch dynamic player attachment
+    if (typeof MutationObserver !== "undefined") {
+        try {
+            const playerObserver = new MutationObserver(() => {
+                checkAndEnforcePlayback();
+            });
+            if (document.body) {
+                playerObserver.observe(document.body, { childList: true, subtree: true });
+            } else if (typeof document.addEventListener === "function") {
+                document.addEventListener("DOMContentLoaded", () => {
+                    if (document.body) {
+                        playerObserver.observe(document.body, { childList: true, subtree: true });
+                    }
+                });
+            }
+        } catch (err) {}
+    }
+
+    const playbackInterval = setInterval(checkAndEnforcePlayback, 1000);
+    activeIntervals.push(playbackInterval);
 
     // Listen for settings and audio state changes relayed from content script
     window.addEventListener("message", (e) => {
@@ -48,6 +111,9 @@ if (!window._originalFetch) {
         } else if (dropData.type === "setTabAudio") {
             const shouldMute = Boolean(dropData.muted);
             try {
+                if (gainNode) {
+                    gainNode.gain.value = shouldMute ? 0.0 : 1.0;
+                }
                 const videos = document.querySelectorAll('video');
                 videos.forEach(v => {
                     if (v) v.muted = shouldMute;

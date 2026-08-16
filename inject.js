@@ -21,6 +21,9 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
                 if (dropData.type === "points-earned") {
                     chrome.runtime.sendMessage({ type: "points-earned", data: dropData }).catch(() => {});
                 }
+                if (dropData.type === "streamPlaybackStarted") {
+                    chrome.runtime.sendMessage({ type: "streamPlaybackStarted" }).catch(() => {});
+                }
                 if (dropData.type === "gqlOperation" || dropData.type === "sessionContext") {
                     chrome.runtime.sendMessage({
                         type: "gqlOperation",
