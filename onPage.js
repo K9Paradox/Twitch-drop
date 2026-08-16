@@ -9,38 +9,15 @@ if (!window._originalFetch) {
             if (lowQuality) {
                 localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
             }
-            localStorage.setItem("video-muted", JSON.stringify({ "default": false }));
+            localStorage.setItem("video-muted", JSON.stringify({ "default": true }));
             localStorage.setItem("volume", "0.5");
-            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
+            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": true }));
             localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
         } catch (e) {}
     }
     applyLowBandwidthPresets(true);
 
-    let audioContext = null;
-    let gainNode = null;
-    let isGainRouted = false;
     let hasSentPlaybackHandshake = false;
-
-    // Route audio through Web Audio GainNode to prevent audio spikes during active tab phase
-    function setupSilentGainRouting(video) {
-        if (!video || isGainRouted) return;
-        try {
-            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-            if (AudioContextClass) {
-                audioContext = audioContext || new AudioContextClass();
-                if (audioContext.state === "suspended") {
-                    audioContext.resume().catch(() => {});
-                }
-                const source = audioContext.createMediaElementSource(video);
-                gainNode = audioContext.createGain();
-                gainNode.gain.value = 0.0; // Completely silent
-                source.connect(gainNode);
-                gainNode.connect(audioContext.destination);
-                isGainRouted = true;
-            }
-        } catch (e) {}
-    }
 
     function notifyPlaybackConfirmed() {
         if (hasSentPlaybackHandshake) return;
@@ -52,24 +29,17 @@ if (!window._originalFetch) {
         }, "*");
     }
 
-    // 2. Active DOM Watchdog & Synthetic Unmute Trigger
+    // 2. Active DOM Watchdog & Continuous Playback Enforcement
     function checkAndEnforcePlayback() {
         try {
-            const unmuteBtn = document.querySelector('[data-a-target="player-overlay-click-to-unmute"], [data-test-selector="unmute-button"], .player-overlay-click-to-unmute');
-            if (unmuteBtn) {
-                triggerSyntheticClick(unmuteBtn);
-            }
             const videos = document.querySelectorAll('video');
             videos.forEach(v => {
                 if (v) {
-                    setupSilentGainRouting(v);
-                    if (v.muted) v.muted = false;
-                    if (v.volume < 0.1) v.volume = 0.5;
+                    if (!v.muted) {
+                        v.muted = true;
+                    }
                     if (v.paused) {
-                        v.play().catch(() => {
-                            v.muted = true;
-                            v.play().catch(() => {});
-                        });
+                        v.play().catch(() => {});
                     }
                     if (!v.paused && v.currentTime > 0.2) {
                         notifyPlaybackConfirmed();
@@ -111,9 +81,6 @@ if (!window._originalFetch) {
         } else if (dropData.type === "setTabAudio") {
             const shouldMute = Boolean(dropData.muted);
             try {
-                if (gainNode) {
-                    gainNode.gain.value = shouldMute ? 0.0 : 1.0;
-                }
                 const videos = document.querySelectorAll('video');
                 videos.forEach(v => {
                     if (v) v.muted = shouldMute;
