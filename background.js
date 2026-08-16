@@ -1367,8 +1367,16 @@ if (typeof chrome !== "undefined" && chrome.windows?.onRemoved?.addListener) {
 
 async function windowManager(func, data = {}) {
     if (func === "open") {
+        let prevActiveTab = null;
+        try {
+            const currentTabs = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+            if (currentTabs && currentTabs.length > 0) {
+                prevActiveTab = currentTabs[0];
+            }
+        } catch (e) {}
+
         const tabOptions = {
-            active: false,
+            active: true,
             ...data
         };
 
@@ -1382,7 +1390,9 @@ async function windowManager(func, data = {}) {
                 curWindow.type = "tab";
                 await saveState();
                 if (tabOptions.url && targetTab.url !== tabOptions.url) {
-                    await chrome.tabs.update(targetTab.id, { url: tabOptions.url, active: false }).catch(() => {});
+                    await chrome.tabs.update(targetTab.id, { url: tabOptions.url, active: true }).catch(() => {});
+                } else {
+                    await chrome.tabs.update(targetTab.id, { active: true }).catch(() => {});
                 }
             } else {
                 targetTab = await chrome.tabs.create(tabOptions);
@@ -1405,12 +1415,32 @@ async function windowManager(func, data = {}) {
                 }
             }
             if (tabOptions.url && targetTab.url !== tabOptions.url) {
-                await chrome.tabs.update(curWindow.id, { url: tabOptions.url, active: false }).catch(() => {});
+                await chrome.tabs.update(curWindow.id, { url: tabOptions.url, active: true }).catch(() => {});
+            } else {
+                await chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
             }
         }
 
-        if (targetTab && targetTab.id && settings.autoMute !== false) {
-            chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
+        // Store handshake state to switch back once stream actually starts playing
+        pendingPlaybackHandshake = {
+            targetTabId: targetTab?.id,
+            prevActiveTabId: prevActiveTab?.id,
+            timestamp: Date.now()
+        };
+
+        // Fallback safety timer (1.2s) to restore focus quickly
+        if (targetTab && targetTab.id) {
+            setTimeout(async () => {
+                if (pendingPlaybackHandshake && pendingPlaybackHandshake.targetTabId === targetTab.id) {
+                    if (settings.autoMute !== false) {
+                        chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
+                    }
+                    if (prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
+                        chrome.tabs.update(prevActiveTab.id, { active: true }).catch(() => {});
+                    }
+                    pendingPlaybackHandshake = null;
+                }
+            }, 1200);
         }
 
         return targetTab;
