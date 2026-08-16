@@ -3,15 +3,18 @@
 if (!window._originalFetch) {
     const activeIntervals = [];
 
-    // 1. Set comprehensive Twitch player audio and quality presets in localStorage
+    // 1. Set Twitch player quality and default volume presets in localStorage without overwriting user choices
     function applyLowBandwidthPresets(lowQuality = true) {
         try {
             if (lowQuality) {
                 localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
             }
-            localStorage.setItem("video-muted", JSON.stringify({ "default": true }));
-            localStorage.setItem("volume", "0.5");
-            localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": true }));
+            if (!localStorage.getItem("player-volume")) {
+                localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
+            }
+            if (!localStorage.getItem("volume")) {
+                localStorage.setItem("volume", "0.5");
+            }
             localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
         } catch (e) {}
     }
@@ -35,11 +38,14 @@ if (!window._originalFetch) {
             const videos = document.querySelectorAll('video');
             videos.forEach(v => {
                 if (v) {
-                    if (!v.muted) {
-                        v.muted = true;
-                    }
                     if (v.paused) {
-                        v.play().catch(() => {});
+                        v.play().catch(() => {
+                            // If unmuted playback is blocked by browser autoplay policy, fallback to muted play so video never stalls
+                            if (v.paused) {
+                                v.muted = true;
+                                v.play().catch(() => {});
+                            }
+                        });
                     }
                     if (!v.paused && v.currentTime > 0.2) {
                         notifyPlaybackConfirmed();
