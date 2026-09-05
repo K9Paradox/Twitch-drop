@@ -16,7 +16,7 @@
         <!-- Top Header -->
         <header id="topHeader">
             <div class="logoArea">
-                <img src="assets/img/atd-32.png" alt="Logo" class="appLogo" onerror="this.onerror=null; this.src='assets/img/icon.svg';">
+                <img src="assets/img/atd-32.png" alt="Logo" class="appLogo">
                 <div class="logoText">
                     <span class="appName">TWITCH DROPS <span class="proBadge">PRO</span></span>
                     <span class="appVersion" id="extVersion">v1.5.0</span>
@@ -158,10 +158,15 @@
                             <svg class="sectionGlyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
                             <span class="cardTitle">Current Drop Progress</span>
                         </div>
-                        <button class="actionBtn claimNowBtn" id="manualClaimBtn" title="Check and claim pending rewards">
-                            <svg class="btnGlyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"></path></svg>
-                            <span>Claim Drops</span>
-                        </button>
+                        <div class="headerButtonRow">
+                            <button class="actionBtn miniBtn stopBtn" id="stopCampaignBtn" style="display: none;" title="Stop farming the current campaign">
+                                <span>⏹ Stop</span>
+                            </button>
+                            <button class="actionBtn claimNowBtn" id="manualClaimBtn" title="Check and claim pending rewards">
+                                <svg class="btnGlyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"></path></svg>
+                                <span>Claim Drops</span>
+                            </button>
+                        </div>
                     </div>
                     <div id="curDrops">
                         <div class="dropProgressContainer">
@@ -360,6 +365,17 @@
                             </div>
                             <label class="switch">
                                 <input id="setautoGetToken" class="settingsBool" type="checkbox">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="settingRow">
+                            <div class="settingInfo">
+                                <span class="settingTitle">Watch in Popout Window</span>
+                                <span class="settingDesc">Opens stream in a separate compact popout window instead of a background tab.</span>
+                            </div>
+                            <label class="switch">
+                                <input id="setwatchPopout" class="settingsBool" type="checkbox">
                                 <span class="slider"></span>
                             </label>
                         </div>

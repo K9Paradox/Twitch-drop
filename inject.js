@@ -64,18 +64,45 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
             });
         }
 
-        // Add Tab Title Prefix indicator
+        let isFarmMode = window.location.hash.includes("atd-managed=1");
+
+        if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+            chrome.runtime.onMessage.addListener((message) => {
+                if (message && message.type === "farmMode") {
+                    isFarmMode = Boolean(message.enabled);
+                    window.postMessage({
+                        autoTwitchDrops: {
+                            type: "farmMode",
+                            enabled: isFarmMode
+                        }
+                    }, "*");
+                    if (isFarmMode) {
+                        updateTabTitleIndicator();
+                        injectFloatingBadge();
+                    } else {
+                        const badge = document.getElementById("atd-pro-indicator");
+                        if (badge) badge.remove();
+                    }
+                }
+            });
+        }
+
+        // Add Tab Title Prefix indicator only for managed farm tabs
         function updateTabTitleIndicator() {
+            if (!isFarmMode) return;
             if (document.title && !document.title.startsWith("[⚡ ATD Pro]")) {
                 document.title = `[⚡ ATD Pro] ${document.title}`;
             }
         }
         const titleInterval = setInterval(updateTabTitleIndicator, 3000);
         injectIntervals.push(titleInterval);
-        setTimeout(updateTabTitleIndicator, 1000);
+        if (isFarmMode) {
+            setTimeout(updateTabTitleIndicator, 1000);
+        }
 
-        // Inject in-page floating glassmorphic badge
+        // Inject in-page floating glassmorphic badge only for managed farm tabs
         function injectFloatingBadge() {
+            if (!isFarmMode) return;
             if (document.getElementById("atd-pro-indicator")) return;
             const badge = document.createElement("div");
             badge.id = "atd-pro-indicator";
@@ -116,10 +143,12 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
             document.body.appendChild(badge);
         }
 
-        if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", injectFloatingBadge);
-        } else {
-            injectFloatingBadge();
+        if (isFarmMode) {
+            if (document.readyState === "loading") {
+                document.addEventListener("DOMContentLoaded", injectFloatingBadge);
+            } else {
+                injectFloatingBadge();
+            }
         }
 
         injectScript("onPage.js");

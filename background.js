@@ -808,12 +808,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "p:focusStreamTab":
+            case "p:focusFarmTab":
                 if (curWindow.id !== 0) {
-                    chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
+                    const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
+                    if (tab) {
+                        await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+                        if (tab.windowId) {
+                            await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+                        }
+                    }
                 } else {
                     const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
                     if (tabs && tabs.length > 0) {
-                        chrome.tabs.update(tabs[0].id, { active: true }).catch(() => {});
+                        await chrome.tabs.update(tabs[0].id, { active: true }).catch(() => {});
+                        if (tabs[0].windowId) {
+                            await chrome.windows.update(tabs[0].windowId, { focused: true }).catch(() => {});
+                        }
                     }
                 }
                 sendResponse({ success: true });
@@ -1045,11 +1055,11 @@ async function runCampaign(forceNextStreamer = false) {
     let streamUrl = "";
     if (targetStreamer) {
         activeStream.campaign.curWatching = targetStreamer;
-        streamUrl = `https://www.twitch.tv/${targetStreamer}`;
+        streamUrl = `https://www.twitch.tv/${targetStreamer}#atd-managed=1`;
     } else {
         const gameSlug = activeStream.campaign.slug || activeStream.campaign.game.name.toLowerCase().replace(/[^a-z0-9]/g, "-");
         activeStream.campaign.curWatching = "";
-        streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops`;
+        streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops#atd-managed=1`;
     }
 
     enableAutoplayForTwitch();
@@ -1361,6 +1371,14 @@ function autoGetToken() {
                 if (window) {
                     autoGetTokenWindow = window.id;
                     await chrome.storage.local.set({ autoGetTokenWindow });
+                    // 60-second failsafe: close window if Twitch stalls or integrity token isn't intercepted
+                    setTimeout(() => {
+                        if (autoGetTokenWindow !== 0 && autoGetTokenWindow === window.id) {
+                            chrome.windows.remove(window.id).catch(() => {});
+                            autoGetTokenWindow = 0;
+                            chrome.storage.local.set({ autoGetTokenWindow: 0 }).catch(() => {});
+                        }
+                    }, 60000);
                 }
             }).catch(() => {});
         }
@@ -1469,11 +1487,52 @@ async function windowManager(func, data = {}) {
     }
 }
 
+let lastBadgeState = "";
+
 function updateBadgeUI() {
-    if (!extEnabled) {
-        chrome.action.setBadgeText({ text: "OFF" }).catch(() => {});
-        chrome.action.setBadgeBackgroundColor({ color: "#666666" }).catch(() => {});
-        return;
-    }
-    chrome.action.setBadgeText({ text: "" }).catch(() => {});
+    try {
+        if (!chrome.action || !chrome.action.setBadgeText) return;
+        let text = "";
+        let color = "#9146FF";
+
+        if (!extEnabled) {
+            text = "OFF";
+            color = "#52525b";
+        } else if (activeStream && activeStream.campaign && activeStream.campaign !== "none") {
+            const camp = activeStream.campaign;
+            if (camp.isCompleted) {
+                text = "✓";
+                color = "#00e676";
+            } else if (camp.status === "nostream") {
+                text = "…";
+                color = "#f0a232";
+            } else if (activeStream.campaigns && activeStream.campaigns.length > 0) {
+                const cur = activeStream.campaigns[camp.onCamp || 0] || activeStream.campaigns[0];
+                if (cur) {
+                    let left = 0;
+                    if (cur.items && cur.items.length > 0) {
+                        const nextItem = cur.items.find(i => !i.self?.isClaimed && (i.self?.currentMinutesWatched || 0) < (i.reqTime || 60));
+                        if (nextItem) {
+                            const req = nextItem.reqTime || 60;
+                            const watched = nextItem.self?.currentMinutesWatched || 0;
+                            left = Math.max(0, req - watched);
+                        }
+                    } else if (cur.minutesNeeded) {
+                        left = Math.max(0, cur.minutesNeeded - (cur.minutesWatched || 0));
+                    }
+                    text = left > 0 ? `${left}m` : "✓";
+                    color = left > 0 ? "#9146FF" : "#00e676";
+                } else {
+                    text = "…";
+                }
+            }
+        } else if (settings.setShowBadges) {
+            text = "";
+        }
+
+        if (text === lastBadgeState) return;
+        lastBadgeState = text;
+        chrome.action.setBadgeText({ text }).catch(() => {});
+        chrome.action.setBadgeBackgroundColor({ color }).catch(() => {});
+    } catch (e) {}
 }

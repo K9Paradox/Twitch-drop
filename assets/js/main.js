@@ -51,6 +51,30 @@ const GIFT_SVG_ICON = `
     <path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"></path>
 </svg>`;
 
+function escapeHtml(str) {
+    if (str == null) return "";
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+// Document-level error listener in capture phase handles failed images without inline onerror (MV3 CSP compliant)
+document.addEventListener("error", (e) => {
+    if (e.target && e.target.tagName === "IMG") {
+        if (e.target.classList.contains("appLogo")) {
+            e.target.src = "assets/img/icon.svg";
+        } else if (e.target.classList.contains("img-with-fallback") || e.target.nextElementSibling?.classList.contains("rewardGlyphBox")) {
+            e.target.style.display = "none";
+            if (e.target.nextElementSibling) {
+                e.target.nextElementSibling.style.display = "flex";
+            }
+        }
+    }
+}, true);
+
 $(() => {
     // Set Manifest Version
     $("#extVersion").text(`v${maniData.version || "1.5.0"}`);
@@ -289,6 +313,27 @@ $(() => {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
             chrome.runtime.sendMessage({ type: "p:focusStreamTab" }).catch(() => {});
         }
+    });
+
+    // Clicking streamer name in status box focuses the farming tab and window
+    $(document).on("click", "#focusFarmTab", (e) => {
+        e.preventDefault();
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:focusStreamTab" }).catch(() => {});
+        }
+    });
+
+    // Stop Campaign Button
+    $("#stopCampaignBtn").on("click", () => {
+        if (!extEnabled) return;
+        const btn = $("#stopCampaignBtn");
+        btn.attr("disabled", true);
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:startCampaign", data: { campaign: "none" } }).catch(() => {});
+        }
+        $("#dropStatus").text("Status: Stopping campaign...");
+        showToast("⏹ Farming stopped");
+        setTimeout(() => btn.removeAttr("disabled"), 2000);
     });
 
     // Open Twitch Drops Inventory Button
@@ -653,8 +698,9 @@ function renderActivityHistory(history) {
         const title = item.title || "Reward Claimed";
         const game = item.game || "Twitch";
 
+        const safeImgUrl = hasValidImg ? encodeURI(item.imgUrl) : "";
         const imgHtml = hasValidImg
-            ? `<img src="${item.imgUrl}" class="activityThumb" alt="${title}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+            ? `<img src="${safeImgUrl}" class="activityThumb img-with-fallback" alt="${escapeHtml(title)}">
                <div class="rewardGlyphBox miniGlyph" style="display:none;">${GIFT_SVG_ICON}</div>`
             : `<div class="rewardGlyphBox miniGlyph">${GIFT_SVG_ICON}</div>`;
 
@@ -662,8 +708,8 @@ function renderActivityHistory(history) {
             <div class="activityItem">
                 ${imgHtml}
                 <div class="activityMeta">
-                    <span class="activityTitle" title="${title}">${title}</span>
-                    <span class="activitySub">${game} &bull; <span class="activityTime">${timeAgo}</span></span>
+                    <span class="activityTitle" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+                    <span class="activitySub">${escapeHtml(game)} &bull; <span class="activityTime">${escapeHtml(timeAgo)}</span></span>
                 </div>
             </div>
         `);
@@ -726,6 +772,7 @@ function filterDropdownItems(query) {
 
 function updateDropProgressUI(data) {
     if (!data || !data.activeStream || data.activeStream.campaign === "none" || !data.activeStream.campaign) {
+        $("#stopCampaignBtn").hide();
         $("#dropStatus").text("Status: Ready & Monitoring");
         $("#dropGame").text("Game: Select a campaign below or enable Auto Games");
         $("#headerStatusPill").html('<span class="statusDot idleDot"></span><span>Idle</span>').removeClass("activePill");
@@ -736,6 +783,7 @@ function updateDropProgressUI(data) {
         return;
     }
 
+    $("#stopCampaignBtn").show();
     const active = data.activeStream;
     const camp = active.campaign || {};
     const gameName = camp.game ? (camp.game.name || camp.game.displayName || "Twitch Drop") : (typeof camp === "string" ? camp : "Twitch Drop");
@@ -788,7 +836,7 @@ function updateDropProgressUI(data) {
     // ALL DROPS FOR GAME COMPLETED
     if (allItems.length > 0 && allClaimed) {
         $("#dropStatus").text(`All drops for ${gameName} completed`);
-        $("#dropGame").html(`Game: <strong style="color:var(--emerald-green);">${gameName}</strong> &bull; All Rewards Claimed`);
+        $("#dropGame").html(`Game: <strong style="color:var(--emerald-green);">${escapeHtml(gameName)}</strong> &bull; All Rewards Claimed`);
         $("#headerStatusPill").html('<span class="statusDot activeDot"></span><span>Completed</span>').addClass("activePill");
         $(".progressBarInner").css({ "width": "100%", "background": "linear-gradient(90deg, #00f59b 0%, #00d684 100%)" });
         $(".progressPercentText").text("100% (All Rewards Claimed)");
@@ -799,17 +847,18 @@ function updateDropProgressUI(data) {
             const hasImg = pic && (typeof pic === "string") && (pic.startsWith("http://") || pic.startsWith("https://"));
             const title = item.name || item.title || "Reward";
             const reqMins = item.reqTime || item.requiredMinutesWatched || 60;
+            const safePic = hasImg ? encodeURI(pic) : "";
 
             const imgMarkup = hasImg
-                ? `<img src="${pic}" class="completedThumb" alt="${title}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                ? `<img src="${safePic}" class="completedThumb img-with-fallback" alt="${escapeHtml(title)}">
                    <div class="rewardGlyphBox miniGlyph" style="display:none;">${GIFT_SVG_ICON}</div>`
                 : `<div class="rewardGlyphBox miniGlyph">${GIFT_SVG_ICON}</div>`;
 
             return `
-                <div class="completedRewardIconCard" title="${title} (${reqMins} min requirement)">
+                <div class="completedRewardIconCard" title="${escapeHtml(title)} (${reqMins} min requirement)">
                     ${imgMarkup}
                     <svg class="completedBadgeCheck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                    <span class="completedRewardLabel">${title}</span>
+                    <span class="completedRewardLabel">${escapeHtml(title)}</span>
                 </div>
             `;
         }).join("");
@@ -817,7 +866,7 @@ function updateDropProgressUI(data) {
         detailsBox.html(`
             <div class="allCompletedCardBox">
                 <div class="completedHeader">
-                    <span class="completedTitle">All Running Drops for ${gameName} Completed</span>
+                    <span class="completedTitle">All Running Drops for ${escapeHtml(gameName)} Completed</span>
                     <span class="completedSub">All rewards claimed & in your inventory</span>
                 </div>
                 ${allItems.length > 0 ? `<div class="completedGridRow">${iconsHtml}</div>` : ""}
@@ -828,12 +877,12 @@ function updateDropProgressUI(data) {
 
     // Active In-Progress Mode:
     if (camp.curWatching) {
-        $("#dropGame").html(`Watching: <a href="https://www.twitch.tv/${camp.curWatching}" target="_blank" class="streamerLink">@${camp.curWatching} ↗</a>`);
-        $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>@${camp.curWatching}</span>`).addClass("activePill");
+        $("#dropGame").html(`Watching: <a href="https://www.twitch.tv/${encodeURIComponent(camp.curWatching)}#atd-managed=1" id="focusFarmTab" class="streamerLink" title="Click to view stream tab">@${escapeHtml(camp.curWatching)} ↗</a>`);
+        $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>@${escapeHtml(camp.curWatching)}</span>`).addClass("activePill");
         $("#streamToolbar").show();
     } else {
         $("#dropGame").text(`Finding live drop stream for ${gameName}...`);
-        $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>${gameName}</span>`).addClass("activePill");
+        $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>${escapeHtml(gameName)}</span>`).addClass("activePill");
         $("#streamToolbar").hide();
     }
     $("#dropStatus").text(`Farming: ${gameName}`);
@@ -853,9 +902,10 @@ function updateDropProgressUI(data) {
     const rewardName = currentRewardItem ? (currentRewardItem.name || currentRewardItem.title || `${gameName} Drop Reward`) : `${gameName} Drop Reward`;
     const rewardImg = currentRewardItem ? (currentRewardItem.picture || currentRewardItem.imageAssetURL || currentRewardItem.imageURL || "") : "";
     const hasValidImg = rewardImg && (typeof rewardImg === "string") && (rewardImg.startsWith("http://") || rewardImg.startsWith("https://"));
+    const safeRewardImg = hasValidImg ? encodeURI(rewardImg) : "";
 
     const imageHtml = hasValidImg
-        ? `<img src="${rewardImg}" class="activeRewardThumb" alt="Reward" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+        ? `<img src="${safeRewardImg}" class="activeRewardThumb img-with-fallback" alt="${escapeHtml(rewardName)}">
            <div class="rewardGlyphBox" style="display:none;">${GIFT_SVG_ICON}</div>`
         : `<div class="rewardGlyphBox">${GIFT_SVG_ICON}</div>`;
 
@@ -863,7 +913,7 @@ function updateDropProgressUI(data) {
         <div class="activeRewardItem">
             ${imageHtml}
             <div class="activeRewardMeta">
-                <span class="activeRewardTitle" title="${rewardName}">${rewardName}</span>
+                <span class="activeRewardTitle" title="${escapeHtml(rewardName)}">${escapeHtml(rewardName)}</span>
                 <span class="activeRewardSub">${percent}% completed &bull; ${etaText}</span>
             </div>
         </div>
@@ -959,8 +1009,9 @@ function renderActiveDropsList(activeStream) {
         }
 
         const hasValidImg = reward.imgUrl && (typeof reward.imgUrl === "string") && (reward.imgUrl.startsWith("http://") || reward.imgUrl.startsWith("https://"));
+        const safeRewardImg = hasValidImg ? encodeURI(reward.imgUrl) : "";
         const imgMarkup = hasValidImg
-            ? `<img src="${reward.imgUrl}" class="rewardImage" alt="Reward" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+            ? `<img src="${safeRewardImg}" class="rewardImage img-with-fallback" alt="Reward">
                <div class="rewardGlyphBox" style="display:none;">${GIFT_SVG_ICON}</div>`
             : `<div class="rewardGlyphBox">${GIFT_SVG_ICON}</div>`;
 
@@ -968,7 +1019,7 @@ function renderActiveDropsList(activeStream) {
             <div class="dropRewardCard ${reward.isClaimed ? "isClaimedCard" : ""}">
                 ${imgMarkup}
                 <div class="rewardInfo">
-                    <span class="rewardName" title="${reward.title}">${reward.title}</span>
+                    <span class="rewardName" title="${escapeHtml(reward.title)}">${escapeHtml(reward.title)}</span>
                     <span class="rewardTime">Requirement: ${reward.minsNeeded} minutes</span>
                 </div>
                 <span class="rewardBadge ${statusClass}">${statusText}</span>

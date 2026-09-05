@@ -3,8 +3,12 @@
 if (!window._originalFetch) {
     const activeIntervals = [];
 
+    // Farming mode: only active on managed farm tabs (#atd-managed=1 or farmMode message)
+    window.__atdFarming = window.__atdFarming === true || (typeof window.location !== "undefined" && window.location.hash.includes("atd-managed=1"));
+
     // 1. Set Twitch player quality and default volume presets in localStorage without overwriting user choices
     function applyLowBandwidthPresets(lowQuality = true) {
+        if (!window.__atdFarming) return;
         try {
             if (lowQuality) {
                 localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
@@ -18,7 +22,9 @@ if (!window._originalFetch) {
             localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
         } catch (e) {}
     }
-    applyLowBandwidthPresets(true);
+    if (window.__atdFarming) {
+        applyLowBandwidthPresets(true);
+    }
 
     let hasSentPlaybackHandshake = false;
 
@@ -34,6 +40,7 @@ if (!window._originalFetch) {
 
     // 2. Active DOM Watchdog & Continuous Playback Enforcement
     function checkAndEnforcePlayback() {
+        if (!window.__atdFarming) return;
         try {
             // 1. If overlay click-to-unmute exists, click it
             const overlay = document.querySelector('[data-a-target="player-overlay-click-to-unmute"], .player-overlay-click-to-unmute');
@@ -104,7 +111,12 @@ if (!window._originalFetch) {
     window.addEventListener("message", (e) => {
         if (!e.data || !e.data.autoTwitchDrops) return;
         const dropData = e.data.autoTwitchDrops;
-        if (dropData.type === "settingsChanged" && dropData.settings) {
+        if (dropData.type === "farmMode") {
+            window.__atdFarming = Boolean(dropData.enabled);
+            if (window.__atdFarming) {
+                applyLowBandwidthPresets(true);
+            }
+        } else if (dropData.type === "settingsChanged" && dropData.settings) {
             if (dropData.settings.lowQualityMode !== undefined) {
                 applyLowBandwidthPresets(dropData.settings.lowQualityMode);
             }

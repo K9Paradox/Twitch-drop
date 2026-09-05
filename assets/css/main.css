@@ -912,6 +912,18 @@ body {
     border-color: var(--text-muted);
 }
 
+.stopBtn {
+    background: rgba(235, 4, 0, 0.15);
+    color: #ff5c5c;
+    border: 1px solid rgba(235, 4, 0, 0.4);
+}
+
+.stopBtn:hover {
+    background: rgba(235, 4, 0, 0.3);
+    color: #ffffff;
+    box-shadow: 0 0 10px rgba(235, 4, 0, 0.35);
+}
+
 /* Rewards List */
 .dropsListContainer {
     display: flex;
