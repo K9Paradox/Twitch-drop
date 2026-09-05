@@ -1340,3 +1340,158 @@ body {
     color: var(--text-secondary);
     line-height: 1.45;
 }
+
+/* No Active Drops Notice Card */
+.noDropsAlertCard {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    background: rgba(240, 162, 50, 0.08);
+    border: 1px solid rgba(240, 162, 50, 0.25);
+    border-radius: 8px;
+    padding: 12px;
+    margin-top: 4px;
+}
+
+.noDropsIconBox {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    border-radius: 6px;
+    background: rgba(240, 162, 50, 0.15);
+    border: 1px solid rgba(240, 162, 50, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #f0a232;
+    flex-shrink: 0;
+}
+
+.noDropsContent {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.noDropsTitle {
+    font-size: 12px;
+    font-weight: 700;
+    color: #f0a232;
+}
+
+.noDropsDesc {
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.noDropsTip {
+    font-size: 10.5px;
+    color: var(--text-muted);
+    font-style: italic;
+    margin-top: 4px;
+}
+
+/* Claimed Inventory Drops */
+.claimedInventoryContainer {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.claimedDropItem {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 8px 10px;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.claimedDropItem:hover {
+    transform: translateY(-1px);
+    border-color: #3b3b44;
+}
+
+.claimedDropThumb {
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: #000;
+    flex-shrink: 0;
+}
+
+.claimedDropGlyph {
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    border-radius: 6px;
+    background: rgba(0, 245, 155, 0.12);
+    border: 1px solid rgba(0, 245, 155, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--success-green);
+    flex-shrink: 0;
+}
+
+.claimedDropMeta {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.claimedDropTitle {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.claimedDropSub {
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+.claimedDropBadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(0, 245, 155, 0.12);
+    color: var(--success-green);
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 3px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 245, 155, 0.25);
+    flex-shrink: 0;
+}
+
+/* Dropdown Active Game Tag */
+.dropdownItemRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+}
+
+.activeGameBadgeTag {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--success-green);
+    background: rgba(0, 245, 155, 0.15);
+    padding: 2px 5px;
+    border-radius: 3px;
+    margin-left: 6px;
+}

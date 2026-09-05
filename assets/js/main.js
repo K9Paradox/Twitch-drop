@@ -37,7 +37,9 @@ let settings = {
 let extEnabled = true;
 let gameSelectOpen = false;
 let currentAllGames = [...POPULAR_DROP_GAMES];
+let activeDropGamesSet = new Set();
 let currentActiveStream = null;
+let currentClaimedInventory = [];
 let currentAutoGamesData = { allConnected: [...POPULAR_DROP_GAMES], enabled: [] };
 let tabAudioMuted = true;
 let authBannerDismissed = false;
@@ -66,7 +68,7 @@ document.addEventListener("error", (e) => {
     if (e.target && e.target.tagName === "IMG") {
         if (e.target.classList.contains("appLogo")) {
             e.target.src = "assets/img/icon.svg";
-        } else if (e.target.classList.contains("img-with-fallback") || e.target.nextElementSibling?.classList.contains("rewardGlyphBox")) {
+        } else if (e.target.classList.contains("img-with-fallback") || e.target.nextElementSibling?.classList.contains("rewardGlyphBox") || e.target.nextElementSibling?.classList.contains("claimedDropGlyph")) {
             e.target.style.display = "none";
             if (e.target.nextElementSibling) {
                 e.target.nextElementSibling.style.display = "flex";
@@ -94,7 +96,8 @@ $(() => {
             "listOfConnected",
             "activeStream",
             "oauthToken",
-            "authState"
+            "authState",
+            "claimedInventory"
         ]).then((val) => {
             if (!val) val = {};
 
@@ -120,6 +123,11 @@ $(() => {
 
             if (Array.isArray(val.activityHistory)) {
                 renderActivityHistory(val.activityHistory);
+            }
+
+            if (Array.isArray(val.claimedInventory)) {
+                currentClaimedInventory = val.claimedInventory;
+                renderClaimedInventory(currentClaimedInventory);
             }
 
             if (Array.isArray(val.listOfConnected) && val.listOfConnected.length > 0) {
@@ -225,6 +233,12 @@ $(() => {
                 updateDropProgressUI({ activeStream: newStream });
                 renderActiveDropsList(currentActiveStream);
                 updateLastCheckTime();
+            }
+
+            // Claimed Inventory Drops
+            if (changes.claimedInventory && Array.isArray(changes.claimedInventory.newValue)) {
+                currentClaimedInventory = changes.claimedInventory.newValue;
+                renderClaimedInventory(currentClaimedInventory);
             }
 
             // Auth state / token changes
@@ -481,7 +495,8 @@ $(() => {
 
     // Select Item from Dropdown
     $(document).on("click", "#gameDropdownItems li", (e) => {
-        const selectedGame = $(e.target).text().trim();
+        const item = $(e.currentTarget);
+        const selectedGame = item.attr("data-game") || item.find("span").first().text().trim() || item.text().trim();
         if (!selectedGame || selectedGame === "No Connected Games Found" || selectedGame === "No matching games") return;
 
         $(".selectedGame").text(selectedGame);
@@ -550,6 +565,10 @@ $(() => {
                     : null;
                 updateDropProgressUI(message.data);
                 renderActiveDropsList(currentActiveStream);
+                if (message.data && Array.isArray(message.data.claimedInventory)) {
+                    currentClaimedInventory = message.data.claimedInventory;
+                    renderClaimedInventory(currentClaimedInventory);
+                }
                 updateLastCheckTime();
                 if (chrome.runtime && chrome.runtime.sendMessage) {
                     chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
@@ -734,21 +753,38 @@ function populateGameDropdown(data) {
     list.empty();
 
     const uniqueGames = new Set(POPULAR_DROP_GAMES);
+    activeDropGamesSet.clear();
+
     if (Array.isArray(data)) {
         data.forEach(camp => {
+            let name = "";
+            let isActive = false;
             if (camp && camp.game && camp.game.displayName) {
-                uniqueGames.add(camp.game.displayName);
+                name = camp.game.displayName;
+                isActive = Boolean(camp.hasActiveDrops || camp.status === "ACTIVE");
             } else if (camp && camp.displayName) {
-                uniqueGames.add(camp.displayName);
+                name = camp.displayName;
+                isActive = Boolean(camp.hasActiveDrops);
             } else if (camp && camp.name) {
-                uniqueGames.add(camp.name);
+                name = camp.name;
+                isActive = Boolean(camp.hasActiveDrops);
             } else if (typeof camp === "string" && camp.trim()) {
-                uniqueGames.add(camp.trim());
+                name = camp.trim();
+            }
+            if (name) {
+                uniqueGames.add(name);
+                if (isActive) activeDropGamesSet.add(name);
             }
         });
     }
 
-    currentAllGames = Array.from(uniqueGames).sort((a, b) => a.localeCompare(b));
+    currentAllGames = Array.from(uniqueGames).sort((a, b) => {
+        const aActive = activeDropGamesSet.has(a);
+        const bActive = activeDropGamesSet.has(b);
+        if (aActive !== bActive) return aActive ? -1 : 1;
+        return a.localeCompare(b);
+    });
+
     const curVal = $("#gameSearchInput").val();
     filterDropdownItems(curVal ? curVal.toLowerCase().trim() : "");
 }
@@ -766,7 +802,16 @@ function filterDropdownItems(query) {
     }
 
     filtered.forEach(gameName => {
-        list.append(`<li>${gameName}</li>`);
+        const isActive = activeDropGamesSet.has(gameName);
+        const badgeMarkup = isActive
+            ? `<span class="activeGameBadgeTag">🟢 Active Drops</span>`
+            : "";
+        list.append(`
+            <li data-game="${escapeHtml(gameName)}" class="dropdownItemRow">
+                <span>${escapeHtml(gameName)}</span>
+                ${badgeMarkup}
+            </li>
+        `);
     });
 }
 
@@ -787,6 +832,38 @@ function updateDropProgressUI(data) {
     const active = data.activeStream;
     const camp = active.campaign || {};
     const gameName = camp.game ? (camp.game.name || camp.game.displayName || "Twitch Drop") : (typeof camp === "string" ? camp : "Twitch Drop");
+
+    if (gameName && gameName !== "Twitch Drop" && gameName !== "none") {
+        $(".selectedGame").text(gameName);
+    }
+
+    if (camp.status === "no_active_drops") {
+        $("#stopCampaignBtn").hide();
+        $("#dropStatus").text(`No Active Drops: ${gameName}`);
+        $("#dropGame").html(`Twitch does not have an active drop campaign for <strong>${escapeHtml(gameName)}</strong> right now.`);
+        $("#headerStatusPill").html('<span class="statusDot idleDot"></span><span>No Active Drops</span>').removeClass("activePill");
+        $(".progressBarInner").css({ "width": "0%", "background": "var(--bg-input)" });
+        $(".progressPercentText").text("No drops available");
+        $("#streamToolbar").hide();
+
+        let detailsBox = $("#activeDropDetails");
+        if (detailsBox.length === 0) {
+            detailsBox = $('<div id="activeDropDetails" class="activeDropMetaRow"></div>');
+            $(".dropProgressContainer").prepend(detailsBox);
+        }
+
+        detailsBox.html(`
+            <div class="noDropsAlertCard">
+                <div class="noDropsIconBox">${GIFT_SVG_ICON}</div>
+                <div class="noDropsContent">
+                    <span class="noDropsTitle">No Active Drops for ${escapeHtml(gameName)}</span>
+                    <span class="noDropsDesc">There is currently no official drop campaign running on Twitch for this game. Farming is paused until a campaign goes live.</span>
+                    <span class="noDropsTip">Select a game with active drops (marked 🟢) from the dropdown above, or check back when a campaign begins.</span>
+                </div>
+            </div>
+        `);
+        return;
+    }
 
     let currentRewardItem = null;
     let allItems = [];
@@ -931,6 +1008,33 @@ function renderActiveDropsList(activeStream) {
 
     const camp = activeStream.campaign;
     const gameName = camp.game ? (camp.game.name || camp.game.displayName || "Selected Game") : (typeof camp === "string" ? camp : "Selected Game");
+
+    if (camp.status === "no_active_drops") {
+        container.html(`
+            <div class="emptyDropsCard" style="padding: 16px; background: rgba(240, 162, 50, 0.05); border: 1px solid rgba(240, 162, 50, 0.25); border-radius: 8px; text-align: center;">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 8px;">
+                    <div class="noDropsIconBox" style="width: 28px; height: 28px; min-width: 28px;">${GIFT_SVG_ICON}</div>
+                    <strong style="color: #f0a232; font-size: 14px;">No Active Drops: ${escapeHtml(gameName)}</strong>
+                </div>
+                <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px; line-height: 1.4;">
+                    Twitch does not have an active drop campaign for <strong>${escapeHtml(gameName)}</strong> right now. When a campaign goes live, rewards and requirements will appear here automatically.
+                </p>
+                <div style="display: flex; gap: 8px; justify-content: center;">
+                    <a href="https://www.twitch.tv/drops/campaigns" target="_blank" class="actionBtn miniBtn secondaryBtn">View Twitch Campaigns ↗</a>
+                    <button class="actionBtn miniBtn" id="dropsPageSyncBtn">Sync Drops</button>
+                </div>
+            </div>
+        `);
+
+        $("#dropsPageSyncBtn").on("click", () => {
+            if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+                chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+            }
+            showToast("Syncing drops with Twitch...");
+        });
+        return;
+    }
+
     const campaigns = Array.isArray(activeStream.campaigns) ? activeStream.campaigns : [];
     const allRewardsList = [];
 
@@ -970,15 +1074,17 @@ function renderActiveDropsList(activeStream) {
 
     if (allRewardsList.length === 0) {
         container.html(`
-            <div class="emptyDropsCard" style="padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 8px; text-align: center;">
+            <div class="emptyDropsCard" style="padding: 16px; background: rgba(240, 162, 50, 0.05); border: 1px solid rgba(240, 162, 50, 0.25); border-radius: 8px; text-align: center;">
                 <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 8px;">
-                    <div class="rewardGlyphBox miniGlyph" style="width: 28px; height: 28px; min-width: 28px;">${GIFT_SVG_ICON}</div>
-                    <strong style="color: var(--text-primary); font-size: 14px;">${gameName} Drops Active</strong>
+                    <div class="noDropsIconBox" style="width: 28px; height: 28px; min-width: 28px;">${GIFT_SVG_ICON}</div>
+                    <strong style="color: #f0a232; font-size: 14px;">No Drops Available: ${escapeHtml(gameName)}</strong>
                 </div>
-                <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px;">Watch progress is actively accumulating. Rewards will appear as they update from your Twitch Inventory.</p>
+                <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px; line-height: 1.4;">
+                    No drop rewards were found for <strong>${escapeHtml(gameName)}</strong>. Check the official Twitch campaigns page or select another game.
+                </p>
                 <div style="display: flex; gap: 8px; justify-content: center;">
+                    <a href="https://www.twitch.tv/drops/campaigns" target="_blank" class="actionBtn miniBtn secondaryBtn">View Twitch Campaigns ↗</a>
                     <button class="actionBtn miniBtn" id="dropsPageSyncBtn">Sync Drops</button>
-                    <a href="https://www.twitch.tv/drops/inventory" target="_blank" class="actionBtn miniBtn secondaryBtn">Twitch Inventory ↗</a>
                 </div>
             </div>
         `);
@@ -1027,6 +1133,52 @@ function renderActiveDropsList(activeStream) {
         `);
 
         container.append(card);
+    });
+}
+
+function renderClaimedInventory(claimedDrops) {
+    const container = $("#claimedInventoryList");
+    const countBadge = $("#claimedInventoryCountBadge");
+    if (container.length === 0) return;
+
+    if (!Array.isArray(claimedDrops) || claimedDrops.length === 0) {
+        container.html(`<p class="subText">No claimed rewards found in your Twitch inventory.</p>`);
+        countBadge.text("0 Claimed");
+        return;
+    }
+
+    countBadge.text(`${claimedDrops.length} Claimed`);
+
+    container.empty();
+    claimedDrops.forEach(drop => {
+        if (!drop) return;
+        const name = drop.name || "Drop Reward";
+        const gameName = drop.game ? (drop.game.displayName || drop.game.name || "") : "";
+        const timeAgo = drop.lastAwardedAt ? formatTimeAgo(new Date(drop.lastAwardedAt)) : "";
+        const imgUrl = drop.imageURL || "";
+        const hasValidImg = imgUrl && (typeof imgUrl === "string") && (imgUrl.startsWith("http://") || imgUrl.startsWith("https://"));
+        const safeImg = hasValidImg ? encodeURI(imgUrl) : "";
+
+        const imgMarkup = hasValidImg
+            ? `<img src="${safeImg}" class="claimedDropThumb img-with-fallback" alt="${escapeHtml(name)}">
+               <div class="claimedDropGlyph" style="display:none;">${GIFT_SVG_ICON}</div>`
+            : `<div class="claimedDropGlyph">${GIFT_SVG_ICON}</div>`;
+
+        const subText = [gameName, timeAgo ? `Claimed ${timeAgo}` : ""].filter(Boolean).join(" &bull; ");
+
+        container.append(`
+            <div class="claimedDropItem">
+                ${imgMarkup}
+                <div class="claimedDropMeta">
+                    <span class="claimedDropTitle" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                    <span class="claimedDropSub">${subText}</span>
+                </div>
+                <span class="claimedDropBadge">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    Claimed
+                </span>
+            </div>
+        `);
     });
 }
 

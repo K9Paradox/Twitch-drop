@@ -723,12 +723,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         listOfConnected = Array.from(new Set([...listOfConnected, ...POPULAR_DROP_GAMES]));
                         extStats.connectedGames = listOfConnected;
                         await saveState();
-                        chrome.runtime.sendMessage({ type: "p:connectedGames", data }).catch(() => {});
+
+                        const activeGameNames = new Set(
+                            data.filter(c => c && c.status === "ACTIVE" && c.game)
+                                .map(c => c.game.displayName || c.game.name)
+                        );
+                        const enhancedGames = data.map(c => ({
+                            ...c,
+                            hasActiveDrops: c.status === "ACTIVE"
+                        }));
+                        const allEnhanced = listOfConnected.map(g => {
+                            const foundCamp = data.find(c => c && c.game && (c.game.displayName === g || c.game.name === g));
+                            return {
+                                game: { displayName: g },
+                                self: { isAccountConnected: Boolean(foundCamp?.self?.isAccountConnected) },
+                                hasActiveDrops: activeGameNames.has(g)
+                            };
+                        });
+
+                        chrome.runtime.sendMessage({ type: "p:connectedGames", data: enhancedGames, allGames: allEnhanced }).catch(() => {});
                         chrome.runtime.sendMessage({
                             type: "setAutoDropGames",
                             data: { allConnected: listOfConnected, enabled: autoDropGames }
                         }).catch(() => {});
-                        sendResponse({ games: data });
+                        sendResponse({ games: enhancedGames, allGames: allEnhanced });
                         return;
                     }
                 } catch (e) {
@@ -738,10 +756,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 listOfConnected = Array.from(new Set([...listOfConnected, ...POPULAR_DROP_GAMES]));
                 const defaultGames = listOfConnected.map(g => ({
                     game: { displayName: g },
-                    self: { isAccountConnected: true }
+                    self: { isAccountConnected: true },
+                    hasActiveDrops: false
                 }));
-                chrome.runtime.sendMessage({ type: "p:connectedGames", data: defaultGames }).catch(() => {});
-                sendResponse({ games: defaultGames });
+                chrome.runtime.sendMessage({ type: "p:connectedGames", data: defaultGames, allGames: defaultGames }).catch(() => {});
+                sendResponse({ games: defaultGames, allGames: defaultGames });
                 break;
 
             case "p:startCampaign":
@@ -760,11 +779,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             case "p:getCurrentDrops":
                 await fetchTwitchCookiesAndInitClient();
-                if (client && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns) {
+                let currentInventory = null;
+                if (client) {
                     try {
-                        const inventory = await client.getInventory().catch(() => null);
-                        if (inventory) {
-                            const isDone = syncCampaignProgressWithInventory(inventory);
+                        currentInventory = await client.getInventory().catch(() => null);
+                        if (currentInventory && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns) {
+                            const isDone = syncCampaignProgressWithInventory(currentInventory);
                             if (isDone && activeStream.campaign) {
                                 const allDone = activeStream.campaigns.every(c => {
                                     return (c.items && c.items.length > 0)
@@ -780,8 +800,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         }
                     } catch (err) {}
                 }
-                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
-                sendResponse({ activeStream });
+                const claimedInventory = currentInventory?.gameEventDrops || [];
+                if (claimedInventory.length > 0) {
+                    await chrome.storage.local.set({ claimedInventory }).catch(() => {});
+                }
+                chrome.runtime.sendMessage({
+                    type: "p:sendCurrentDrops",
+                    data: { activeStream, claimedInventory }
+                }).catch(() => {});
+                sendResponse({ activeStream, claimedInventory });
                 break;
 
             case "p:skipStreamer":
@@ -1002,7 +1029,7 @@ async function startup() {
 // --- Campaign Execution Engine ---
 
 async function runCampaign(forceNextStreamer = false) {
-    if (!activeStream.campaign || !activeStream.campaigns || activeStream.campaigns.length === 0) return;
+    if (!activeStream.campaign || activeStream.campaign.status === "no_active_drops" || !activeStream.campaigns || activeStream.campaigns.length === 0) return;
     if (activeStream.campaign.reOpening) activeStream.campaign.reOpening = false;
 
     let curCamp = activeStream.campaigns[activeStream.campaign.onCamp];
@@ -1242,14 +1269,48 @@ async function createCampaign(game) {
             }
         }
 
-        activeStream.campaigns.push({
-            game: game,
-            id: inProgCamp ? inProgCamp.id : `camp-${gameSlug}`,
-            minutesNeeded: maxTime,
-            minutesWatched: timeWatched,
-            streamers: [],
-            items: items
-        });
+        if (items.length > 0) {
+            activeStream.campaigns.push({
+                game: game,
+                id: inProgCamp ? inProgCamp.id : `camp-${gameSlug}`,
+                minutesNeeded: maxTime,
+                minutesWatched: timeWatched,
+                streamers: [],
+                items: items
+            });
+        }
+    }
+
+    const totalDropsFound = activeStream.campaigns.reduce((sum, c) => sum + (c.items ? c.items.length : 0), 0);
+    if (activeStream.campaigns.length === 0 || totalDropsFound === 0) {
+        activeStream.campaign = {
+            game: { name: game },
+            onCamp: 0,
+            curWatching: null,
+            lastLoop: 0,
+            allowGen: false,
+            slug: gameSlug,
+            status: "no_active_drops",
+            reOpening: false,
+            isCompleted: false,
+            skippedStreamers: [],
+            lastMinutesWatched: 0,
+            lastProgressTimestamp: Date.now(),
+            stallCount: 0,
+            reopenAttempts: 0
+        };
+        activeStream.campaigns = [];
+        await windowManager("close");
+        await saveState();
+        updateBadgeUI();
+        chrome.runtime.sendMessage({
+            type: "p:sendCurrentDrops",
+            data: {
+                activeStream,
+                claimedInventory: inventory.gameEventDrops || []
+            }
+        }).catch(() => {});
+        return;
     }
 
     const isDone = syncCampaignProgressWithInventory(inventory);
@@ -1265,13 +1326,25 @@ async function createCampaign(game) {
             activeStream.campaign.curWatching = null;
             await windowManager("close");
             await saveState();
-            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+            chrome.runtime.sendMessage({
+                type: "p:sendCurrentDrops",
+                data: {
+                    activeStream,
+                    claimedInventory: inventory.gameEventDrops || []
+                }
+            }).catch(() => {});
             return;
         }
     }
 
     await saveState();
-    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+    chrome.runtime.sendMessage({
+        type: "p:sendCurrentDrops",
+        data: {
+            activeStream,
+            claimedInventory: inventory.gameEventDrops || []
+        }
+    }).catch(() => {});
     await runCampaign();
 }
 
@@ -1506,6 +1579,9 @@ function updateBadgeUI() {
             } else if (camp.status === "nostream") {
                 text = "…";
                 color = "#f0a232";
+            } else if (camp.status === "no_active_drops") {
+                text = "";
+                color = "#52525b";
             } else if (activeStream.campaigns && activeStream.campaigns.length > 0) {
                 const cur = activeStream.campaigns[camp.onCamp || 0] || activeStream.campaigns[0];
                 if (cur) {

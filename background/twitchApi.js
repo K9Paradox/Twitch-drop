@@ -74,12 +74,16 @@ export class Client {
         }
 
         if (json && json.errors && json.errors.length > 0) {
-            const errMsg = json.errors.map(e => e?.message || JSON.stringify(e)).join("; ") || "GraphQL query error";
-            throw new TwitchApiError(errMsg, {
-                status: res.status,
-                errors: json.errors,
-                operationName: opName
-            });
+            if (!json.data || Object.keys(json.data).length === 0) {
+                const errMsg = json.errors.map(e => e?.message || JSON.stringify(e)).join("; ") || "GraphQL query error";
+                throw new TwitchApiError(errMsg, {
+                    status: res.status,
+                    errors: json.errors,
+                    operationName: opName
+                });
+            } else {
+                console.warn(`Twitch GQL warning in ${opName}:`, json.errors[0]?.message);
+            }
         }
 
         return (json && json.data !== undefined) ? json.data : json;
@@ -115,12 +119,16 @@ export class Client {
         }
 
         if (json && json.errors && json.errors.length > 0) {
-            const errMsg = json.errors.map(e => e?.message || JSON.stringify(e)).join("; ") || "GraphQL query error";
-            throw new TwitchApiError(errMsg, {
-                status: res.status,
-                errors: json.errors,
-                operationName: opName
-            });
+            if (!json.data || Object.keys(json.data).length === 0) {
+                const errMsg = json.errors.map(e => e?.message || JSON.stringify(e)).join("; ") || "GraphQL query error";
+                throw new TwitchApiError(errMsg, {
+                    status: res.status,
+                    errors: json.errors,
+                    operationName: opName
+                });
+            } else {
+                console.warn(`Twitch GQL warning in ${opName}:`, json.errors[0]?.message);
+            }
         }
 
         return (json && json.data !== undefined) ? json.data : json;
@@ -319,7 +327,21 @@ export class Client {
                     }
                 }
             });
-            return data && data.currentUser ? data.currentUser.inventory : null;
+            const inv = data && data.currentUser ? data.currentUser.inventory : null;
+            if (inv) {
+                if (!inv.gameEventDrops && inv.gameEventDropsConnection?.edges) {
+                    inv.gameEventDrops = inv.gameEventDropsConnection.edges
+                        .map(e => e?.node)
+                        .filter(Boolean);
+                }
+                if (!Array.isArray(inv.gameEventDrops)) {
+                    inv.gameEventDrops = [];
+                }
+                if (!Array.isArray(inv.dropCampaignsInProgress)) {
+                    inv.dropCampaignsInProgress = [];
+                }
+            }
+            return inv;
         } catch (e) {
             return null;
         }
