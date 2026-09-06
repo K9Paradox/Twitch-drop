@@ -848,6 +848,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 await fetchTwitchCookiesAndInitClient();
                 try {
                     const data = await client.getAllDropCampaigns().catch(() => client.getDropCampaigns().catch(() => []));
+                    const inventory = await client.getInventory().catch(() => ({ dropCampaignsInProgress: [], gameEventDrops: [] }));
                     if (Array.isArray(data) && data.length > 0) {
                         for (const c of data) {
                             if (c && c.game && !listOfConnected.includes(c.game.displayName)) {
@@ -859,12 +860,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         await saveState();
 
                         const activeGameNames = new Set(
-                            data.filter(c => isCampaignActiveWithDrops(c))
+                            data.filter(c => isCampaignActiveWithDrops(c, Date.now(), inventory))
                                 .map(c => c.game.displayName || c.game.name)
                         );
                         const enhancedGames = data.map(c => ({
                             ...c,
-                            hasActiveDrops: isCampaignActiveWithDrops(c)
+                            hasActiveDrops: isCampaignActiveWithDrops(c, Date.now(), inventory)
                         }));
                         const allEnhanced = listOfConnected.map(g => {
                             const foundCamp = data.find(c => c && c.game && (c.game.displayName === g || c.game.name === g));
@@ -1070,13 +1071,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 let activeOnlyGames = [];
                 try {
                     const activeCamps = await client.getAllDropCampaigns().catch(() => client.getDropCampaigns().catch(() => []));
+                    const inventory = await client.getInventory().catch(() => ({ dropCampaignsInProgress: [], gameEventDrops: [] }));
                     if (Array.isArray(activeCamps)) {
                         activeOnlyGames = Array.from(new Set(
-                            activeCamps.filter(c => isCampaignActiveWithDrops(c))
+                            activeCamps.filter(c => isCampaignActiveWithDrops(c, Date.now(), inventory))
                                 .map(c => c.game.displayName || c.game.name)
                         )).sort((a, b) => a.localeCompare(b));
                     }
                 } catch (e) {}
+
+                // Prune any games from autoDropGames that no longer have active drops
+                if (activeOnlyGames.length > 0) {
+                    const validQueued = autoDropGames.filter(g => activeOnlyGames.includes(g));
+                    if (validQueued.length !== autoDropGames.length) {
+                        autoDropGames = validQueued;
+                        await saveState();
+                    }
+                }
 
                 if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
                     await chrome.storage.local.set({ activeDropGames: activeOnlyGames }).catch(() => {});
@@ -1086,7 +1097,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     type: "setAutoDropGames",
                     data: { allConnected: activeOnlyGames, enabled: autoDropGames }
                 }).catch(() => {});
-                sendResponse({ allConnected: activeOnlyGames, enabled: autoDropGames });
+                sendResponse({
+                    allConnected: activeOnlyGames,
+                    activeDropGames: activeOnlyGames,
+                    enabled: autoDropGames,
+                    autoDropGames: autoDropGames
+                });
                 break;
 
             case "toggleAutoDropGame":
@@ -1515,6 +1531,7 @@ async function createCampaign(game, isManual = false) {
             allowGen: false,
             slug: gameSlug,
             status: "no_active_drops",
+            isManual: Boolean(isManual),
             reOpening: false,
             isCompleted: false,
             skippedStreamers: [],
@@ -1534,6 +1551,14 @@ async function createCampaign(game, isManual = false) {
                 claimedInventory: inventory.gameEventDrops || []
             }
         }).catch(() => {});
+
+        // If this campaign was started automatically by Auto-Queue (not manual selection)
+        // and there are no active drops, put this game on cooldown and immediately advance to the next game in queue!
+        if (!isManual && autoDropGames.length > 0) {
+            console.log(`[AutoQueue] ${game} has no active drops, skipping to next game...`);
+            unstreamableGamesCooldown.set(game, Date.now());
+            setTimeout(() => advanceAutoQueue().catch(() => {}), 500);
+        }
         return;
     }
 
@@ -1661,36 +1686,17 @@ async function checkForDrops() {
             for (const campaign of (campaigns || [])) {
                 if (!campaign || !campaign.game) continue;
                 const gameName = campaign.game.displayName || campaign.game.name;
-                if (autoDropGames.includes(gameName) && campaign.status === "ACTIVE") {
+                if (autoDropGames.includes(gameName) && isCampaignActiveWithDrops(campaign, now, inventory)) {
                     const lastCooldown = unstreamableGamesCooldown.get(gameName);
                     if (lastCooldown && (now - lastCooldown < UNSTREAMABLE_COOLDOWN_MS)) {
                         continue;
                     }
 
-                    const campaignDetails = await client.getDropCampaignDetails(campaign.id).catch(() => null);
-                    if (!campaignDetails) continue;
-                    const endsAt = campaignDetails.endAt ? new Date(campaignDetails.endAt).getTime() : 0;
-                    if (endsAt && endsAt <= now) continue;
+                    const endsAt = campaign.endAt ? new Date(campaign.endAt).getTime() : (now + 86400000);
+                    if (endsAt <= now) continue;
 
-                    let hasUnclaimedDrops = false;
-                    const inProgCamp = inventory?.dropCampaignsInProgress?.find(c => c.id === campaign.id);
-
-                    for (const drop of (campaignDetails.timeBasedDrops || [])) {
-                        const inProgDrop = inProgCamp?.timeBasedDrops?.find(d => d.id === drop.id);
-                        const isClaimed = inProgDrop?.self?.isClaimed || drop?.self?.isClaimed;
-                        const watched = inProgDrop?.self?.currentMinutesWatched || 0;
-                        const req = drop.requiredMinutesWatched || 60;
-
-                        if (!isClaimed && (req <= 0 || watched < req)) {
-                            hasUnclaimedDrops = true;
-                            break;
-                        }
-                    }
-
-                    if (hasUnclaimedDrops) {
-                        if (!gamesToRun.some((g) => g.game === gameName)) {
-                            gamesToRun.push({ game: gameName, endsAt: endsAt || (now + 86400000) });
-                        }
+                    if (!gamesToRun.some((g) => g.game === gameName)) {
+                        gamesToRun.push({ game: gameName, endsAt });
                     }
                 }
             }

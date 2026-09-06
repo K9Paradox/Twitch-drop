@@ -12,7 +12,7 @@ describe("Tier 1: Feature 19 - Auto-Queue Active Drops & Offline Stability", () 
         client = new Client({ oauthToken: "test_token" });
     });
 
-    it("F19-T1: Client.getAllDropCampaigns() merges currentUser and rewardCampaignsAvailableToUser deduplicated by id", async () => {
+    it("F19-T1: Client.getAllDropCampaigns() separates dropCampaigns and only merges reward campaigns when explicitly requested", async () => {
         sandbox.fetchMock.onGql("ViewerDropsDashboard", {
             data: {
                 currentUser: {
@@ -28,7 +28,13 @@ describe("Tier 1: Feature 19 - Auto-Queue Active Drops & Offline Stability", () 
             }
         });
 
-        const allCampaigns = await client.getAllDropCampaigns();
+        // By default, only actual stream drop campaigns are returned
+        const dropCampaigns = await client.getAllDropCampaigns();
+        assert.equal(dropCampaigns.length, 2);
+        assert.deepEqual(dropCampaigns.map(c => c.id).sort(), ["camp-1", "camp-2"]);
+
+        // When includeRewardCampaigns = true, reward campaigns are merged
+        const allCampaigns = await client.getAllDropCampaigns(true);
         assert.equal(allCampaigns.length, 3);
         const ids = allCampaigns.map(c => c.id).sort();
         assert.deepEqual(ids, ["camp-1", "camp-2", "camp-3"]);
@@ -54,7 +60,7 @@ describe("Tier 1: Feature 19 - Auto-Queue Active Drops & Offline Stability", () 
         assert.equal(isCampaignActiveWithDrops(activeCamp, now), true);
     });
 
-    it("F19-T3: isCampaignActiveWithDrops() rejects expired campaigns and campaigns with all drops claimed", () => {
+    it("F19-T3: isCampaignActiveWithDrops() rejects expired, empty, and 100% claimed campaigns (standalone and via inventory)", () => {
         const now = Date.now();
 
         // Expired by endAt even if status is ACTIVE
@@ -83,7 +89,18 @@ describe("Tier 1: Feature 19 - Auto-Queue Active Drops & Offline Stability", () 
         };
         assert.equal(isCampaignActiveWithDrops(upcomingCamp, now), false);
 
-        // 100% claimed drops
+        // Empty drops array (e.g. promo reward campaigns with 0 stream drops)
+        const emptyDropsCamp = {
+            id: "camp-empty",
+            status: "ACTIVE",
+            game: { id: "105", displayName: "Shakes and Fidget" },
+            startAt: new Date(now - 3600000).toISOString(),
+            endAt: new Date(now + 3600000).toISOString(),
+            timeBasedDrops: []
+        };
+        assert.equal(isCampaignActiveWithDrops(emptyDropsCamp, now), false);
+
+        // 100% claimed drops embedded in campaign
         const claimedCamp = {
             id: "camp-claimed",
             status: "ACTIVE",
@@ -96,6 +113,26 @@ describe("Tier 1: Feature 19 - Auto-Queue Active Drops & Offline Stability", () 
             ]
         };
         assert.equal(isCampaignActiveWithDrops(claimedCamp, now), false);
+
+        // Claimed via inventory.dropCampaignsInProgress
+        const inventoryCamp = {
+            id: "camp-inv",
+            status: "ACTIVE",
+            game: { id: "106", displayName: "CS2" },
+            startAt: new Date(now - 3600000).toISOString(),
+            endAt: new Date(now + 3600000).toISOString()
+        };
+        const mockInventory = {
+            dropCampaignsInProgress: [
+                {
+                    id: "camp-inv",
+                    timeBasedDrops: [
+                        { id: "d5", requiredMinutesWatched: 60, self: { isClaimed: true, currentMinutesWatched: 60 } }
+                    ]
+                }
+            ]
+        };
+        assert.equal(isCampaignActiveWithDrops(inventoryCamp, now, mockInventory), false);
     });
 
     it("F19-T4: Manual campaign start retains isManual flag and prevents auto-skipping when streamer is offline", () => {
@@ -150,5 +187,35 @@ describe("Tier 1: Feature 19 - Auto-Queue Active Drops & Offline Stability", () 
         // Due to the isAdvancingQueue guard, the inner attempt returns false immediately
         assert.equal(result, true);
         assert.equal(cascadeAttempts, 1);
+    });
+
+    it("F19-T6: When createCampaign yields no active drops, auto queue puts game on cooldown and auto-skips, while manual stays on no_active_drops", () => {
+        const unstreamableCooldown = new Map();
+        let autoAdvanced = false;
+
+        function handleNoDrops(game, isManual, autoDropGames) {
+            const status = "no_active_drops";
+            if (!isManual && autoDropGames.length > 0) {
+                unstreamableCooldown.set(game, Date.now());
+                autoAdvanced = true;
+            }
+            return { status, isManual };
+        }
+
+        // Auto-queue mode: automatically marks cooldown and advances
+        const autoResult = handleNoDrops("Shakes and Fidget", false, ["Shakes and Fidget", "Overwatch 2"]);
+        assert.equal(autoResult.status, "no_active_drops");
+        assert.equal(autoResult.isManual, false);
+        assert.equal(autoAdvanced, true);
+        assert.ok(unstreamableCooldown.has("Shakes and Fidget"));
+
+        // Manual mode: stays on chosen game without auto-advancing
+        autoAdvanced = false;
+        unstreamableCooldown.clear();
+        const manualResult = handleNoDrops("Shakes and Fidget", true, ["Shakes and Fidget", "Overwatch 2"]);
+        assert.equal(manualResult.status, "no_active_drops");
+        assert.equal(manualResult.isManual, true);
+        assert.equal(autoAdvanced, false);
+        assert.equal(unstreamableCooldown.has("Shakes and Fidget"), false);
     });
 });

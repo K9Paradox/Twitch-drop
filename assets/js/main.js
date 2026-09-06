@@ -1420,15 +1420,20 @@ function populateAutoGamesGrid(data) {
     const grid = $("#autoGamesList");
     grid.empty();
 
-    let allGames = (data && Array.isArray(data.allConnected))
-        ? data.allConnected
-        : (Array.isArray(currentAutoGamesData.allConnected) ? currentAutoGamesData.allConnected : []);
+    let allGames = (data && Array.isArray(data.activeDropGames))
+        ? data.activeDropGames
+        : ((data && Array.isArray(data.allConnected))
+            ? data.allConnected
+            : (Array.isArray(currentAutoGamesData.allConnected) ? currentAutoGamesData.allConnected : []));
 
     currentAutoGamesData.allConnected = allGames;
 
-    const enabledList = (data && Array.isArray(data.enabled))
-        ? data.enabled
-        : (Array.isArray(currentAutoGamesData.enabled) ? currentAutoGamesData.enabled : []);
+    const enabledList = (data && Array.isArray(data.autoDropGames))
+        ? data.autoDropGames
+        : ((data && Array.isArray(data.enabled))
+            ? data.enabled
+            : (Array.isArray(currentAutoGamesData.enabled) ? currentAutoGamesData.enabled : []));
+    currentAutoGamesData.enabled = enabledList;
     const enabledSet = new Set(enabledList);
     const sortedGames = [...allGames].sort((a, b) => a.localeCompare(b));
 

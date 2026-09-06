@@ -228,28 +228,28 @@ export class Client {
                         }
                     }
                 });
-                if (includeAll) {
-                    const merged = [];
-                    const seen = new Set();
-                    const list1 = (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) ? data.currentUser.dropCampaigns : [];
-                    const list2 = (data && Array.isArray(data.rewardCampaignsAvailableToUser)) ? data.rewardCampaignsAvailableToUser : [];
-                    const list3 = (data && Array.isArray(data.dropCampaigns)) ? data.dropCampaigns : [];
-                    for (const c of [...list1, ...list2, ...list3]) {
-                        if (c && c.id && !seen.has(c.id)) {
-                            seen.add(c.id);
-                            merged.push(c);
+                if (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns) && data.currentUser.dropCampaigns.length > 0) {
+                    if (includeAll && Array.isArray(data.rewardCampaignsAvailableToUser)) {
+                        const merged = [...data.currentUser.dropCampaigns];
+                        const seen = new Set(merged.map(c => c.id));
+                        for (const rc of data.rewardCampaignsAvailableToUser) {
+                            if (rc && rc.id && !seen.has(rc.id)) {
+                                seen.add(rc.id);
+                                merged.push(rc);
+                            }
                         }
+                        return merged;
                     }
-                    if (merged.length > 0) return merged;
-                }
-                if (data && data.currentUser && data.currentUser.dropCampaigns) {
                     return data.currentUser.dropCampaigns;
                 }
-                if (data && data.rewardCampaignsAvailableToUser) {
+                if (data && Array.isArray(data.dropCampaigns) && data.dropCampaigns.length > 0) {
+                    return data.dropCampaigns;
+                }
+                if (includeAll && data && Array.isArray(data.rewardCampaignsAvailableToUser)) {
                     return data.rewardCampaignsAvailableToUser;
                 }
-                if (data && data.dropCampaigns) {
-                    return data.dropCampaigns;
+                if (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) {
+                    return data.currentUser.dropCampaigns;
                 }
             } catch (e) {}
         }
@@ -270,8 +270,8 @@ export class Client {
             if (includeAll) {
                 const merged = [];
                 const seen = new Set();
-                const list1 = (data && Array.isArray(data.rewardCampaignsAvailableToUser)) ? data.rewardCampaignsAvailableToUser : [];
-                const list2 = (data && Array.isArray(data.dropCampaigns)) ? data.dropCampaigns : [];
+                const list1 = (data && Array.isArray(data.dropCampaigns)) ? data.dropCampaigns : [];
+                const list2 = (data && Array.isArray(data.rewardCampaignsAvailableToUser)) ? data.rewardCampaignsAvailableToUser : [];
                 const list3 = (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) ? data.currentUser.dropCampaigns : [];
                 for (const c of [...list1, ...list2, ...list3]) {
                     if (c && c.id && !seen.has(c.id)) {
@@ -281,16 +281,16 @@ export class Client {
                 }
                 if (merged.length > 0) return merged;
             }
-            if (data && data.dropCampaigns) return data.dropCampaigns;
-            if (data && data.rewardCampaignsAvailableToUser) return data.rewardCampaignsAvailableToUser;
-            if (data && data.currentUser && data.currentUser.dropCampaigns) return data.currentUser.dropCampaigns;
+            if (data && Array.isArray(data.dropCampaigns) && data.dropCampaigns.length > 0) return data.dropCampaigns;
+            if (data && Array.isArray(data.rewardCampaignsAvailableToUser) && data.rewardCampaignsAvailableToUser.length > 0) return data.rewardCampaignsAvailableToUser;
+            if (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) return data.currentUser.dropCampaigns;
         } catch (e) {}
 
         return [];
     }
 
-    async getAllDropCampaigns() {
-        return this.getDropCampaigns(true);
+    async getAllDropCampaigns(includeRewardCampaigns = false) {
+        return this.getDropCampaigns(includeRewardCampaigns);
     }
 
     async getConnectedGames() {
@@ -664,12 +664,12 @@ export class Client {
         return { login: channelLogin };
     }
 
-    isCampaignActiveWithDrops(campaign, now = Date.now()) {
-        return isCampaignActiveWithDrops(campaign, now);
+    isCampaignActiveWithDrops(campaign, now = Date.now(), inventory = null) {
+        return isCampaignActiveWithDrops(campaign, now, inventory);
     }
 }
 
-export function isCampaignActiveWithDrops(c, now = Date.now()) {
+export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null) {
     if (!c || !c.game) return false;
     if (c.status !== "ACTIVE") return false;
 
@@ -683,8 +683,10 @@ export function isCampaignActiveWithDrops(c, now = Date.now()) {
         if (!isNaN(endTs) && endTs <= now) return false;
     }
 
-    // If timeBasedDrops are present, verify at least one is unclaimed
-    if (Array.isArray(c.timeBasedDrops) && c.timeBasedDrops.length > 0) {
+    // If timeBasedDrops is an array:
+    // Empty array means NO drops are available (e.g. external promo campaigns with 0 drops)
+    if (Array.isArray(c.timeBasedDrops)) {
+        if (c.timeBasedDrops.length === 0) return false;
         const hasUnclaimed = c.timeBasedDrops.some(drop => {
             if (!drop) return false;
             const isClaimed = Boolean(drop.self && drop.self.isClaimed);
@@ -693,6 +695,21 @@ export function isCampaignActiveWithDrops(c, now = Date.now()) {
             return !isClaimed && (req <= 0 || watched < req);
         });
         if (!hasUnclaimed) return false;
+    }
+
+    // Check inventory for completion if inventory is provided
+    if (inventory && Array.isArray(inventory.dropCampaignsInProgress)) {
+        const inProg = inventory.dropCampaignsInProgress.find(p => p && p.id === c.id);
+        if (inProg && Array.isArray(inProg.timeBasedDrops) && inProg.timeBasedDrops.length > 0) {
+            const hasUnclaimedInProg = inProg.timeBasedDrops.some(drop => {
+                if (!drop) return false;
+                const isClaimed = Boolean(drop.self && drop.self.isClaimed);
+                const watched = drop.self?.currentMinutesWatched || 0;
+                const req = drop.requiredMinutesWatched || 60;
+                return !isClaimed && (req <= 0 || watched < req);
+            });
+            if (!hasUnclaimedInProg) return false;
+        }
     }
 
     return true;
