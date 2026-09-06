@@ -19,7 +19,7 @@
                 <img src="assets/img/atd-32.png" alt="Logo" class="appLogo">
                 <div class="logoText">
                     <span class="appName">TWITCH DROPS <span class="proBadge">PRO</span></span>
-                    <span class="appVersion" id="extVersion">v1.5.0</span>
+                    <span class="appVersion" id="extVersion">v1.5.1</span>
                 </div>
             </div>
             <div class="headerActions">
@@ -33,6 +33,25 @@
                 </label>
             </div>
         </header>
+
+        <!-- GitHub Update Notification Banner -->
+        <div id="githubUpdateBanner" class="githubUpdateBanner" style="display: none;">
+            <div class="updateBannerContent">
+                <span class="updateSparkle">🚀</span>
+                <div class="updateBannerText">
+                    <strong class="updateTitle">Update Available: <span id="updateBannerVersion">v1.5.2</span></strong>
+                    <span class="updateSubtitle" id="updateBannerSubtitle">New release available on GitHub</span>
+                </div>
+            </div>
+            <div class="updateBannerActions">
+                <button type="button" id="copyGitPullBannerBtn" class="updateActionBtn updateActionBtnPrimary" title="Copy git pull command">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 11px; height: 11px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    <span>git pull</span>
+                </button>
+                <a href="https://github.com/K9Paradox/Twitch-drop" target="_blank" rel="noopener noreferrer" class="updateActionBtn" id="viewReleaseLink">View ↗</a>
+                <button type="button" id="dismissUpdateBannerBtn" class="updateBannerDismiss" title="Dismiss">×</button>
+            </div>
+        </div>
 
         <!-- Top Navigation Bar (Modern SVG Glyphs) -->
         <nav id="topNav">
@@ -396,6 +415,54 @@
                                 <span class="slider"></span>
                             </label>
                         </div>
+
+                        <div class="settingRow">
+                            <div class="settingInfo">
+                                <span class="settingTitle">Auto-Check for Updates</span>
+                                <span class="settingDesc">Periodically check GitHub for new extension updates and bug fixes.</span>
+                            </div>
+                            <label class="switch">
+                                <input id="setautoCheckUpdates" class="settingsBool" type="checkbox">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: 10px;">
+                    <div class="cardHeader">
+                        <div class="titleWithGlyph">
+                            <svg class="sectionGlyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>
+                            <span class="cardTitle">Version & GitHub Updates</span>
+                        </div>
+                        <span id="updateStatusPill" class="updateStatusPill pillUpToDate">v1.5.1</span>
+                    </div>
+                    <div class="updateInfoRow">
+                        <div class="updateMeta">
+                            <span class="updateMetaLabel">Current Version:</span>
+                            <span class="updateMetaValue" id="currentVerDisplay">v1.5.1</span>
+                        </div>
+                        <div class="updateMeta">
+                            <span class="updateMetaLabel">Status:</span>
+                            <span class="updateMetaValue" id="updateStatusText">Up to date</span>
+                        </div>
+                        <div class="updateMeta">
+                            <span class="updateMetaLabel">Last Checked:</span>
+                            <span class="updateMetaValue" id="lastCheckedDisplay">Never</span>
+                        </div>
+                    </div>
+                    <div class="updateBtnGroup" style="margin-top: 10px; display: flex; gap: 8px;">
+                        <button type="button" id="checkUpdateBtn" class="actionBtn" style="flex: 1;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 13px; height: 13px;"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+                            <span id="checkUpdateBtnText">Check for Updates</span>
+                        </button>
+                        <button type="button" id="copyGitPullBtn" class="actionBtn secondaryActionBtn" title="Copy git pull command">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 13px; height: 13px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                            <span>git pull</span>
+                        </button>
+                        <a href="https://github.com/K9Paradox/Twitch-drop" target="_blank" rel="noopener noreferrer" class="actionBtn secondaryActionBtn" title="Open GitHub repository" style="display: flex; align-items: center; justify-content: center; text-decoration: none; padding: 0 10px;">
+                            <span>GitHub ↗</span>
+                        </a>
                     </div>
                 </div>
 

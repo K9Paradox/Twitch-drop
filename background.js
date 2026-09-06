@@ -47,7 +47,8 @@ let settings = {
     setShowBadges: true,
     soundOnClaim: false,
     desktopNotifications: true,
-    lowQualityMode: true
+    lowQualityMode: true,
+    autoCheckUpdates: true
 };
 let listOfConnected = [...POPULAR_DROP_GAMES];
 let autoDropGames = [];
@@ -371,6 +372,113 @@ function syncCampaignProgressWithInventory(inventory) {
     return allCampaignsCompleted;
 }
 
+// --- GitHub Auto-Update Mechanism ---
+
+export function compareSemver(a, b) {
+    if (!a || !b) return 0;
+    const pa = String(a).replace(/^v/i, "").split(".").map(Number);
+    const pb = String(b).replace(/^v/i, "").split(".").map(Number);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+        const na = isNaN(pa[i]) ? 0 : pa[i];
+        const nb = isNaN(pb[i]) ? 0 : pb[i];
+        if (na > nb) return 1;
+        if (na < nb) return -1;
+    }
+    return 0;
+}
+
+export async function checkGitHubUpdate(manual = false) {
+    const currentVersion = (typeof chrome !== "undefined" && chrome.runtime?.getManifest?.()?.version) || "1.5.1";
+    const result = {
+        updateAvailable: false,
+        latestVersion: currentVersion,
+        currentVersion: currentVersion,
+        releaseUrl: "https://github.com/K9Paradox/Twitch-drop",
+        releaseNotes: "",
+        commitSha: "",
+        commitMessage: "",
+        lastChecked: new Date().toISOString()
+    };
+
+    try {
+        // 1. Check GitHub Releases
+        let releaseFound = false;
+        try {
+            const relRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/releases/latest", {
+                headers: { "Accept": "application/vnd.github.v3+json" }
+            });
+            if (relRes.ok) {
+                const relData = await relRes.json();
+                if (relData && relData.tag_name) {
+                    const tagVer = relData.tag_name.replace(/^v/i, "");
+                    result.latestVersion = tagVer;
+                    result.releaseUrl = relData.html_url || "https://github.com/K9Paradox/Twitch-drop/releases";
+                    result.releaseNotes = relData.body || "";
+                    if (compareSemver(tagVer, currentVersion) > 0) {
+                        result.updateAvailable = true;
+                        releaseFound = true;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn("[AutoUpdate] Releases check warning:", e?.message);
+        }
+
+        // 2. Fallback to raw manifest.json on main branch
+        if (!releaseFound) {
+            try {
+                const rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/main/manifest.json");
+                if (rawRes.ok) {
+                    const rawManifest = await rawRes.json();
+                    if (rawManifest && rawManifest.version) {
+                        result.latestVersion = rawManifest.version;
+                        if (compareSemver(rawManifest.version, currentVersion) > 0) {
+                            result.updateAvailable = true;
+                            result.releaseUrl = "https://github.com/K9Paradox/Twitch-drop";
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn("[AutoUpdate] Raw manifest check warning:", e?.message);
+            }
+        }
+
+        // 3. Fetch latest commit metadata from main branch
+        try {
+            const commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/main", {
+                headers: { "Accept": "application/vnd.github.v3+json" }
+            });
+            if (commitRes.ok) {
+                const commitData = await commitRes.json();
+                if (commitData) {
+                    result.commitSha = (commitData.sha || "").substring(0, 7);
+                    result.commitMessage = commitData.commit?.message?.split("\n")[0] || "";
+                }
+            }
+        } catch (e) {
+            // Non-critical commit metadata error
+        }
+
+        // Store update status in chrome.storage.local
+        if (typeof chrome !== "undefined" && chrome.storage?.local) {
+            await chrome.storage.local.set({ githubUpdate: result }).catch(() => {});
+        }
+
+        if (result.updateAvailable && settings.desktopNotifications !== false && !manual) {
+            notifyUser(
+                "Extension Update Available",
+                `New version v${result.latestVersion} is available on GitHub (Current: v${currentVersion}).`
+            );
+        }
+
+        return result;
+    } catch (err) {
+        console.error("[AutoUpdate] Check error:", err);
+        return result;
+    }
+}
+
 // --- Persistent Alarms for MV3 Service Worker ---
 
 function setupAlarms() {
@@ -378,6 +486,7 @@ function setupAlarms() {
     chrome.alarms.create("dropCheckAlarm", { periodInMinutes: 3 });
     chrome.alarms.create("tokenRefreshAlarm", { periodInMinutes: 15 });
     chrome.alarms.create("badgeRefreshAlarm", { periodInMinutes: 10 });
+    chrome.alarms.create("githubUpdateAlarm", { periodInMinutes: 360 });
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -392,6 +501,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         autoGetToken();
     } else if (alarm.name === "badgeRefreshAlarm") {
         updateBadgeUI();
+    } else if (alarm.name === "githubUpdateAlarm") {
+        if (settings.autoCheckUpdates !== false) {
+            await checkGitHubUpdate(false);
+        }
     }
 });
 
@@ -1015,6 +1128,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({ success: false });
                 break;
 
+            case "p:checkUpdate":
+                const updateRes = await checkGitHubUpdate(true);
+                sendResponse(updateRes);
+                break;
+
+            case "p:getUpdateState":
+                const storedUpdate = await chrome.storage.local.get("githubUpdate").catch(() => ({}));
+                sendResponse(storedUpdate.githubUpdate || null);
+                break;
+
             default:
                 sendResponse({ status: "unhandled" });
         }
@@ -1059,6 +1182,9 @@ async function startup() {
     if (extEnabled) {
         setTimeout(autoGetToken, 3000);
         setTimeout(checkForDrops, 4000);
+        if (settings.autoCheckUpdates !== false) {
+            setTimeout(() => checkGitHubUpdate(false), 5000);
+        }
     }
 }
 
@@ -1073,6 +1199,7 @@ async function runCampaign(forceNextStreamer = false) {
         await endCampaign();
         return;
     }
+    activeStream.campaign.requiredStreamers = curCamp.streamers || [];
 
     let allDropsGot = activeStream.campaigns.every(camp => {
         if (camp.items && camp.items.length > 0) {
@@ -1132,6 +1259,7 @@ async function runCampaign(forceNextStreamer = false) {
         }
 
         activeStream.campaign.status = "nostream";
+        activeStream.campaign.requiredStreamers = curCamp.streamers || [];
         await saveState();
         chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
         updateBadgeUI();
@@ -1194,6 +1322,7 @@ async function createCampaign(game) {
         reOpening: false,
         isCompleted: false,
         skippedStreamers: [],
+        requiredStreamers: [],
         lastMinutesWatched: 0,
         lastProgressTimestamp: Date.now(),
         stallCount: 0,
@@ -1331,6 +1460,10 @@ async function createCampaign(game) {
                 items: items
             });
         }
+    }
+
+    if (activeStream.campaign && activeStream.campaigns.length > 0) {
+        activeStream.campaign.requiredStreamers = activeStream.campaigns[0].streamers || [];
     }
 
     const totalDropsFound = activeStream.campaigns.reduce((sum, c) => sum + (c.items ? c.items.length : 0), 0);

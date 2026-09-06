@@ -97,7 +97,8 @@ $(() => {
             "activeStream",
             "oauthToken",
             "authState",
-            "claimedInventory"
+            "claimedInventory",
+            "githubUpdate"
         ]).then((val) => {
             if (!val) val = {};
 
@@ -146,6 +147,10 @@ $(() => {
                 renderActiveDropsList(val.activeStream);
             }
 
+            if (val.githubUpdate) {
+                renderUpdateInfo(val.githubUpdate);
+            }
+
             checkAuthStatus();
 
             // Request live data from background service worker
@@ -154,6 +159,9 @@ $(() => {
                 chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
                 chrome.runtime.sendMessage({ type: "getAutoDropGames" }).catch(() => {});
                 chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
+                chrome.runtime.sendMessage({ type: "p:getUpdateState" }).then((res) => {
+                    if (res) renderUpdateInfo(res);
+                }).catch(() => {});
                 chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
                     if (res && res.muted !== undefined) {
                         updateAudioButtonUI(res.muted);
@@ -241,6 +249,11 @@ $(() => {
             // Auth state / token changes
             if (changes.oauthToken || changes.authState) {
                 checkAuthStatus();
+            }
+
+            // GitHub Update Sync
+            if (changes.githubUpdate && changes.githubUpdate.newValue) {
+                renderUpdateInfo(changes.githubUpdate.newValue);
             }
         });
     }
@@ -586,7 +599,99 @@ $(() => {
             }
         });
     }
+
+    // GitHub Update Actions
+    $("#checkUpdateBtn").on("click", async () => {
+        const btn = $("#checkUpdateBtn");
+        const btnText = $("#checkUpdateBtnText");
+        btn.prop("disabled", true);
+        btnText.text("Checking...");
+
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            try {
+                const res = await new Promise((resolve) => {
+                    chrome.runtime.sendMessage({ type: "p:checkUpdate" }, (response) => {
+                        if (chrome.runtime.lastError) resolve(null);
+                        else resolve(response);
+                    });
+                });
+
+                if (res) {
+                    renderUpdateInfo(res);
+                    if (res.updateAvailable) {
+                        showToast(`🚀 Update Available: v${res.latestVersion}`);
+                    } else {
+                        showToast(`🟢 Extension is up to date (v${res.currentVersion})`);
+                    }
+                } else {
+                    showToast("Unable to reach GitHub");
+                }
+            } catch (e) {
+                showToast("Update check error");
+            } finally {
+                btn.prop("disabled", false);
+                btnText.text("Check for Updates");
+            }
+        } else {
+            btn.prop("disabled", false);
+            btnText.text("Check for Updates");
+        }
+    });
+
+    function copyGitPullCommand() {
+        const cmd = "git pull origin main";
+        if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(cmd).then(() => {
+                showToast(`📋 Copied "${cmd}" to clipboard!`);
+            }).catch(() => {
+                prompt("Copy this command:", cmd);
+            });
+        } else {
+            prompt("Copy this command:", cmd);
+        }
+    }
+
+    $("#copyGitPullBtn, #copyGitPullBannerBtn").on("click", copyGitPullCommand);
+    $("#dismissUpdateBannerBtn").on("click", () => {
+        $("#githubUpdateBanner").slideUp(200);
+    });
 });
+
+function renderUpdateInfo(update) {
+    if (!update || typeof update !== "object") return;
+    const currentVer = update.currentVersion || (typeof chrome !== "undefined" && chrome.runtime?.getManifest?.()?.version) || "1.5.1";
+    $("#currentVerDisplay").text(`v${currentVer}`);
+    $("#extVersion").text(`v${currentVer}`);
+
+    if (update.lastChecked) {
+        try {
+            const d = new Date(update.lastChecked);
+            $("#lastCheckedDisplay").text(d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+        } catch (e) {
+            $("#lastCheckedDisplay").text("Recently");
+        }
+    }
+
+    if (update.updateAvailable) {
+        $("#githubUpdateBanner").slideDown(200);
+        $("#updateBannerVersion").text(`v${update.latestVersion}`);
+        if (update.commitMessage) {
+            $("#updateBannerSubtitle").text(update.commitMessage);
+        } else {
+            $("#updateBannerSubtitle").text("New update available on GitHub");
+        }
+        if (update.releaseUrl) {
+            $("#viewReleaseLink").attr("href", update.releaseUrl);
+        }
+
+        $("#updateStatusPill").removeClass("pillUpToDate").addClass("pillUpdateAvail").text(`v${update.latestVersion} Avail`);
+        $("#updateStatusText").html(`<span style="color: #a970ff; font-weight: 600;">Update Available (v${update.latestVersion})</span>`);
+    } else {
+        $("#githubUpdateBanner").slideUp(200);
+        $("#updateStatusPill").removeClass("pillUpdateAvail").addClass("pillUpToDate").text(`v${currentVer}`);
+        $("#updateStatusText").text("Up to date");
+    }
+}
 
 async function checkAuthStatus() {
     if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
@@ -861,11 +966,47 @@ function updateDropProgressUI(data) {
 
     if (camp.status === "nostream") {
         $("#stopCampaignBtn").show();
-        $("#dropStatus").text(`No Stream Live: ${gameName}`);
-        $("#dropGame").html(`Eligible channel(s) for <strong>${escapeHtml(gameName)}</strong> are currently offline.`);
-        $("#headerStatusPill").html('<span class="statusDot" style="background: #f0a232;"></span><span>No Stream Live</span>').removeClass("activePill");
+
+        const curCamp = (Array.isArray(active.campaigns) && active.campaigns.length > 0)
+            ? (active.campaigns[camp.onCamp || 0] || active.campaigns[0])
+            : null;
+        const requiredStreamers = (camp.requiredStreamers && camp.requiredStreamers.length > 0)
+            ? camp.requiredStreamers
+            : (curCamp && Array.isArray(curCamp.streamers) ? curCamp.streamers : []);
+
+        const hasSpecific = Array.isArray(requiredStreamers) && requiredStreamers.length > 0;
+        let pillText = "No Drops Live";
+        let statusTitle = `No Drops Live: ${gameName}`;
+        let subTitle = `No broadcasters streaming <strong>${escapeHtml(gameName)}</strong> with drops enabled right now.`;
+        let waitText = "Waiting for stream...";
+        let cardTitle = "No Drops Streams Live";
+        let cardDesc = `There are currently no broadcasters streaming <strong>${escapeHtml(gameName)}</strong> with drops enabled on Twitch.`;
+
+        if (hasSpecific) {
+            if (requiredStreamers.length === 1) {
+                const singleChan = requiredStreamers[0];
+                pillText = `${singleChan} offline`;
+                statusTitle = `${singleChan} is offline`;
+                subTitle = `Required channel <strong>${escapeHtml(singleChan)}</strong> for <strong>${escapeHtml(gameName)}</strong> is offline.`;
+                waitText = `Waiting for ${singleChan}...`;
+                cardTitle = `${singleChan} is Offline`;
+                cardDesc = `Drops for <strong>${escapeHtml(gameName)}</strong> require watching <strong>${escapeHtml(singleChan)}</strong>, which is currently offline.`;
+            } else {
+                const chanListStr = requiredStreamers.join(", ");
+                pillText = "Channels offline";
+                statusTitle = `Channels Offline: ${gameName}`;
+                subTitle = `Required channels (<strong>${escapeHtml(chanListStr)}</strong>) are currently offline.`;
+                waitText = "Waiting for live channel...";
+                cardTitle = "Required Channels Offline";
+                cardDesc = `This drop campaign requires watching specific channel(s) that are not currently broadcasting.`;
+            }
+        }
+
+        $("#dropStatus").text(statusTitle);
+        $("#dropGame").html(subTitle);
+        $("#headerStatusPill").html(`<span class="statusDot" style="background: #f0a232;"></span><span>${escapeHtml(pillText)}</span>`).removeClass("activePill");
         $(".progressBarInner").css({ "width": "0%", "background": "var(--bg-input)" });
-        $(".progressPercentText").text("Waiting for eligible stream...");
+        $(".progressPercentText").text(waitText);
         $("#streamToolbar").hide();
 
         let detailsBox = $("#activeDropDetails");
@@ -874,13 +1015,21 @@ function updateDropProgressUI(data) {
             $(".dropProgressContainer").prepend(detailsBox);
         }
 
+        const channelBadgeHtml = hasSpecific
+            ? `<div class="reqChannelsRow" style="margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                   <strong style="font-size: 11px; color: #f0a232; text-transform: uppercase; letter-spacing: 0.5px;">Required:</strong>
+                   ${requiredStreamers.map(ch => `<span class="channelReqBadge">${escapeHtml(ch)}</span>`).join("")}
+               </div>`
+            : "";
+
         detailsBox.html(`
             <div class="noDropsAlertCard" style="border-color: rgba(240, 162, 50, 0.3); background: rgba(240, 162, 50, 0.05);">
                 <div class="noDropsIconBox" style="color: #f0a232; border-color: rgba(240, 162, 50, 0.4);">${GIFT_SVG_ICON}</div>
                 <div class="noDropsContent">
-                    <span class="noDropsTitle" style="color: #f0a232;">No Compatible Stream Currently Live</span>
-                    <span class="noDropsDesc">The drop campaign for <strong>${escapeHtml(gameName)}</strong> requires specific restricted channel(s) or live broadcasters with drops enabled, but none are currently live on Twitch.</span>
-                    <span class="noDropsTip">The Smart Auto-Queue will automatically rotate to other queued games or resume farming as soon as an eligible channel starts broadcasting.</span>
+                    <span class="noDropsTitle" style="color: #f0a232;">${cardTitle}</span>
+                    <span class="noDropsDesc">${cardDesc}</span>
+                    ${channelBadgeHtml}
+                    <span class="noDropsTip" style="margin-top: 6px;">The Smart Auto-Queue will check for other queued games or resume farming as soon as an eligible channel starts broadcasting.</span>
                 </div>
             </div>
         `);
@@ -1058,15 +1207,36 @@ function renderActiveDropsList(activeStream) {
     }
 
     if (camp.status === "nostream") {
+        const curCamp = (Array.isArray(activeStream.campaigns) && activeStream.campaigns.length > 0)
+            ? (activeStream.campaigns[camp.onCamp || 0] || activeStream.campaigns[0])
+            : null;
+        const requiredStreamers = (camp.requiredStreamers && camp.requiredStreamers.length > 0)
+            ? camp.requiredStreamers
+            : (curCamp && Array.isArray(curCamp.streamers) ? curCamp.streamers : []);
+
+        const hasSpecific = Array.isArray(requiredStreamers) && requiredStreamers.length > 0;
+        const bannerTitle = hasSpecific
+            ? (requiredStreamers.length === 1 ? `${escapeHtml(requiredStreamers[0])} is Offline` : "Required Channels Offline")
+            : "No Drops Stream Live";
+        const bannerDesc = hasSpecific
+            ? `This drop campaign requires watching <strong>${escapeHtml(requiredStreamers.join(", "))}</strong>, which is currently offline.`
+            : `No broadcasters are streaming <strong>${escapeHtml(gameName)}</strong> with drops enabled right now.`;
+
         container.append(`
             <div class="emptyDropsCard" style="padding: 12px 14px; background: rgba(240, 162, 50, 0.05); border: 1px solid rgba(240, 162, 50, 0.25); border-radius: 8px; margin-bottom: 12px;">
                 <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
                     <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #f0a232;"></span>
-                    <strong style="color: #f0a232; font-size: 13px;">No Compatible Stream Currently Live</strong>
+                    <strong style="color: #f0a232; font-size: 13px;">${bannerTitle}</strong>
                 </div>
-                <p style="color: var(--text-secondary); font-size: 12px; margin: 0; line-height: 1.4;">
-                    Eligible channel(s) for <strong>${escapeHtml(gameName)}</strong> are offline. Available rewards for this campaign are listed below; farming will resume automatically when a stream goes live.
+                <p style="color: var(--text-secondary); font-size: 12px; margin: 0 0 6px 0; line-height: 1.4;">
+                    ${bannerDesc} Available rewards for this campaign are listed below; farming will resume automatically when an eligible stream goes live.
                 </p>
+                ${hasSpecific ? `
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                        <span style="font-size: 11px; color: #f0a232; font-weight: 600;">REQUIRED:</span>
+                        ${requiredStreamers.map(ch => `<span class="channelReqBadge">${escapeHtml(ch)}</span>`).join("")}
+                    </div>
+                ` : ""}
             </div>
         `);
     }

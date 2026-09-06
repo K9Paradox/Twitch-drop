@@ -1495,3 +1495,165 @@ body {
     border-radius: 3px;
     margin-left: 6px;
 }
+
+/* Channel Requirement Badge */
+.channelReqBadge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: rgba(240, 162, 50, 0.15);
+    border: 1px solid rgba(240, 162, 50, 0.35);
+    color: #f0a232;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--font-mono, monospace);
+    letter-spacing: 0.3px;
+}
+
+/* GitHub Update Alert Banner */
+.githubUpdateBanner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: linear-gradient(135deg, rgba(145, 70, 255, 0.18), rgba(0, 230, 118, 0.12));
+    border-bottom: 1px solid rgba(145, 70, 255, 0.35);
+    padding: 7px 12px;
+    font-size: 12px;
+    animation: fadeIn 0.2s ease-in;
+}
+
+.updateBannerContent {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+}
+
+.updateSparkle {
+    font-size: 15px;
+    flex-shrink: 0;
+}
+
+.updateBannerText {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.25;
+    overflow: hidden;
+}
+
+.updateTitle {
+    color: var(--text-primary);
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.updateSubtitle {
+    color: var(--text-secondary);
+    font-size: 10.5px;
+}
+
+.updateBannerActions {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
+.updateActionBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 7px;
+    font-size: 10.5px;
+    font-weight: 600;
+    border-radius: 4px;
+    text-decoration: none;
+    cursor: pointer;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    transition: all 0.15s ease;
+}
+
+.updateActionBtn:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--border-color);
+}
+
+.updateActionBtnPrimary {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+}
+
+.updateActionBtnPrimary:hover {
+    background: var(--primary-hover);
+}
+
+.updateBannerDismiss {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+    transition: color 0.15s;
+}
+
+.updateBannerDismiss:hover {
+    color: var(--text-primary);
+}
+
+/* GitHub Update Card in Settings */
+.updateStatusPill {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.pillUpToDate {
+    background: rgba(0, 230, 118, 0.12);
+    color: #00e676;
+    border: 1px solid rgba(0, 230, 118, 0.3);
+}
+
+.pillUpdateAvail {
+    background: rgba(145, 70, 255, 0.2);
+    color: #a970ff;
+    border: 1px solid rgba(145, 70, 255, 0.4);
+}
+
+.updateInfoRow {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    background: var(--bg-card-secondary, rgba(255, 255, 255, 0.02));
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11px;
+}
+
+.updateMeta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.updateMetaLabel {
+    color: var(--text-secondary);
+}
+
+.updateMetaValue {
+    color: var(--text-primary);
+    font-weight: 500;
+}
