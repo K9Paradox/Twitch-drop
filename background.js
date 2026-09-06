@@ -1698,6 +1698,13 @@ async function checkForDrops() {
             if (gamesToRun.length !== 0) {
                 gamesToRun.sort((a, b) => a.endsAt - b.endsAt);
                 await createCampaign(gamesToRun[0].game, false);
+            } else if (activeStream.campaign?.isManual && activeStream.campaign?.status === "nostream") {
+                const gameName = activeStream.campaign.game?.name;
+                const lastCooldown = unstreamableGamesCooldown.get(gameName);
+                if (!lastCooldown || (now - lastCooldown >= UNSTREAMABLE_COOLDOWN_MS)) {
+                    console.log(`[ManualCampaign] Re-checking if a stream has started for ${gameName}...`);
+                    await runCampaign();
+                }
             }
         } catch (e) {
             console.error("Error in checkForDrops:", e);
