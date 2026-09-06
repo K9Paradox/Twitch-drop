@@ -563,6 +563,47 @@ export class Client {
         return null;
     }
 
+    async getLiveBroadcasterForCampaign(gameName, campaignId, slug, allowedStreamers = [], skippedLogins = []) {
+        const skippedLower = (Array.isArray(skippedLogins) ? skippedLogins : []).map(s => String(s).toLowerCase());
+
+        // 1. If campaign specifies allowed channels, ONLY those channels are eligible for drops
+        if (Array.isArray(allowedStreamers) && allowedStreamers.length > 0) {
+            const available = allowedStreamers.filter(s => s && typeof s === "string" && !skippedLower.includes(s.toLowerCase()));
+            const listToCheck = available.length > 0 ? available : allowedStreamers.filter(s => s && typeof s === "string");
+
+            if (listToCheck.length === 0) return null;
+
+            if (listToCheck.length === 1) {
+                const stream = await this.getStream(listToCheck[0]);
+                if (stream) {
+                    return listToCheck[0];
+                }
+                return null;
+            } else {
+                const batch = listToCheck.slice(0, 30);
+                const res = await this.getStream(batch);
+                if (Array.isArray(res)) {
+                    for (let i = 0; i < res.length; i++) {
+                        const item = res[i];
+                        if (item?.data?.userOrError?.stream) {
+                            return batch[i];
+                        }
+                    }
+                }
+                return null;
+            }
+        }
+
+        // 2. Open campaign (no channel restrictions) -> query category streams with drops tag
+        const channel = await this.getChannelWithDrops(gameName, campaignId, slug, skippedLogins);
+        if (channel && channel.broadcaster && channel.broadcaster.login) {
+            return channel.broadcaster.login;
+        }
+
+        return null;
+    }
+
+
     async getStreamMetadata(channelLogin) {
         if (!channelLogin) return { login: "" };
         try {

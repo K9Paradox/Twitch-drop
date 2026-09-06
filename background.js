@@ -52,6 +52,8 @@ let settings = {
 let listOfConnected = [...POPULAR_DROP_GAMES];
 let autoDropGames = [];
 let priorityStreams = [];
+let unstreamableGamesCooldown = new Map();
+const UNSTREAMABLE_COOLDOWN_MS = 5 * 60 * 1000;
 let extStats = {
     claimedDrops: 0,
     claimedPoints: 0,
@@ -440,6 +442,24 @@ async function handleWatchdogTick() {
                     return;
                 }
 
+                // Check if currently watched streamer went offline or changed game category
+                if (activeStream.campaign && activeStream.campaign.status === "watching" && activeStream.campaign.curWatching) {
+                    const meta = await client.getStreamMetadata(activeStream.campaign.curWatching).catch(() => null);
+                    const isOffline = !meta || !meta.game;
+                    const targetGame = activeStream.campaign.game?.name || "";
+                    const gameChanged = Boolean(meta?.game && targetGame && !meta.game.toLowerCase().includes(targetGame.toLowerCase()) && !targetGame.toLowerCase().includes(meta.game.toLowerCase()));
+
+                    if (isOffline || gameChanged) {
+                        console.log(`Streamer ${activeStream.campaign.curWatching} is ${isOffline ? "offline" : "playing " + meta.game + " instead of " + targetGame}. Rotating channel.`);
+                        activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                        if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
+                            activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                        }
+                        await runCampaign(true);
+                        return;
+                    }
+                }
+
                 // 2. Stream Stall Watchdog (4-minute threshold)
                 if (settings.autoRefresh !== false && activeStream.campaign) {
                     const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
@@ -741,10 +761,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             };
                         });
 
+                        const activeList = Array.from(activeGameNames).sort((a, b) => a.localeCompare(b));
                         chrome.runtime.sendMessage({ type: "p:connectedGames", data: enhancedGames, allGames: allEnhanced }).catch(() => {});
                         chrome.runtime.sendMessage({
                             type: "setAutoDropGames",
-                            data: { allConnected: listOfConnected, enabled: autoDropGames }
+                            data: { allConnected: activeList, enabled: autoDropGames }
                         }).catch(() => {});
                         sendResponse({ games: enhancedGames, allGames: allEnhanced });
                         return;
@@ -760,6 +781,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     hasActiveDrops: false
                 }));
                 chrome.runtime.sendMessage({ type: "p:connectedGames", data: defaultGames, allGames: defaultGames }).catch(() => {});
+                chrome.runtime.sendMessage({
+                    type: "setAutoDropGames",
+                    data: { allConnected: [], enabled: autoDropGames }
+                }).catch(() => {});
                 sendResponse({ games: defaultGames, allGames: defaultGames });
                 break;
 
@@ -920,12 +945,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "getAutoDropGames":
-                const allGames = Array.from(new Set([...listOfConnected, ...POPULAR_DROP_GAMES])).sort((a, b) => a.localeCompare(b));
+                await fetchTwitchCookiesAndInitClient();
+                let activeOnlyGames = [];
+                try {
+                    const activeCamps = await client.getDropCampaigns().catch(() => []);
+                    if (Array.isArray(activeCamps)) {
+                        activeOnlyGames = Array.from(new Set(
+                            activeCamps.filter(c => c && c.status === "ACTIVE" && c.game)
+                                .map(c => c.game.displayName || c.game.name)
+                        )).sort((a, b) => a.localeCompare(b));
+                    }
+                } catch (e) {}
+
                 chrome.runtime.sendMessage({
                     type: "setAutoDropGames",
-                    data: { allConnected: allGames, enabled: autoDropGames }
+                    data: { allConnected: activeOnlyGames, enabled: autoDropGames }
                 }).catch(() => {});
-                sendResponse({ allConnected: allGames, enabled: autoDropGames });
+                sendResponse({ allConnected: activeOnlyGames, enabled: autoDropGames });
                 break;
 
             case "toggleAutoDropGame":
@@ -1062,32 +1098,48 @@ async function runCampaign(forceNextStreamer = false) {
     activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
     const skipped = activeStream.campaign.skippedStreamers;
 
-    let targetStreamer = null;
+    let targetStreamer = await client.getLiveBroadcasterForCampaign(
+        activeStream.campaign.game.name,
+        curCamp.id,
+        activeStream.campaign.slug,
+        curCamp.streamers,
+        skipped
+    );
 
-    if (curCamp.streamers && curCamp.streamers.length > 0) {
-        const available = curCamp.streamers.filter(s => !skipped.includes(s));
-        if (available.length > 0) {
-            targetStreamer = available[0];
-        } else {
-            activeStream.campaign.skippedStreamers = [];
-            targetStreamer = curCamp.streamers[0];
-        }
-    } else {
-        const stream = await client.getChannelWithDrops(activeStream.campaign.game.name, curCamp.id, activeStream.campaign.slug, skipped);
-        if (stream && stream.broadcaster && stream.broadcaster.login) {
-            targetStreamer = stream.broadcaster.login;
-        }
+    if (!targetStreamer && skipped.length > 0) {
+        activeStream.campaign.skippedStreamers = [];
+        targetStreamer = await client.getLiveBroadcasterForCampaign(
+            activeStream.campaign.game.name,
+            curCamp.id,
+            activeStream.campaign.slug,
+            curCamp.streamers,
+            []
+        );
     }
 
-    let streamUrl = "";
-    if (targetStreamer) {
-        activeStream.campaign.curWatching = targetStreamer;
-        streamUrl = `https://www.twitch.tv/${targetStreamer}#atd-managed=1`;
-    } else {
-        const gameSlug = activeStream.campaign.slug || activeStream.campaign.game.name.toLowerCase().replace(/[^a-z0-9]/g, "-");
-        activeStream.campaign.curWatching = "";
-        streamUrl = `https://www.twitch.tv/directory/category/${gameSlug}?filter=drops#atd-managed=1`;
+    if (!targetStreamer) {
+        console.log(`[AutoQueue] No compatible live stream found for ${activeStream.campaign.game.name}`);
+        await windowManager("close");
+        activeStream.campaign.curWatching = null;
+
+        const currentGame = activeStream.campaign.game.name;
+        unstreamableGamesCooldown.set(currentGame, Date.now());
+
+        // Attempt to auto-skip to the next game in the queue
+        const skippedToNext = await advanceAutoQueue(currentGame);
+        if (skippedToNext) {
+            return;
+        }
+
+        activeStream.campaign.status = "nostream";
+        await saveState();
+        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+        updateBadgeUI();
+        return;
     }
+
+    activeStream.campaign.curWatching = targetStreamer;
+    const streamUrl = `https://www.twitch.tv/${targetStreamer}#atd-managed=1`;
 
     enableAutoplayForTwitch();
 
@@ -1348,19 +1400,96 @@ async function createCampaign(game) {
     await runCampaign();
 }
 
+async function advanceAutoQueue(skippedGame) {
+    if (!extEnabled || !Array.isArray(autoDropGames) || autoDropGames.length === 0) return false;
+
+    const otherGames = autoDropGames.filter(g => g !== skippedGame);
+    if (otherGames.length === 0) return false;
+
+    try {
+        const campaigns = await client.getDropCampaigns();
+        const inventory = await client.getInventory();
+        const now = Date.now();
+        const candidates = [];
+
+        for (const campaign of (campaigns || [])) {
+            if (!campaign || !campaign.game) continue;
+            const gameName = campaign.game.displayName || campaign.game.name;
+            if (otherGames.includes(gameName) && campaign.status === "ACTIVE") {
+                const lastCooldown = unstreamableGamesCooldown.get(gameName);
+                if (lastCooldown && (now - lastCooldown < UNSTREAMABLE_COOLDOWN_MS)) {
+                    continue;
+                }
+
+                const campaignDetails = await client.getDropCampaignDetails(campaign.id);
+                if (!campaignDetails) continue;
+                const endsAt = new Date(campaignDetails.endAt).getTime();
+                let hasUnclaimedDrops = false;
+
+                const inProgCamp = inventory?.dropCampaignsInProgress?.find(c => c.id === campaign.id);
+
+                for (const drop of (campaignDetails.timeBasedDrops || [])) {
+                    const inProgDrop = inProgCamp?.timeBasedDrops?.find(d => d.id === drop.id);
+                    const isClaimed = inProgDrop?.self?.isClaimed || drop?.self?.isClaimed;
+                    const watched = inProgDrop?.self?.currentMinutesWatched || 0;
+                    const req = drop.requiredMinutesWatched || 60;
+
+                    if (!isClaimed && watched < req) {
+                        hasUnclaimedDrops = true;
+                        break;
+                    }
+                }
+
+                if (hasUnclaimedDrops && !candidates.some(c => c.game === gameName)) {
+                    candidates.push({ game: gameName, endsAt });
+                }
+            }
+        }
+
+        if (candidates.length > 0) {
+            candidates.sort((a, b) => a.endsAt - b.endsAt);
+            const nextGame = candidates[0].game;
+            console.log(`[AutoQueue] Auto-skipping ${skippedGame} -> advancing to next queued game: ${nextGame}`);
+            await createCampaign(nextGame);
+            return true;
+        }
+    } catch (e) {
+        console.error("Error in advanceAutoQueue:", e);
+    }
+
+    return false;
+}
+
 async function checkForDrops() {
     if (!extEnabled) return;
     await fetchTwitchCookiesAndInitClient();
 
-    if (activeStream.campaign === "none" || (activeStream.campaign && activeStream.campaign.isCompleted)) {
+    if (activeStream.campaign === "none" || (activeStream.campaign && activeStream.campaign.isCompleted) || activeStream.campaign?.status === "nostream" || activeStream.campaign?.status === "no_active_drops") {
         try {
             const campaigns = await client.getDropCampaigns();
             const inventory = await client.getInventory();
             const gamesToRun = [];
+            const now = Date.now();
+
+            // If all queued games are in cooldown, reset cooldowns so we can re-evaluate
+            const queuedCooldownCount = autoDropGames.filter(g => {
+                const ts = unstreamableGamesCooldown.get(g);
+                return ts && (now - ts < UNSTREAMABLE_COOLDOWN_MS);
+            }).length;
+
+            if (queuedCooldownCount >= autoDropGames.length && autoDropGames.length > 0) {
+                unstreamableGamesCooldown.clear();
+            }
 
             for (const campaign of (campaigns || [])) {
                 if (!campaign || !campaign.game) continue;
-                if (autoDropGames.includes(campaign.game.displayName) && campaign.status === "ACTIVE") {
+                const gameName = campaign.game.displayName || campaign.game.name;
+                if (autoDropGames.includes(gameName) && campaign.status === "ACTIVE") {
+                    const lastCooldown = unstreamableGamesCooldown.get(gameName);
+                    if (lastCooldown && (now - lastCooldown < UNSTREAMABLE_COOLDOWN_MS)) {
+                        continue;
+                    }
+
                     const campaignDetails = await client.getDropCampaignDetails(campaign.id);
                     if (!campaignDetails) continue;
                     const endsAt = new Date(campaignDetails.endAt).getTime();
@@ -1381,8 +1510,8 @@ async function checkForDrops() {
                     }
 
                     if (hasUnclaimedDrops) {
-                        if (!gamesToRun.some((g) => g.game === campaign.game.displayName)) {
-                            gamesToRun.push({ game: campaign.game.displayName, endsAt });
+                        if (!gamesToRun.some((g) => g.game === gameName)) {
+                            gamesToRun.push({ game: gameName, endsAt });
                         }
                     }
                 }

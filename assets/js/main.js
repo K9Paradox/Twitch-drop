@@ -40,7 +40,7 @@ let currentAllGames = [...POPULAR_DROP_GAMES];
 let activeDropGamesSet = new Set();
 let currentActiveStream = null;
 let currentClaimedInventory = [];
-let currentAutoGamesData = { allConnected: [...POPULAR_DROP_GAMES], enabled: [] };
+let currentAutoGamesData = { allConnected: [], enabled: [] };
 let tabAudioMuted = true;
 let authBannerDismissed = false;
 
@@ -133,7 +133,6 @@ $(() => {
             if (Array.isArray(val.listOfConnected) && val.listOfConnected.length > 0) {
                 const merged = Array.from(new Set([...val.listOfConnected, ...POPULAR_DROP_GAMES]));
                 populateGameDropdown(merged.map(g => ({ game: { displayName: g } })));
-                currentAutoGamesData.allConnected = merged;
             }
 
             if (Array.isArray(val.autoDropGames)) {
@@ -214,8 +213,6 @@ $(() => {
             if (changes.listOfConnected && Array.isArray(changes.listOfConnected.newValue)) {
                 const merged = Array.from(new Set([...changes.listOfConnected.newValue, ...POPULAR_DROP_GAMES]));
                 populateGameDropdown(merged.map(g => ({ game: { displayName: g } })));
-                currentAutoGamesData.allConnected = merged;
-                populateAutoGamesGrid(currentAutoGamesData);
             }
 
             // Auto drop games queue
@@ -392,9 +389,8 @@ $(() => {
 
     // Auto Games Select All Button
     $("#autoGameSelectAllBtn").on("click", () => {
-        const allGames = (currentAutoGamesData.allConnected && currentAutoGamesData.allConnected.length > 0)
-            ? currentAutoGamesData.allConnected
-            : POPULAR_DROP_GAMES;
+        const allGames = Array.isArray(currentAutoGamesData.allConnected) ? currentAutoGamesData.allConnected : [];
+        if (allGames.length === 0) return;
 
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
             allGames.forEach(g => {
@@ -405,14 +401,12 @@ $(() => {
         $(".autoGameToggle").prop("checked", true);
         $(".autoGameCard").addClass("activeQueueCard").find(".autoGameStatusTag").text("Queued for Farming");
         updateAutoGamesBadge(allGames.length, allGames.length);
-        showToast("All games enabled for Auto Farming");
+        showToast("All active drop games queued for farming");
     });
 
     // Auto Games Deselect All Button
     $("#autoGameDeselectAllBtn").on("click", () => {
-        const allGames = (currentAutoGamesData.allConnected && currentAutoGamesData.allConnected.length > 0)
-            ? currentAutoGamesData.allConnected
-            : POPULAR_DROP_GAMES;
+        const allGames = Array.isArray(currentAutoGamesData.allConnected) ? currentAutoGamesData.allConnected : [];
 
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
             allGames.forEach(g => {
@@ -865,6 +859,34 @@ function updateDropProgressUI(data) {
         return;
     }
 
+    if (camp.status === "nostream") {
+        $("#stopCampaignBtn").show();
+        $("#dropStatus").text(`No Stream Live: ${gameName}`);
+        $("#dropGame").html(`Eligible channel(s) for <strong>${escapeHtml(gameName)}</strong> are currently offline.`);
+        $("#headerStatusPill").html('<span class="statusDot" style="background: #f0a232;"></span><span>No Stream Live</span>').removeClass("activePill");
+        $(".progressBarInner").css({ "width": "0%", "background": "var(--bg-input)" });
+        $(".progressPercentText").text("Waiting for eligible stream...");
+        $("#streamToolbar").hide();
+
+        let detailsBox = $("#activeDropDetails");
+        if (detailsBox.length === 0) {
+            detailsBox = $('<div id="activeDropDetails" class="activeDropMetaRow"></div>');
+            $(".dropProgressContainer").prepend(detailsBox);
+        }
+
+        detailsBox.html(`
+            <div class="noDropsAlertCard" style="border-color: rgba(240, 162, 50, 0.3); background: rgba(240, 162, 50, 0.05);">
+                <div class="noDropsIconBox" style="color: #f0a232; border-color: rgba(240, 162, 50, 0.4);">${GIFT_SVG_ICON}</div>
+                <div class="noDropsContent">
+                    <span class="noDropsTitle" style="color: #f0a232;">No Compatible Stream Currently Live</span>
+                    <span class="noDropsDesc">The drop campaign for <strong>${escapeHtml(gameName)}</strong> requires specific restricted channel(s) or live broadcasters with drops enabled, but none are currently live on Twitch.</span>
+                    <span class="noDropsTip">The Smart Auto-Queue will automatically rotate to other queued games or resume farming as soon as an eligible channel starts broadcasting.</span>
+                </div>
+            </div>
+        `);
+        return;
+    }
+
     let currentRewardItem = null;
     let allItems = [];
     let allClaimed = false;
@@ -1035,6 +1057,20 @@ function renderActiveDropsList(activeStream) {
         return;
     }
 
+    if (camp.status === "nostream") {
+        container.append(`
+            <div class="emptyDropsCard" style="padding: 12px 14px; background: rgba(240, 162, 50, 0.05); border: 1px solid rgba(240, 162, 50, 0.25); border-radius: 8px; margin-bottom: 12px;">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                    <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #f0a232;"></span>
+                    <strong style="color: #f0a232; font-size: 13px;">No Compatible Stream Currently Live</strong>
+                </div>
+                <p style="color: var(--text-secondary); font-size: 12px; margin: 0; line-height: 1.4;">
+                    Eligible channel(s) for <strong>${escapeHtml(gameName)}</strong> are offline. Available rewards for this campaign are listed below; farming will resume automatically when a stream goes live.
+                </p>
+            </div>
+        `);
+    }
+
     const campaigns = Array.isArray(activeStream.campaigns) ? activeStream.campaigns : [];
     const allRewardsList = [];
 
@@ -1192,11 +1228,10 @@ function populateAutoGamesGrid(data) {
     const grid = $("#autoGamesList");
     grid.empty();
 
-    let allGames = (data && Array.isArray(data.allConnected) && data.allConnected.length > 0)
+    let allGames = (data && Array.isArray(data.allConnected))
         ? data.allConnected
-        : POPULAR_DROP_GAMES;
+        : (Array.isArray(currentAutoGamesData.allConnected) ? currentAutoGamesData.allConnected : []);
 
-    allGames = Array.from(new Set([...allGames, ...POPULAR_DROP_GAMES]));
     currentAutoGamesData.allConnected = allGames;
 
     const enabledList = (data && Array.isArray(data.enabled))
@@ -1205,7 +1240,21 @@ function populateAutoGamesGrid(data) {
     const enabledSet = new Set(enabledList);
     const sortedGames = [...allGames].sort((a, b) => a.localeCompare(b));
 
-    updateAutoGamesBadge(enabledSet.size, sortedGames.length);
+    const activeEnabledCount = sortedGames.filter(g => enabledSet.has(g)).length;
+    updateAutoGamesBadge(activeEnabledCount, sortedGames.length);
+
+    if (sortedGames.length === 0) {
+        grid.html(`
+            <div class="emptyDropsCard" style="padding: 24px 16px; text-align: center; border: 1px dashed var(--border-color); border-radius: 8px; margin: 12px 0;">
+                <div class="noDropsIconBox" style="width: 32px; height: 32px; min-width: 32px; margin: 0 auto 10px; color: var(--text-muted);">${GIFT_SVG_ICON}</div>
+                <strong style="color: var(--text-secondary); font-size: 13px; display: block; margin-bottom: 6px;">No Active Drop Campaigns on Twitch</strong>
+                <p style="color: var(--text-muted); font-size: 12px; margin: 0; line-height: 1.4;">
+                    Only games with currently active Twitch Drop campaigns appear in this queue. When a new campaign launches, its game will appear here automatically.
+                </p>
+            </div>
+        `);
+        return;
+    }
 
     sortedGames.forEach((gameName) => {
         const isChecked = enabledSet.has(gameName);
