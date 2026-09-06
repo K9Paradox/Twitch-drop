@@ -213,7 +213,7 @@ export class Client {
         return null;
     }
 
-    async getDropCampaigns() {
+    async getDropCampaigns(includeAll = false) {
         if (this.oauthToken) {
             try {
                 const data = await this.postAuthorized({
@@ -228,6 +228,20 @@ export class Client {
                         }
                     }
                 });
+                if (includeAll) {
+                    const merged = [];
+                    const seen = new Set();
+                    const list1 = (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) ? data.currentUser.dropCampaigns : [];
+                    const list2 = (data && Array.isArray(data.rewardCampaignsAvailableToUser)) ? data.rewardCampaignsAvailableToUser : [];
+                    const list3 = (data && Array.isArray(data.dropCampaigns)) ? data.dropCampaigns : [];
+                    for (const c of [...list1, ...list2, ...list3]) {
+                        if (c && c.id && !seen.has(c.id)) {
+                            seen.add(c.id);
+                            merged.push(c);
+                        }
+                    }
+                    if (merged.length > 0) return merged;
+                }
                 if (data && data.currentUser && data.currentUser.dropCampaigns) {
                     return data.currentUser.dropCampaigns;
                 }
@@ -253,12 +267,30 @@ export class Client {
                     }
                 }
             });
+            if (includeAll) {
+                const merged = [];
+                const seen = new Set();
+                const list1 = (data && Array.isArray(data.rewardCampaignsAvailableToUser)) ? data.rewardCampaignsAvailableToUser : [];
+                const list2 = (data && Array.isArray(data.dropCampaigns)) ? data.dropCampaigns : [];
+                const list3 = (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) ? data.currentUser.dropCampaigns : [];
+                for (const c of [...list1, ...list2, ...list3]) {
+                    if (c && c.id && !seen.has(c.id)) {
+                        seen.add(c.id);
+                        merged.push(c);
+                    }
+                }
+                if (merged.length > 0) return merged;
+            }
             if (data && data.dropCampaigns) return data.dropCampaigns;
             if (data && data.rewardCampaignsAvailableToUser) return data.rewardCampaignsAvailableToUser;
             if (data && data.currentUser && data.currentUser.dropCampaigns) return data.currentUser.dropCampaigns;
         } catch (e) {}
 
         return [];
+    }
+
+    async getAllDropCampaigns() {
+        return this.getDropCampaigns(true);
     }
 
     async getConnectedGames() {
@@ -631,4 +663,37 @@ export class Client {
         } catch (e) {}
         return { login: channelLogin };
     }
+
+    isCampaignActiveWithDrops(campaign, now = Date.now()) {
+        return isCampaignActiveWithDrops(campaign, now);
+    }
+}
+
+export function isCampaignActiveWithDrops(c, now = Date.now()) {
+    if (!c || !c.game) return false;
+    if (c.status !== "ACTIVE") return false;
+
+    // Check time window if dates exist
+    if (c.startAt) {
+        const startTs = new Date(c.startAt).getTime();
+        if (!isNaN(startTs) && startTs > now) return false;
+    }
+    if (c.endAt) {
+        const endTs = new Date(c.endAt).getTime();
+        if (!isNaN(endTs) && endTs <= now) return false;
+    }
+
+    // If timeBasedDrops are present, verify at least one is unclaimed
+    if (Array.isArray(c.timeBasedDrops) && c.timeBasedDrops.length > 0) {
+        const hasUnclaimed = c.timeBasedDrops.some(drop => {
+            if (!drop) return false;
+            const isClaimed = Boolean(drop.self && drop.self.isClaimed);
+            const watched = drop.self?.currentMinutesWatched || 0;
+            const req = drop.requiredMinutesWatched || 60;
+            return !isClaimed && (req <= 0 || watched < req);
+        });
+        if (!hasUnclaimed) return false;
+    }
+
+    return true;
 }

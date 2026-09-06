@@ -39,7 +39,7 @@ export const viewerDropsDashboardFixture = {
                         boxArtURL: "https://static-cdn.jtvnw.net/ttv-boxart/515025-285x380.jpg"
                     },
                     startAt: "2026-08-01T00:00:00Z",
-                    endAt: "2026-08-30T23:59:59Z",
+                    endAt: "2026-10-30T23:59:59Z",
                     timeBasedDrops: [
                         {
                             id: "drop-ow-1",

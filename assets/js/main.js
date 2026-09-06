@@ -136,6 +136,10 @@ $(() => {
                 populateGameDropdown(merged.map(g => ({ game: { displayName: g } })));
             }
 
+            if (Array.isArray(val.activeDropGames) && val.activeDropGames.length > 0) {
+                currentAutoGamesData.allConnected = val.activeDropGames;
+            }
+
             if (Array.isArray(val.autoDropGames)) {
                 currentAutoGamesData.enabled = val.autoDropGames;
                 populateAutoGamesGrid(currentAutoGamesData);
@@ -400,6 +404,23 @@ $(() => {
         filterAutoGamesGrid(query);
     });
 
+    // Start Auto Queue Button
+    $("#startAutoQueueBtn").on("click", () => {
+        const enabledCount = Array.isArray(currentAutoGamesData.enabled) ? currentAutoGamesData.enabled.length : 0;
+        if (enabledCount === 0) {
+            showToast("Please enable at least 1 game in the queue first!");
+            return;
+        }
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ type: "p:startAutoQueue" }).then(res => {
+                if (res && res.success) {
+                    showToast("Auto Queue started! Finding live streams...");
+                    $(".navItem[data-page='streamPage']").trigger("click");
+                }
+            }).catch(() => {});
+        }
+    });
+
     // Auto Games Select All Button
     $("#autoGameSelectAllBtn").on("click", () => {
         const allGames = Array.isArray(currentAutoGamesData.allConnected) ? currentAutoGamesData.allConnected : [];
@@ -409,6 +430,7 @@ $(() => {
             allGames.forEach(g => {
                 chrome.runtime.sendMessage({ type: "toggleAutoDropGame", data: [g, true] }).catch(() => {});
             });
+            chrome.runtime.sendMessage({ type: "p:startAutoQueue" }).catch(() => {});
         }
         currentAutoGamesData.enabled = [...allGames];
         $(".autoGameToggle").prop("checked", true);
@@ -515,7 +537,7 @@ $(() => {
         $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>${selectedGame}</span>`).addClass("activePill");
 
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-            chrome.runtime.sendMessage({ type: "p:startCampaign", data: { campaign: selectedGame } }).then(() => {
+            chrome.runtime.sendMessage({ type: "p:startCampaign", data: { campaign: selectedGame, manual: true } }).then(() => {
                 setTimeout(() => {
                     chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
                 }, 1000);
