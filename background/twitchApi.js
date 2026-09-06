@@ -653,14 +653,55 @@ export class Client {
             });
             const stream = data?.userOrError?.stream;
             if (stream) {
+                let game = stream.game?.displayName || stream.game?.name;
+                let title = stream.title || "";
+                let viewers = stream.viewersCount || 0;
+
+                // ChannelShell in production Twitch GQL only returns stream ID & viewersCount without game.
+                // Fetch direct stream details if game is missing.
+                if (!game) {
+                    try {
+                        const directData = await this.post({
+                            "operationName": "GetChannelStream",
+                            "query": "query GetChannelStream($login: String!) { user(login: $login) { id login stream { id game { id name displayName } title viewersCount type } } }",
+                            "variables": { "login": channelLogin }
+                        });
+                        const directStream = directData?.user?.stream;
+                        if (directStream && directStream.game) {
+                            game = directStream.game.displayName || directStream.game.name;
+                            title = directStream.title || title;
+                            viewers = directStream.viewersCount || viewers;
+                        }
+                    } catch (err) {}
+                }
+
                 return {
                     login: channelLogin,
-                    game: stream.game?.displayName || stream.game?.name || "Twitch",
-                    title: stream.title || "",
-                    viewers: stream.viewersCount || 0
+                    game: game || undefined,
+                    title: title,
+                    viewers: viewers
                 };
             }
         } catch (e) {}
+
+        // Fallback: direct GraphQL query if ChannelShell failed or returned null
+        try {
+            const directData = await this.post({
+                "operationName": "GetChannelStream",
+                "query": "query GetChannelStream($login: String!) { user(login: $login) { id login stream { id game { id name displayName } title viewersCount type } } }",
+                "variables": { "login": channelLogin }
+            });
+            const directStream = directData?.user?.stream;
+            if (directStream) {
+                return {
+                    login: channelLogin,
+                    game: directStream.game?.displayName || directStream.game?.name || undefined,
+                    title: directStream.title || "",
+                    viewers: directStream.viewersCount || 0
+                };
+            }
+        } catch (err) {}
+
         return { login: channelLogin };
     }
 

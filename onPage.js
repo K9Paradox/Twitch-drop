@@ -27,6 +27,7 @@ if (!window._originalFetch) {
     }
 
     let hasSentPlaybackHandshake = false;
+    let desiredMuted = true;
 
     function notifyPlaybackConfirmed() {
         if (hasSentPlaybackHandshake) return;
@@ -42,31 +43,52 @@ if (!window._originalFetch) {
     function checkAndEnforcePlayback() {
         if (!window.__atdFarming) return;
         try {
-            // 1. If overlay click-to-unmute exists, click it
-            const overlay = document.querySelector('[data-a-target="player-overlay-click-to-unmute"], .player-overlay-click-to-unmute');
-            if (overlay) triggerSyntheticClick(overlay);
-
-            // 2. If mute button indicates muted ('Unmute (m)'), unmute and set slider
-            const muteBtn = document.querySelector('[data-a-target="player-mute-unmute-button"]');
-            const isMuted = muteBtn && muteBtn.getAttribute('aria-label')?.toLowerCase().includes('unmute');
-            if (isMuted) {
-                triggerSyntheticClick(muteBtn);
-
-                const slider = document.querySelector('[data-a-target="player-volume-slider"]');
-                if (slider) {
-                    const proto = Object.getPrototypeOf(slider);
-                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                    if (setter) {
-                        setter.call(slider, "0.5");
-                    } else {
-                        slider.value = "0.5";
+            // A. Auto-dismiss Twitch mature audience warning and content classification gates
+            const matureBtn = document.querySelector('[data-a-target="player-overlay-mature-accept"], [data-a-target="content-classification-gate-overlay-start-watching-button"], button[data-test-selector="content-classification-gate-overlay-start-watching-button"]');
+            if (matureBtn) {
+                triggerSyntheticClick(matureBtn);
+            } else {
+                const buttons = document.querySelectorAll('button');
+                for (const b of buttons) {
+                    if (b.textContent && b.textContent.trim().toLowerCase() === 'start watching') {
+                        triggerSyntheticClick(b);
+                        break;
                     }
-                    slider.dispatchEvent(new Event('input', { bubbles: true }));
-                    slider.dispatchEvent(new Event('change', { bubbles: true }));
                 }
             }
 
-            // 3. Ensure HTML5 video element is playing
+            // B. Auto-recover from Twitch player errors / adblock reload prompts
+            const reloadBtn = document.querySelector('[data-a-target="player-overlay-reload-button"], .player-overlay-reload-button');
+            if (reloadBtn) triggerSyntheticClick(reloadBtn);
+
+            const playOverlay = document.querySelector('[data-a-target="player-overlay-click-to-play"]');
+            if (playOverlay) triggerSyntheticClick(playOverlay);
+
+            // C. Audio synchronization without control thrashing
+            if (!desiredMuted) {
+                const overlay = document.querySelector('[data-a-target="player-overlay-click-to-unmute"], .player-overlay-click-to-unmute');
+                if (overlay) triggerSyntheticClick(overlay);
+
+                const muteBtn = document.querySelector('[data-a-target="player-mute-unmute-button"]');
+                const isMuted = muteBtn && muteBtn.getAttribute('aria-label')?.toLowerCase().includes('unmute');
+                if (isMuted) {
+                    triggerSyntheticClick(muteBtn);
+                    const slider = document.querySelector('[data-a-target="player-volume-slider"]');
+                    if (slider) {
+                        const proto = Object.getPrototypeOf(slider);
+                        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                        if (setter) {
+                            setter.call(slider, "0.5");
+                        } else {
+                            slider.value = "0.5";
+                        }
+                        slider.dispatchEvent(new Event('input', { bubbles: true }));
+                        slider.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                }
+            }
+
+            // D. Ensure HTML5 video element is playing through ads and transitions
             const videos = document.querySelectorAll('video');
             videos.forEach(v => {
                 if (v) {
@@ -122,6 +144,7 @@ if (!window._originalFetch) {
             }
         } else if (dropData.type === "setTabAudio") {
             const shouldMute = Boolean(dropData.muted);
+            desiredMuted = shouldMute;
             try {
                 const slider = document.querySelector('[data-a-target="player-volume-slider"]');
                 if (slider) {

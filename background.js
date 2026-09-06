@@ -70,6 +70,7 @@ let activeStream = {
 };
 let curWindow = {
     id: 0,
+    windowId: 0,
     type: "none"
 };
 let gettingStreamObj = {
@@ -561,20 +562,34 @@ async function handleWatchdogTick() {
                     const meta = await client.getStreamMetadata(activeStream.campaign.curWatching).catch(() => null);
                     const isOffline = !meta || !meta.game;
                     const targetGame = activeStream.campaign.game?.name || "";
-                    const gameChanged = Boolean(meta?.game && targetGame && !meta.game.toLowerCase().includes(targetGame.toLowerCase()) && !targetGame.toLowerCase().includes(meta.game.toLowerCase()));
+                    
+                    let gameChanged = false;
+                    if (meta?.game && targetGame) {
+                        const normMeta = meta.game.toLowerCase().replace(/[^a-z0-9]/g, "");
+                        const normTarget = targetGame.toLowerCase().replace(/[^a-z0-9]/g, "");
+                        gameChanged = !normMeta.includes(normTarget) && !normTarget.includes(normMeta);
+                    }
 
                     if (isOffline || gameChanged) {
-                        console.log(`Streamer ${activeStream.campaign.curWatching} is ${isOffline ? "offline" : "playing " + meta.game + " instead of " + targetGame}. Rotating channel.`);
-                        activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
-                        if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
-                            activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                        activeStream.campaign.consecutiveOfflineChecks = (activeStream.campaign.consecutiveOfflineChecks || 0) + 1;
+                        if (activeStream.campaign.consecutiveOfflineChecks >= 2) {
+                            console.log(`Streamer ${activeStream.campaign.curWatching} is confirmed ${isOffline ? "offline" : "playing " + meta.game + " instead of " + targetGame}. Rotating channel.`);
+                            activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                            if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
+                                activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                            }
+                            activeStream.campaign.consecutiveOfflineChecks = 0;
+                            await runCampaign(true);
+                            return;
+                        } else {
+                            console.log(`Streamer ${activeStream.campaign.curWatching} appears ${isOffline ? "offline" : "in different category"} (check 1/2). Re-verifying next tick before rotating.`);
                         }
-                        await runCampaign(true);
-                        return;
+                    } else {
+                        activeStream.campaign.consecutiveOfflineChecks = 0;
                     }
                 }
 
-                // 2. Stream Stall Watchdog (4-minute threshold)
+                // 2. Stream Stall Watchdog (6-minute threshold to accommodate ad breaks)
                 if (settings.autoRefresh !== false && activeStream.campaign) {
                     const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
                     const currentMinutes = curCamp ? (curCamp.minutesWatched || 0) : 0;
@@ -590,21 +605,21 @@ async function handleWatchdogTick() {
                         activeStream.campaign.lastProgressTimestamp = now;
                         activeStream.campaign.stallCount = 0;
                     } else {
-                        // Progress has stalled for >4 minutes
+                        // Progress has stalled for >6 minutes
                         const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
-                        const stallThresholdMs = 4 * 60 * 1000;
+                        const stallThresholdMs = 6 * 60 * 1000;
 
                         if (elapsedMs >= stallThresholdMs) {
                             activeStream.campaign.stallCount = (activeStream.campaign.stallCount || 0) + 1;
                             activeStream.campaign.lastProgressTimestamp = now;
 
                             if (activeStream.campaign.stallCount === 1) {
-                                console.log(`Stream stall detected for ${activeStream.campaign.curWatching} (0m gained in 4m). Reloading stream tab.`);
+                                console.log(`Stream stall detected for ${activeStream.campaign.curWatching} (0m gained in 6m). Reloading stream tab.`);
                                 if (curWindow.id !== 0) {
                                     chrome.tabs.reload(curWindow.id).catch(() => {});
                                 }
                             } else if (activeStream.campaign.stallCount >= 2) {
-                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 8m). Rotating to next channel.`);
+                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 12m). Rotating to next channel.`);
                                 activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
                                 if (activeStream.campaign.curWatching && !activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
                                     activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
@@ -1204,6 +1219,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     if (activeStream.campaign !== "none" && extEnabled) {
         if (tabId === curWindow.id) {
             curWindow.id = 0;
+            curWindow.windowId = 0;
             curWindow.type = "none";
             await saveState();
 
@@ -1220,6 +1236,29 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
         }
     }
 });
+
+if (typeof chrome !== "undefined" && chrome.windows && chrome.windows.onRemoved) {
+    chrome.windows.onRemoved.addListener(async (windowId) => {
+        await hydrateState();
+        if (curWindow.windowId && windowId === curWindow.windowId) {
+            curWindow.id = 0;
+            curWindow.windowId = 0;
+            curWindow.type = "none";
+            await saveState();
+
+            if (!activeStream.campaign || activeStream.campaign.reOpening || activeStream.campaign.isCompleted) {
+                return;
+            }
+
+            setTimeout(async () => {
+                await hydrateState();
+                if (activeStream.campaign !== "none" && !activeStream.campaign.isCompleted && extEnabled && curWindow.id === 0) {
+                    await runCampaign();
+                }
+            }, 2500);
+        }
+    });
+}
 
 chrome.runtime.onStartup.addListener(startup);
 chrome.runtime.onInstalled.addListener(startup);
@@ -1797,49 +1836,90 @@ async function windowManager(func, data = {}) {
             }
         } catch (e) {}
 
-        const tabOptions = {
-            active: true,
-            ...data
-        };
-
+        const streamUrl = data.url || "https://www.twitch.tv";
+        const isPopout = settings.watchPopout !== false;
         let targetTab = null;
 
-        if (curWindow.id === 0) {
-            const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-            if (existingTabs && existingTabs.length > 0) {
-                targetTab = existingTabs[0];
+        if (isPopout && chrome.windows && chrome.windows.create) {
+            let existingWin = null;
+            if (curWindow.windowId) {
+                existingWin = await chrome.windows.get(curWindow.windowId, { populate: true }).catch(() => null);
+            }
+            if (existingWin && existingWin.tabs && existingWin.tabs.length > 0) {
+                targetTab = existingWin.tabs[0];
                 curWindow.id = targetTab.id;
-                curWindow.type = "tab";
-                await saveState();
-                if (tabOptions.url && targetTab.url !== tabOptions.url) {
-                    await chrome.tabs.update(targetTab.id, { url: tabOptions.url, active: true }).catch(() => {});
-                } else {
-                    await chrome.tabs.update(targetTab.id, { active: true }).catch(() => {});
+                curWindow.windowId = existingWin.id;
+                curWindow.type = "window";
+                if (streamUrl && targetTab.url !== streamUrl) {
+                    await chrome.tabs.update(targetTab.id, { url: streamUrl }).catch(() => {});
                 }
             } else {
-                targetTab = await chrome.tabs.create(tabOptions);
-                curWindow.id = targetTab.id;
-                curWindow.type = "tab";
-                await saveState();
+                const win = await chrome.windows.create({
+                    url: streamUrl,
+                    type: "popup",
+                    width: 854,
+                    height: 480,
+                    focused: false
+                }).catch(() => null);
+
+                if (win) {
+                    targetTab = (win.tabs && win.tabs.length > 0) ? win.tabs[0] : null;
+                    if (!targetTab && win.id) {
+                        const winWithTabs = await chrome.windows.get(win.id, { populate: true }).catch(() => null);
+                        targetTab = winWithTabs?.tabs?.[0] || null;
+                    }
+                    curWindow.id = targetTab ? targetTab.id : 0;
+                    curWindow.windowId = win.id;
+                    curWindow.type = "window";
+                }
             }
+            await saveState();
         } else {
-            targetTab = await chrome.tabs.get(curWindow.id).catch(() => null);
-            if (!targetTab) {
-                const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
+            const tabOptions = {
+                active: false,
+                ...data,
+                url: streamUrl
+            };
+
+            if (curWindow.id === 0) {
+                const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*#atd-managed=1" }).catch(() => []);
                 if (existingTabs && existingTabs.length > 0) {
                     targetTab = existingTabs[0];
                     curWindow.id = targetTab.id;
+                    curWindow.windowId = 0;
+                    curWindow.type = "tab";
                     await saveState();
+                    if (targetTab.url !== tabOptions.url) {
+                        await chrome.tabs.update(targetTab.id, { url: tabOptions.url }).catch(() => {});
+                    }
                 } else {
                     targetTab = await chrome.tabs.create(tabOptions);
                     curWindow.id = targetTab.id;
+                    curWindow.windowId = 0;
+                    curWindow.type = "tab";
                     await saveState();
                 }
-            }
-            if (tabOptions.url && targetTab.url !== tabOptions.url) {
-                await chrome.tabs.update(curWindow.id, { url: tabOptions.url, active: true }).catch(() => {});
             } else {
-                await chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
+                targetTab = await chrome.tabs.get(curWindow.id).catch(() => null);
+                if (!targetTab) {
+                    const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*#atd-managed=1" }).catch(() => []);
+                    if (existingTabs && existingTabs.length > 0) {
+                        targetTab = existingTabs[0];
+                        curWindow.id = targetTab.id;
+                        curWindow.windowId = 0;
+                        curWindow.type = "tab";
+                        await saveState();
+                    } else {
+                        targetTab = await chrome.tabs.create(tabOptions);
+                        curWindow.id = targetTab.id;
+                        curWindow.windowId = 0;
+                        curWindow.type = "tab";
+                        await saveState();
+                    }
+                }
+                if (tabOptions.url && targetTab.url !== tabOptions.url) {
+                    await chrome.tabs.update(curWindow.id, { url: tabOptions.url }).catch(() => {});
+                }
             }
         }
 
@@ -1850,14 +1930,14 @@ async function windowManager(func, data = {}) {
             timestamp: Date.now()
         };
 
-        // Fallback safety timer (1.2s) to restore focus quickly if autoMute enabled
+        // Fallback safety timer (1.2s) to apply mute / audio settings
         if (targetTab && targetTab.id) {
             setTimeout(async () => {
                 if (pendingPlaybackHandshake && pendingPlaybackHandshake.targetTabId === targetTab.id) {
                     if (settings.autoMute !== false) {
                         chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
                         chrome.tabs.sendMessage(targetTab.id, { type: "setTabAudio", muted: true }).catch(() => {});
-                        if (prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
+                        if (!isPopout && prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
                             chrome.tabs.update(prevActiveTab.id, { active: true }).catch(() => {});
                         }
                     } else {
@@ -1871,12 +1951,16 @@ async function windowManager(func, data = {}) {
 
         return targetTab;
     } else if (func === "close") {
+        if (curWindow.windowId) {
+            await chrome.windows.remove(curWindow.windowId).catch(() => {});
+        }
         if (curWindow.id !== 0) {
             await chrome.tabs.remove(curWindow.id).catch(() => {});
-            curWindow.id = 0;
-            curWindow.type = "none";
-            await saveState();
         }
+        curWindow.id = 0;
+        curWindow.windowId = 0;
+        curWindow.type = "none";
+        await saveState();
     }
 }
 

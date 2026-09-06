@@ -275,6 +275,51 @@ export class ChromeMock {
             }
         };
         this.browserAction = this.action;
+
+        this._windows = new Map();
+        this._windowIdCounter = 10;
+        this.windows = {
+            onRemoved: new EventHook(),
+            create: async (createData = {}) => {
+                const id = ++this._windowIdCounter;
+                const tab = await this.tabs.create({
+                    url: createData.url || "about:blank",
+                    active: true,
+                    windowId: id
+                });
+                const win = {
+                    id,
+                    type: createData.type || "normal",
+                    focused: createData.focused !== undefined ? createData.focused : true,
+                    tabs: [tab],
+                    width: createData.width || 854,
+                    height: createData.height || 480
+                };
+                this._windows.set(id, win);
+                return win;
+            },
+            get: async (windowId, getInfo = {}) => {
+                const win = this._windows.get(windowId);
+                if (!win) throw new Error(`Window ${windowId} not found`);
+                if (getInfo.populate) {
+                    const tabs = Array.from(this._tabs.values()).filter(t => t.windowId === windowId);
+                    return { ...win, tabs };
+                }
+                return { ...win };
+            },
+            remove: async (windowId) => {
+                const win = this._windows.get(windowId);
+                if (win) {
+                    this._windows.delete(windowId);
+                    const tabs = Array.from(this._tabs.values()).filter(t => t.windowId === windowId);
+                    for (const t of tabs) {
+                        this._tabs.delete(t.id);
+                        await this.tabs.onRemoved.emit(t.id, { isWindowClosing: true });
+                    }
+                    await this.windows.onRemoved.emit(windowId);
+                }
+            }
+        };
     }
 }
 
