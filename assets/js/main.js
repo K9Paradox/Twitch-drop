@@ -4,6 +4,7 @@ const maniData = (typeof chrome !== "undefined" && chrome.runtime && chrome.runt
     : { version: "1.5.0" };
 
 const POPULAR_DROP_GAMES = [
+    "Overwatch",
     "Overwatch 2",
     "Apex Legends",
     "Valorant",
@@ -22,6 +23,39 @@ const POPULAR_DROP_GAMES = [
     "Genshin Impact",
     "Honkai: Star Rail"
 ];
+
+function isOverwatchGame(name) {
+    if (!name || typeof name !== "string") return false;
+    const clean = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return clean === "overwatch" || clean === "overwatch2";
+}
+
+function areGameNamesMatching(gameA, gameB) {
+    if (!gameA || !gameB) return false;
+    if (typeof gameA !== "string" || typeof gameB !== "string") return false;
+
+    const a = gameA.trim();
+    const b = gameB.trim();
+    if (!a || !b) return false;
+    if (a.toLowerCase() === b.toLowerCase()) return true;
+
+    if (isOverwatchGame(a) && isOverwatchGame(b)) {
+        return true;
+    }
+
+    const normA = a.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const normB = b.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!normA || !normB) return false;
+    if (normA === normB) return true;
+
+    if (normA.length >= 4 && normB.length >= 4) {
+        if (normA.includes(normB) || normB.includes(normA)) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 let settings = {
     autoRefresh: true,
@@ -900,8 +934,8 @@ function populateGameDropdown(data) {
     }
 
     currentAllGames = Array.from(uniqueGames).sort((a, b) => {
-        const aActive = activeDropGamesSet.has(a);
-        const bActive = activeDropGamesSet.has(b);
+        const aActive = Array.from(activeDropGamesSet).some(g => areGameNamesMatching(g, a));
+        const bActive = Array.from(activeDropGamesSet).some(g => areGameNamesMatching(g, b));
         if (aActive !== bActive) return aActive ? -1 : 1;
         return a.localeCompare(b);
     });
@@ -923,7 +957,7 @@ function filterDropdownItems(query) {
     }
 
     filtered.forEach(gameName => {
-        const isActive = activeDropGamesSet.has(gameName);
+        const isActive = Array.from(activeDropGamesSet).some(g => areGameNamesMatching(g, gameName));
         const badgeMarkup = isActive
             ? `<span class="activeGameBadgeTag">🟢 Active Drops</span>`
             : "";
@@ -1437,7 +1471,9 @@ function populateAutoGamesGrid(data) {
     const enabledSet = new Set(enabledList);
     const sortedGames = [...allGames].sort((a, b) => a.localeCompare(b));
 
-    const activeEnabledCount = sortedGames.filter(g => enabledSet.has(g)).length;
+    const activeEnabledCount = sortedGames.filter(g =>
+        Array.from(enabledSet).some(eg => areGameNamesMatching(eg, g))
+    ).length;
     updateAutoGamesBadge(activeEnabledCount, sortedGames.length);
 
     if (sortedGames.length === 0) {
@@ -1454,7 +1490,7 @@ function populateAutoGamesGrid(data) {
     }
 
     sortedGames.forEach((gameName) => {
-        const isChecked = enabledSet.has(gameName);
+        const isChecked = Array.from(enabledSet).some(eg => areGameNamesMatching(eg, gameName));
 
         const card = $(`
             <div class="autoGameCard ${isChecked ? "activeQueueCard" : ""}" data-gamename="${gameName.toLowerCase()}">

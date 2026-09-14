@@ -193,22 +193,32 @@ export class Client {
     async getGameIdFromName(name) {
         if (!name) return null;
         try {
-            const data = await this.post({
-                "operationName": "DirectoryRoot_Directory",
-                "variables": {
-                    "name": name.toLowerCase()
-                },
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 1,
-                        "sha256Hash": "99d3c9b5ceaadb36f77c8bc2d576a737c83d2e9f06c4d6190cf2c6b4f214cccb"
+            const queryGame = async (n) => {
+                const data = await this.post({
+                    "operationName": "DirectoryRoot_Directory",
+                    "variables": {
+                        "name": n.toLowerCase()
+                    },
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": "99d3c9b5ceaadb36f77c8bc2d576a737c83d2e9f06c4d6190cf2c6b4f214cccb"
+                        }
                     }
+                });
+                const game = data ? data.game : null;
+                if (game && game.id) {
+                    return game.id;
                 }
-            });
-            const game = data ? data.game : null;
-            if (game && game.id) {
-                return game.id;
+                return null;
+            };
+
+            let gameId = await queryGame(name);
+            if (!gameId && isOverwatchGame(name)) {
+                const alt = name.toLowerCase().includes("2") ? "overwatch" : "overwatch 2";
+                gameId = await queryGame(alt);
             }
+            return gameId;
         } catch (e) {}
         return null;
     }
@@ -389,46 +399,64 @@ export class Client {
             }
             if (!gameSlug) return [];
 
-            const data = await this.post({
-                "operationName": "DirectoryPage_Game",
-                "variables": {
-                    "game": (gameName || "").toLowerCase(),
-                    "slug": gameSlug,
-                    "options": {
-                        "includeRestricted": ["SUB_ONLY_LIVE"],
-                        "sort": "VIEWER_COUNT",
-                        "tags": ["c2542d6d-cd10-4532-919b-3d19f30a768b"],
-                        "recommendationsContext": {
-                            "platform": "web"
+            const queryDirectory = async (name, s) => {
+                const data = await this.post({
+                    "operationName": "DirectoryPage_Game",
+                    "variables": {
+                        "game": (name || "").toLowerCase(),
+                        "slug": s,
+                        "options": {
+                            "includeRestricted": ["SUB_ONLY_LIVE"],
+                            "sort": "VIEWER_COUNT",
+                            "tags": ["c2542d6d-cd10-4532-919b-3d19f30a768b"],
+                            "recommendationsContext": {
+                                "platform": "web"
+                            },
+                            "requestID": "JIRA-VXP-2397"
                         },
-                        "requestID": "JIRA-VXP-2397"
+                        "sortTypeIsRecency": false,
+                        "includeCostreaming": true,
+                        "limit": 30
                     },
-                    "sortTypeIsRecency": false,
-                    "includeCostreaming": true,
-                    "limit": 30
-                },
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 1,
-                        "sha256Hash": "76cb069d835b8a02914c08dc42c421d0dafda8af5b113a3f19141824b901402f"
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": "76cb069d835b8a02914c08dc42c421d0dafda8af5b113a3f19141824b901402f"
+                        }
+                    }
+                });
+
+                const edges = data?.game?.streams?.edges || (Array.isArray(data) ? data?.[0]?.data?.game?.streams?.edges : []) || [];
+                const result = [];
+                for (const edge of edges) {
+                    const node = edge?.node || edge;
+                    const broadcaster = node?.broadcaster;
+                    if (broadcaster && broadcaster.login) {
+                        result.push({
+                            broadcaster: {
+                                login: broadcaster.login,
+                                displayName: broadcaster.displayName || broadcaster.login
+                            }
+                        });
                     }
                 }
-            });
+                return result;
+            };
 
-            const edges = data?.game?.streams?.edges || (Array.isArray(data) ? data?.[0]?.data?.game?.streams?.edges : []) || [];
-            const result = [];
-            for (const edge of edges) {
-                const node = edge?.node || edge;
-                const broadcaster = node?.broadcaster;
-                if (broadcaster && broadcaster.login) {
-                    result.push({
-                        broadcaster: {
-                            login: broadcaster.login,
-                            displayName: broadcaster.displayName || broadcaster.login
-                        }
-                    });
-                }
+            let result = await queryDirectory(gameName, gameSlug);
+
+            // If no streams found and this is Overwatch / Overwatch 2, fallback to alternate slug/name
+            if (result.length === 0 && isOverwatchGame(gameName || gameSlug)) {
+                const altSlug = (gameSlug === "overwatch" || gameSlug === "overwatch-1") ? "overwatch-2" : "overwatch";
+                const altName = altSlug === "overwatch-2" ? "Overwatch 2" : "Overwatch";
+                try {
+                    const altResult = await queryDirectory(altName, altSlug);
+                    if (Array.isArray(altResult) && altResult.length > 0) {
+                        result = altResult;
+                    }
+                } catch (err) {}
             }
+
             return result;
         } catch (e) {
             return [];
@@ -740,7 +768,9 @@ export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null)
 
     // Check inventory for completion if inventory is provided
     if (inventory && Array.isArray(inventory.dropCampaignsInProgress)) {
-        const inProg = inventory.dropCampaignsInProgress.find(p => p && p.id === c.id);
+        const inProg = inventory.dropCampaignsInProgress.find(p =>
+            p && (p.id === c.id || (p.game && areGameNamesMatching(p.game.displayName || p.game.name, c.game?.displayName || c.game?.name)))
+        );
         if (inProg && Array.isArray(inProg.timeBasedDrops) && inProg.timeBasedDrops.length > 0) {
             const hasUnclaimedInProg = inProg.timeBasedDrops.some(drop => {
                 if (!drop) return false;
@@ -754,4 +784,37 @@ export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null)
     }
 
     return true;
+}
+
+export function isOverwatchGame(name) {
+    if (!name || typeof name !== "string") return false;
+    const clean = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return clean === "overwatch" || clean === "overwatch2";
+}
+
+export function areGameNamesMatching(gameA, gameB) {
+    if (!gameA || !gameB) return false;
+    if (typeof gameA !== "string" || typeof gameB !== "string") return false;
+
+    const a = gameA.trim();
+    const b = gameB.trim();
+    if (!a || !b) return false;
+    if (a.toLowerCase() === b.toLowerCase()) return true;
+
+    if (isOverwatchGame(a) && isOverwatchGame(b)) {
+        return true;
+    }
+
+    const normA = a.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const normB = b.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!normA || !normB) return false;
+    if (normA === normB) return true;
+
+    if (normA.length >= 4 && normB.length >= 4) {
+        if (normA.includes(normB) || normB.includes(normA)) {
+            return true;
+        }
+    }
+
+    return false;
 }
