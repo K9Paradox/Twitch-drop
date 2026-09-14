@@ -306,9 +306,14 @@ export class Client {
     async getConnectedGames() {
         const campaigns = await this.getDropCampaigns();
         const games = [];
+        const now = Date.now();
         if (Array.isArray(campaigns)) {
             for (const campaign of campaigns) {
                 if (campaign && campaign.game && campaign.status !== "EXPIRED") {
+                    const endTs = campaign.endAt ? new Date(campaign.endAt).getTime() : NaN;
+                    if (!isNaN(endTs) && endTs <= now) {
+                        continue;
+                    }
                     games.push(campaign);
                 }
             }
@@ -739,7 +744,7 @@ export class Client {
 }
 
 export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null) {
-    if (!c || !c.game) return false;
+    if (!c) return false;
     if (c.status !== "ACTIVE") return false;
 
     // Check time window if dates exist
@@ -767,19 +772,46 @@ export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null)
     }
 
     // Check inventory for completion if inventory is provided
-    if (inventory && Array.isArray(inventory.dropCampaignsInProgress)) {
-        const inProg = inventory.dropCampaignsInProgress.find(p =>
+    if (inventory && typeof inventory === "object") {
+        const inProgressList = Array.isArray(inventory.dropCampaignsInProgress) ? inventory.dropCampaignsInProgress : [];
+        const inProg = inProgressList.find(p =>
             p && (p.id === c.id || (p.game && areGameNamesMatching(p.game.displayName || p.game.name, c.game?.displayName || c.game?.name)))
         );
-        if (inProg && Array.isArray(inProg.timeBasedDrops) && inProg.timeBasedDrops.length > 0) {
-            const hasUnclaimedInProg = inProg.timeBasedDrops.some(drop => {
-                if (!drop) return false;
-                const isClaimed = Boolean(drop.self && drop.self.isClaimed);
-                const watched = drop.self?.currentMinutesWatched || 0;
-                const req = drop.requiredMinutesWatched || 60;
-                return !isClaimed && (req <= 0 || watched < req);
-            });
-            if (!hasUnclaimedInProg) return false;
+
+        if (inProg) {
+            // Check if in-progress campaign is expired by endAt or status
+            if (inProg.endAt) {
+                const inProgEnd = new Date(inProg.endAt).getTime();
+                if (!isNaN(inProgEnd) && inProgEnd <= now) return false;
+            }
+            if (inProg.status && inProg.status !== "ACTIVE") return false;
+
+            if (Array.isArray(inProg.timeBasedDrops) && inProg.timeBasedDrops.length > 0) {
+                const eventDropsList = Array.isArray(inventory.gameEventDrops) ? inventory.gameEventDrops : [];
+                const hasUnclaimedInProg = inProg.timeBasedDrops.some(drop => {
+                    if (!drop) return false;
+                    const isSelfClaimed = Boolean(drop.self && drop.self.isClaimed);
+                    const watched = drop.self?.currentMinutesWatched || 0;
+                    const req = drop.requiredMinutesWatched || 60;
+
+                    // Also verify against claimed gameEventDrops
+                    let isEventClaimed = false;
+                    if (eventDropsList.length > 0) {
+                        const dropId = (drop.id || "").toLowerCase();
+                        const benId = (drop.benefitEdges && drop.benefitEdges[0] ? (drop.benefitEdges[0].benefit?.id || drop.benefitEdges[0].node?.id) : "")?.toLowerCase();
+                        isEventClaimed = eventDropsList.some(evt => {
+                            if (!evt) return false;
+                            const eId = (evt.id || "").toLowerCase();
+                            const ebId = (evt.benefitId || "").toLowerCase();
+                            return (dropId && (eId === dropId || ebId === dropId)) || (benId && (eId === benId || ebId === benId));
+                        });
+                    }
+
+                    const isClaimed = isSelfClaimed || isEventClaimed;
+                    return !isClaimed && (req <= 0 || watched < req);
+                });
+                if (!hasUnclaimedInProg) return false;
+            }
         }
     }
 

@@ -914,15 +914,17 @@ function populateGameDropdown(data) {
         data.forEach(camp => {
             let name = "";
             let isActive = false;
+            const isExpired = Boolean(camp && camp.endAt && !isNaN(new Date(camp.endAt).getTime()) && new Date(camp.endAt).getTime() <= Date.now());
+
             if (camp && camp.game && camp.game.displayName) {
                 name = camp.game.displayName;
-                isActive = Boolean(camp.hasActiveDrops || camp.status === "ACTIVE");
+                isActive = (camp.hasActiveDrops !== undefined) ? Boolean(camp.hasActiveDrops) : (camp.status === "ACTIVE" && !isExpired);
             } else if (camp && camp.displayName) {
                 name = camp.displayName;
-                isActive = Boolean(camp.hasActiveDrops);
+                isActive = (camp.hasActiveDrops !== undefined) ? Boolean(camp.hasActiveDrops) : (camp.status === "ACTIVE" && !isExpired);
             } else if (camp && camp.name) {
                 name = camp.name;
-                isActive = Boolean(camp.hasActiveDrops);
+                isActive = (camp.hasActiveDrops !== undefined) ? Boolean(camp.hasActiveDrops) : (camp.status === "ACTIVE" && !isExpired);
             } else if (typeof camp === "string" && camp.trim()) {
                 name = camp.trim();
             }
@@ -992,13 +994,22 @@ function updateDropProgressUI(data) {
         $(".selectedGame").text(gameName);
     }
 
-    if (camp.status === "no_active_drops") {
+    const isClosedOrEnded = camp.status === "no_active_drops" || Boolean(camp.endsAt && !isNaN(camp.endsAt) && Date.now() >= camp.endsAt && !camp.isCompleted);
+    if (isClosedOrEnded) {
         $("#stopCampaignBtn").hide();
-        $("#dropStatus").text(`No Active Drops: ${gameName}`);
-        $("#dropGame").html(`Twitch does not have an active drop campaign for <strong>${escapeHtml(gameName)}</strong> right now.`);
-        $("#headerStatusPill").html('<span class="statusDot idleDot"></span><span>No Active Drops</span>').removeClass("activePill");
+        const isExpired = Boolean(camp.endsAt && Date.now() >= camp.endsAt && !camp.isCompleted);
+        const headerTitle = isExpired ? `Campaign Closed: ${gameName}` : `No Active Drops: ${gameName}`;
+        const headerPill = isExpired ? 'Campaign Closed' : 'No Active Drops';
+        const cardTitle = isExpired ? `Drop Campaign Closed for ${escapeHtml(gameName)}` : `No Active Drops for ${escapeHtml(gameName)}`;
+        const cardDesc = isExpired
+            ? `The official Twitch drop campaign for this game has reached its scheduled end time and closed. Farming has paused automatically.`
+            : `There is currently no official drop campaign running on Twitch for this game. Farming is paused until a campaign goes live.`;
+
+        $("#dropStatus").text(headerTitle);
+        $("#dropGame").html(`Twitch drop campaign for <strong>${escapeHtml(gameName)}</strong> is ${isExpired ? "closed" : "inactive"}.`);
+        $("#headerStatusPill").html(`<span class="statusDot idleDot"></span><span>${headerPill}</span>`).removeClass("activePill");
         $(".progressBarInner").css({ "width": "0%", "background": "var(--bg-input)" });
-        $(".progressPercentText").text("No drops available");
+        $(".progressPercentText").text(isExpired ? "Campaign ended" : "No drops available");
         $("#streamToolbar").hide();
 
         let detailsBox = $("#activeDropDetails");
@@ -1011,8 +1022,8 @@ function updateDropProgressUI(data) {
             <div class="noDropsAlertCard">
                 <div class="noDropsIconBox">${GIFT_SVG_ICON}</div>
                 <div class="noDropsContent">
-                    <span class="noDropsTitle">No Active Drops for ${escapeHtml(gameName)}</span>
-                    <span class="noDropsDesc">There is currently no official drop campaign running on Twitch for this game. Farming is paused until a campaign goes live.</span>
+                    <span class="noDropsTitle">${cardTitle}</span>
+                    <span class="noDropsDesc">${cardDesc}</span>
                     <span class="noDropsTip">Select a game with active drops (marked 🟢) from the dropdown above, or check back when a campaign begins.</span>
                 </div>
             </div>
@@ -1236,15 +1247,22 @@ function renderActiveDropsList(activeStream) {
     const camp = activeStream.campaign;
     const gameName = camp.game ? (camp.game.name || camp.game.displayName || "Selected Game") : (typeof camp === "string" ? camp : "Selected Game");
 
-    if (camp.status === "no_active_drops") {
+    const isClosedOrEnded = camp.status === "no_active_drops" || Boolean(camp.endsAt && !isNaN(camp.endsAt) && Date.now() >= camp.endsAt && !camp.isCompleted);
+    if (isClosedOrEnded) {
+        const isExpired = Boolean(camp.endsAt && Date.now() >= camp.endsAt && !camp.isCompleted);
+        const titleText = isExpired ? `Campaign Closed: ${escapeHtml(gameName)}` : `No Active Drops: ${escapeHtml(gameName)}`;
+        const bodyText = isExpired
+            ? `The official Twitch drop campaign for <strong>${escapeHtml(gameName)}</strong> has reached its scheduled end time and closed. Farming has paused automatically.`
+            : `Twitch does not have an active drop campaign for <strong>${escapeHtml(gameName)}</strong> right now. When a campaign goes live, rewards and requirements will appear here automatically.`;
+
         container.html(`
             <div class="emptyDropsCard" style="padding: 16px; background: rgba(240, 162, 50, 0.05); border: 1px solid rgba(240, 162, 50, 0.25); border-radius: 8px; text-align: center;">
                 <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 8px;">
                     <div class="noDropsIconBox" style="width: 28px; height: 28px; min-width: 28px;">${GIFT_SVG_ICON}</div>
-                    <strong style="color: #f0a232; font-size: 14px;">No Active Drops: ${escapeHtml(gameName)}</strong>
+                    <strong style="color: #f0a232; font-size: 14px;">${titleText}</strong>
                 </div>
                 <p style="color: var(--text-secondary); font-size: 12px; margin-bottom: 12px; line-height: 1.4;">
-                    Twitch does not have an active drop campaign for <strong>${escapeHtml(gameName)}</strong> right now. When a campaign goes live, rewards and requirements will appear here automatically.
+                    ${bodyText}
                 </p>
                 <div style="display: flex; gap: 8px; justify-content: center;">
                     <a href="https://www.twitch.tv/drops/campaigns" target="_blank" class="actionBtn miniBtn secondaryBtn">View Twitch Campaigns ↗</a>
