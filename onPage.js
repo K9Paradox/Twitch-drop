@@ -129,6 +129,35 @@ if (!window._originalFetch) {
     const playbackInterval = setInterval(checkAndEnforcePlayback, 1000);
     activeIntervals.push(playbackInterval);
 
+    // Detect manual user unmute gestures so automated enforcement doesn't re-mute
+    function handleUserUnmuteGesture(e) {
+        try {
+            const target = e.target;
+            if (!target) return;
+            const isUnmuteClick = target.closest && (
+                target.closest('[data-a-target="player-overlay-click-to-unmute"]') ||
+                target.closest('.player-overlay-click-to-unmute') ||
+                target.closest('[data-a-target="player-mute-unmute-button"]') ||
+                target.closest('[data-a-target="player-volume-slider"]')
+            );
+            if (isUnmuteClick) {
+                desiredMuted = false;
+            }
+        } catch (err) {}
+    }
+
+    document.addEventListener("click", handleUserUnmuteGesture, true);
+
+    document.addEventListener("volumechange", (e) => {
+        try {
+            if (e.target && e.target.tagName === "VIDEO") {
+                if (!e.target.muted && e.target.volume > 0) {
+                    desiredMuted = false;
+                }
+            }
+        } catch (err) {}
+    }, true);
+
     // Listen for settings and audio state changes relayed from content script
     window.addEventListener("message", (e) => {
         if (!e.data || !e.data.autoTwitchDrops) return;

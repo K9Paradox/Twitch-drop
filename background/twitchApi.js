@@ -310,9 +310,19 @@ export class Client {
         if (Array.isArray(campaigns)) {
             for (const campaign of campaigns) {
                 if (campaign && campaign.game && campaign.status !== "EXPIRED") {
-                    const endTs = campaign.endAt ? new Date(campaign.endAt).getTime() : NaN;
+                    const endTs = campaign.endAt ? new Date(campaign.endAt).getTime() : (campaign.endsAt ? new Date(campaign.endsAt).getTime() : NaN);
                     if (!isNaN(endTs) && endTs <= now) {
                         continue;
+                    }
+                    if (Array.isArray(campaign.timeBasedDrops) && campaign.timeBasedDrops.length > 0) {
+                        const dropsWithEnd = campaign.timeBasedDrops.filter(d => d && (d.endAt || d.endsAt));
+                        if (dropsWithEnd.length > 0 && dropsWithEnd.length === campaign.timeBasedDrops.length) {
+                            const allDropsEnded = dropsWithEnd.every(d => {
+                                const dEnd = d.endAt ? new Date(d.endAt).getTime() : (d.endsAt ? new Date(d.endsAt).getTime() : NaN);
+                                return !isNaN(dEnd) && dEnd <= now;
+                            });
+                            if (allDropsEnded) continue;
+                        }
                     }
                     games.push(campaign);
                 }
@@ -752,17 +762,30 @@ export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null)
         const startTs = new Date(c.startAt).getTime();
         if (!isNaN(startTs) && startTs > now) return false;
     }
-    if (c.endAt) {
-        const endTs = new Date(c.endAt).getTime();
-        if (!isNaN(endTs) && endTs <= now) return false;
-    }
+    const campEnd = c.endAt ? new Date(c.endAt).getTime() : (c.endsAt ? new Date(c.endsAt).getTime() : NaN);
+    if (!isNaN(campEnd) && campEnd <= now) return false;
 
     // If timeBasedDrops is an array:
     // Empty array means NO drops are available (e.g. external promo campaigns with 0 drops)
     if (Array.isArray(c.timeBasedDrops)) {
         if (c.timeBasedDrops.length === 0) return false;
+
+        // If all drops with specified end dates have ended, campaign is not active
+        const dropsWithEnd = c.timeBasedDrops.filter(drop => drop && (drop.endAt || drop.endsAt));
+        if (dropsWithEnd.length > 0 && dropsWithEnd.length === c.timeBasedDrops.length) {
+            const allEnded = dropsWithEnd.every(drop => {
+                const dropEnd = drop.endAt ? new Date(drop.endAt).getTime() : (drop.endsAt ? new Date(drop.endsAt).getTime() : NaN);
+                return !isNaN(dropEnd) && dropEnd <= now;
+            });
+            if (allEnded) return false;
+        }
+
         const hasUnclaimed = c.timeBasedDrops.some(drop => {
             if (!drop) return false;
+            // Check if this specific drop has ended
+            const dropEnd = drop.endAt ? new Date(drop.endAt).getTime() : (drop.endsAt ? new Date(drop.endsAt).getTime() : NaN);
+            if (!isNaN(dropEnd) && dropEnd <= now) return false;
+
             const isClaimed = Boolean(drop.self && drop.self.isClaimed);
             const watched = drop.self?.currentMinutesWatched || 0;
             const req = drop.requiredMinutesWatched || 60;
@@ -779,17 +802,28 @@ export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null)
         );
 
         if (inProg) {
-            // Check if in-progress campaign is expired by endAt or status
-            if (inProg.endAt) {
-                const inProgEnd = new Date(inProg.endAt).getTime();
-                if (!isNaN(inProgEnd) && inProgEnd <= now) return false;
-            }
+            // Check if in-progress campaign is expired by endAt, endsAt or status
+            const inProgEnd = inProg.endAt ? new Date(inProg.endAt).getTime() : (inProg.endsAt ? new Date(inProg.endsAt).getTime() : NaN);
+            if (!isNaN(inProgEnd) && inProgEnd <= now) return false;
             if (inProg.status && inProg.status !== "ACTIVE") return false;
 
             if (Array.isArray(inProg.timeBasedDrops) && inProg.timeBasedDrops.length > 0) {
+                // If all in-progress drops with end dates have ended, campaign is closed
+                const inProgDropsWithEnd = inProg.timeBasedDrops.filter(drop => drop && (drop.endAt || drop.endsAt));
+                if (inProgDropsWithEnd.length > 0 && inProgDropsWithEnd.length === inProg.timeBasedDrops.length) {
+                    const allInProgEnded = inProgDropsWithEnd.every(drop => {
+                        const dropEnd = drop.endAt ? new Date(drop.endAt).getTime() : (drop.endsAt ? new Date(drop.endsAt).getTime() : NaN);
+                        return !isNaN(dropEnd) && dropEnd <= now;
+                    });
+                    if (allInProgEnded) return false;
+                }
+
                 const eventDropsList = Array.isArray(inventory.gameEventDrops) ? inventory.gameEventDrops : [];
                 const hasUnclaimedInProg = inProg.timeBasedDrops.some(drop => {
                     if (!drop) return false;
+                    const dropEnd = drop.endAt ? new Date(drop.endAt).getTime() : (drop.endsAt ? new Date(drop.endsAt).getTime() : NaN);
+                    if (!isNaN(dropEnd) && dropEnd <= now) return false;
+
                     const isSelfClaimed = Boolean(drop.self && drop.self.isClaimed);
                     const watched = drop.self?.currentMinutesWatched || 0;
                     const req = drop.requiredMinutesWatched || 60;

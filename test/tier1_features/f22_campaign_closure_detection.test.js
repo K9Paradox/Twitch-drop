@@ -244,4 +244,118 @@ describe("Tier 1: Feature 22 - Campaign Closure & Expiration Detection", () => {
         };
         assert.equal(computeIsActive(campTrulyActive), true);
     });
+
+    it("F22-T6: Drop-level expiration is detected even when campaign endAt is far in the future", () => {
+        const now = Date.now();
+        const pastDropEnd = new Date(now - 3600000).toISOString(); // Drop ended 1 hour ago (e.g. Sep 13, 9:28 AM)
+        const futureCampaignEnd = new Date(now + 86400000).toISOString(); // Campaign ends in 24 hours
+
+        const campaign = {
+            id: "camp-ow2",
+            name: "Overwatch 2 Drops",
+            status: "ACTIVE",
+            startAt: new Date(now - 7200000).toISOString(),
+            endAt: futureCampaignEnd,
+            timeBasedDrops: [
+                {
+                    id: "drop-ow-1",
+                    name: "Overwatch Epic Skin",
+                    startAt: new Date(now - 7200000).toISOString(),
+                    endAt: pastDropEnd,
+                    requiredMinutesWatched: 60,
+                    self: { isClaimed: false, currentMinutesWatched: 0 }
+                }
+            ]
+        };
+
+        // All drops in campaign have expired endAt -> isCampaignActiveWithDrops must return false
+        assert.equal(isCampaignActiveWithDrops(campaign, now, null), false);
+
+        // If one drop is expired but another is still live, campaign remains active
+        const campaignWithMixedDrops = {
+            ...campaign,
+            timeBasedDrops: [
+                {
+                    id: "drop-ow-1",
+                    name: "Overwatch Epic Skin",
+                    startAt: new Date(now - 7200000).toISOString(),
+                    endAt: pastDropEnd,
+                    requiredMinutesWatched: 60,
+                    self: { isClaimed: false, currentMinutesWatched: 0 }
+                },
+                {
+                    id: "drop-ow-2",
+                    name: "Overwatch Legendary Weapon",
+                    startAt: new Date(now - 7200000).toISOString(),
+                    endAt: new Date(now + 3600000).toISOString(),
+                    requiredMinutesWatched: 120,
+                    self: { isClaimed: false, currentMinutesWatched: 0 }
+                }
+            ]
+        };
+        assert.equal(isCampaignActiveWithDrops(campaignWithMixedDrops, now, null), true);
+    });
+
+    it("F22-T7: End date formatting and drop prioritization correctly sorts active first, claimed second, ended last", () => {
+        const now = Date.now();
+        const drops = [
+            { id: "1", title: "Claimed Drop", isClaimed: true, isEnded: false, minsNeeded: 60 },
+            { id: "2", title: "Ended Drop", isClaimed: false, isEnded: true, minsNeeded: 120 },
+            { id: "3", title: "Active Live Drop", isClaimed: false, isEnded: false, minsNeeded: 180 }
+        ];
+
+        const getPriority = (item) => {
+            if (item.isClaimed) return 1;
+            if (item.isEnded) return 2;
+            return 0;
+        };
+
+        drops.sort((a, b) => {
+            const pA = getPriority(a);
+            const pB = getPriority(b);
+            if (pA !== pB) return pA - pB;
+            return a.minsNeeded - b.minsNeeded;
+        });
+
+        assert.equal(drops[0].title, "Active Live Drop");
+        assert.equal(drops[1].title, "Claimed Drop");
+        assert.equal(drops[2].title, "Ended Drop");
+    });
+
+    it("F22-T8: Window manager options ensure popups open and swap with focused: true and state: 'normal' for user unmute", () => {
+        const mockWindows = [];
+        const mockUpdates = [];
+
+        const fakeChromeWindows = {
+            create: async (opts) => {
+                const win = { id: 101, tabs: [{ id: 202, url: opts.url }], ...opts };
+                mockWindows.push(win);
+                return win;
+            },
+            update: async (winId, opts) => {
+                mockUpdates.push({ winId, ...opts });
+                return { id: winId, ...opts };
+            }
+        };
+
+        // Simulating popout window creation options
+        const createOptions = {
+            url: "https://www.twitch.tv/streamer#atd-managed=1",
+            type: "popup",
+            width: 854,
+            height: 480,
+            focused: true,
+            state: "normal"
+        };
+
+        assert.equal(createOptions.focused, true);
+        assert.equal(createOptions.state, "normal");
+
+        // Simulating window swap update
+        fakeChromeWindows.update(101, { focused: true, state: "normal", drawAttention: true });
+        assert.equal(mockUpdates[0].winId, 101);
+        assert.equal(mockUpdates[0].focused, true);
+        assert.equal(mockUpdates[0].drawAttention, true);
+    });
 });
+

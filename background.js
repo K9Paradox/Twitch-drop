@@ -571,6 +571,18 @@ async function handleWatchdogTick() {
                     } catch (e) {}
                 }
 
+                // Also check if all items in activeStream.campaigns are claimed or expired
+                if (!campaignClosed && activeStream.campaigns && activeStream.campaigns.length > 0) {
+                    const anyFarmable = activeStream.campaigns.some(c => {
+                        const items = c.items || c.drops || [];
+                        return items.some(i => !i.self?.isClaimed && (!i.endsAt || i.endsAt > now));
+                    });
+                    if (!anyFarmable) {
+                        console.log(`[Watchdog] All drop rewards for ${activeGame} are either claimed or ended.`);
+                        campaignClosed = true;
+                    }
+                }
+
                 if (campaignClosed) {
                     notifyUser("Drop Campaign Closed", `The drop campaign for ${activeGame} has ended.`);
                     if (activeStream.campaign) {
@@ -1512,7 +1524,15 @@ async function createCampaign(game, isManual = false) {
         if (Array.isArray(campDeets) && campDeets.length > 0) {
             for (const c of campDeets) {
                 const dropCamp = c?.data?.user?.dropCampaign || c?.data?.dropCampaign || c?.user?.dropCampaign || c?.dropCampaign;
-                if (dropCamp) itemsToProcess.push(dropCamp);
+                if (dropCamp) {
+                    const orig = matchingCampaigns.find(mc => mc && mc.id === dropCamp.id);
+                    if (orig) {
+                        if (!dropCamp.startAt && orig.startAt) dropCamp.startAt = orig.startAt;
+                        if (!dropCamp.endAt && orig.endAt) dropCamp.endAt = orig.endAt;
+                        if (!dropCamp.game && orig.game) dropCamp.game = orig.game;
+                    }
+                    itemsToProcess.push(dropCamp);
+                }
             }
         }
         if (itemsToProcess.length === 0) itemsToProcess = matchingCampaigns;
@@ -1522,6 +1542,10 @@ async function createCampaign(game, isManual = false) {
 
         for (const dropCamp of itemsToProcess) {
             if (!dropCamp) continue;
+            const inProgMatch = inventory?.dropCampaignsInProgress?.find(obj => obj && (obj.id === dropCamp.id || (obj.game && areGameNamesMatching(obj.game.displayName || obj.game.name, game))));
+            if (!dropCamp.endAt && inProgMatch?.endAt) dropCamp.endAt = inProgMatch.endAt;
+            if (!dropCamp.startAt && inProgMatch?.startAt) dropCamp.startAt = inProgMatch.startAt;
+
             if (dropCamp.endAt) {
                 const campEnd = new Date(dropCamp.endAt).getTime();
                 if (!isNaN(campEnd) && (earliestEndsAt === null || campEnd < earliestEndsAt)) {
@@ -1539,6 +1563,21 @@ async function createCampaign(game, isManual = false) {
             const allDrops = [];
 
             for (const drop of (dropCamp.timeBasedDrops || [])) {
+                let dropStartAt = drop.startAt || null;
+                let dropEndAt = drop.endAt || null;
+                if (inProgMatch && Array.isArray(inProgMatch.timeBasedDrops)) {
+                    const inProgDrop = inProgMatch.timeBasedDrops.find(d => d && (d.id === drop.id || (d.benefitEdges?.[0]?.benefit?.id && d.benefitEdges[0].benefit.id === drop.id)));
+                    if (inProgDrop) {
+                        if (!dropStartAt && inProgDrop.startAt) dropStartAt = inProgDrop.startAt;
+                        if (!dropEndAt && inProgDrop.endAt) dropEndAt = inProgDrop.endAt;
+                    }
+                }
+                if (!dropEndAt && dropCamp.endAt) dropEndAt = dropCamp.endAt;
+                if (!dropStartAt && dropCamp.startAt) dropStartAt = dropCamp.startAt;
+
+                const dropEndsAtTs = dropEndAt ? new Date(dropEndAt).getTime() : null;
+                const isEnded = Boolean(dropEndsAtTs && !isNaN(dropEndsAtTs) && dropEndsAtTs <= now);
+
                 const reqMins = drop.requiredMinutesWatched || 60;
                 if (reqMins > maxTime) maxTime = reqMins;
 
@@ -1562,8 +1601,18 @@ async function createCampaign(game, isManual = false) {
                         id: drop.id,
                         benefitId: benefitId,
                         badge: dropCamp.owner && dropCamp.owner.name === "Twitch Gaming",
+                        startAt: dropStartAt,
+                        endAt: dropEndAt,
+                        endsAt: dropEndsAtTs,
+                        isEnded: isEnded,
                         self: { isClaimed, currentMinutesWatched: currentWatched }
                     });
+
+                    if (!isClaimed && dropEndsAtTs && !isNaN(dropEndsAtTs) && dropEndsAtTs > now) {
+                        if (earliestEndsAt === null || dropEndsAtTs < earliestEndsAt) {
+                            earliestEndsAt = dropEndsAtTs;
+                        }
+                    }
                 }
             }
 
@@ -1592,7 +1641,9 @@ async function createCampaign(game, isManual = false) {
             activeStream.campaigns.push({
                 game: dropCamp.game ? (dropCamp.game.displayName || dropCamp.game.name) : game,
                 id: dropCamp.id,
-                endsAt: dropCamp.endAt ? new Date(dropCamp.endAt).getTime() : null,
+                endsAt: dropCamp.endAt ? new Date(dropCamp.endAt).getTime() : (earliestEndsAt || null),
+                startAt: dropCamp.startAt || null,
+                endAt: dropCamp.endAt || null,
                 minutesNeeded: maxTime,
                 minutesWatched: timeWatched,
                 streamers: streams,
@@ -1628,13 +1679,28 @@ async function createCampaign(game, isManual = false) {
                 const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (d.imageURL || d.imageAssetURL || "");
                 const benefitName = (benefit && benefit.name) ? (d.name ? `${d.name} - ${benefit.name}` : benefit.name) : (d.name || "Drop Reward");
 
+                const dropStartAt = d.startAt || inProgCamp.startAt || null;
+                const dropEndAt = d.endAt || inProgCamp.endAt || null;
+                const dropEndsAtTs = dropEndAt ? new Date(dropEndAt).getTime() : null;
+                const isEnded = Boolean(dropEndsAtTs && !isNaN(dropEndsAtTs) && dropEndsAtTs <= now);
+
                 items.push({
                     id: d.id,
                     name: benefitName,
                     picture: benefitImg,
                     reqTime: req,
+                    startAt: dropStartAt,
+                    endAt: dropEndAt,
+                    endsAt: dropEndsAtTs,
+                    isEnded: isEnded,
                     self: { isClaimed, currentMinutesWatched: watched }
                 });
+
+                if (!isClaimed && dropEndsAtTs && !isNaN(dropEndsAtTs) && dropEndsAtTs > now) {
+                    if (inProgEndsAt === null || dropEndsAtTs < inProgEndsAt) {
+                        inProgEndsAt = dropEndsAtTs;
+                    }
+                }
             }
         }
 
@@ -1656,7 +1722,14 @@ async function createCampaign(game, isManual = false) {
     }
 
     const totalDropsFound = activeStream.campaigns.reduce((sum, c) => sum + (c.items ? c.items.length : 0), 0);
-    if (activeStream.campaigns.length === 0 || totalDropsFound === 0) {
+    const hasFarmableDrops = activeStream.campaigns.some(camp =>
+        (camp.items || []).some(item => !item.self?.isClaimed && (!item.endsAt || item.endsAt > now))
+    );
+
+    if (activeStream.campaigns.length === 0 || totalDropsFound === 0 || !hasFarmableDrops) {
+        const allClaimed = totalDropsFound > 0 && activeStream.campaigns.every(c =>
+            (c.items || []).every(item => item.self?.isClaimed)
+        );
         activeStream.campaign = {
             game: { name: game },
             onCamp: 0,
@@ -1664,15 +1737,16 @@ async function createCampaign(game, isManual = false) {
             lastLoop: 0,
             allowGen: false,
             slug: gameSlug,
-            status: "no_active_drops",
+            status: allClaimed ? "completed" : "no_active_drops",
             isManual: Boolean(isManual),
             reOpening: false,
-            isCompleted: false,
+            isCompleted: allClaimed,
             skippedStreamers: [],
             lastMinutesWatched: 0,
             lastProgressTimestamp: Date.now(),
             stallCount: 0,
-            reopenAttempts: 0
+            reopenAttempts: 0,
+            endsAt: activeStream.campaign.endsAt || earliestEndsAt
         };
         activeStream.campaigns = [];
         await windowManager("close");
@@ -1689,7 +1763,7 @@ async function createCampaign(game, isManual = false) {
         // If this campaign was started automatically by Auto-Queue (not manual selection)
         // and there are no active drops, put this game on cooldown and immediately advance to the next game in queue!
         if (!isManual && autoDropGames.length > 0) {
-            console.log(`[AutoQueue] ${game} has no active drops, skipping to next game...`);
+            console.log(`[AutoQueue] ${game} has no active/farmable drops (all claimed or ended), skipping to next game...`);
             setGameCooldown(game, Date.now());
             setTimeout(() => advanceAutoQueue().catch(() => {}), 500);
         }
@@ -1700,12 +1774,18 @@ async function createCampaign(game, isManual = false) {
     if (isDone) {
         const allDone = activeStream.campaigns.every(c => {
             return (c.items && c.items.length > 0)
-                ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
+                ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)) || (i.endsAt && i.endsAt <= now))
                 : c.minutesWatched >= c.minutesNeeded;
         });
 
         if (allDone) {
-            activeStream.campaign.isCompleted = true;
+            const allClaimed = activeStream.campaigns.every(c =>
+                (c.items && c.items.length > 0)
+                    ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
+                    : c.minutesWatched >= c.minutesNeeded
+            );
+            activeStream.campaign.isCompleted = allClaimed;
+            activeStream.campaign.status = allClaimed ? "completed" : "no_active_drops";
             activeStream.campaign.curWatching = null;
             await windowManager("close");
             await saveState();
@@ -1764,6 +1844,8 @@ async function advanceAutoQueue(skippedGame) {
                 const timeBasedDrops = (campaignDetails && campaignDetails.timeBasedDrops) || campaign.timeBasedDrops || [];
 
                 for (const drop of timeBasedDrops) {
+                    const dropEnd = drop.endAt ? new Date(drop.endAt).getTime() : (drop.endsAt ? new Date(drop.endsAt).getTime() : NaN);
+                    if (!isNaN(dropEnd) && dropEnd <= now) continue;
                     const inProgDrop = inProgCamp?.timeBasedDrops?.find(d => d.id === drop.id);
                     const isClaimed = inProgDrop?.self?.isClaimed || drop?.self?.isClaimed;
                     const watched = inProgDrop?.self?.currentMinutesWatched || 0;
@@ -1945,13 +2027,20 @@ async function windowManager(func, data = {}) {
                 if (streamUrl && targetTab.url !== streamUrl) {
                     await chrome.tabs.update(targetTab.id, { url: streamUrl }).catch(() => {});
                 }
+                // Ensure popout window shows up on user screen (on stream swap) so user can interact to unmute
+                await chrome.windows.update(existingWin.id, {
+                    focused: true,
+                    state: "normal",
+                    drawAttention: true
+                }).catch(() => {});
             } else {
                 const win = await chrome.windows.create({
                     url: streamUrl,
                     type: "popup",
                     width: 854,
                     height: 480,
-                    focused: false
+                    focused: true,
+                    state: "normal"
                 }).catch(() => null);
 
                 if (win) {
@@ -1963,12 +2052,18 @@ async function windowManager(func, data = {}) {
                     curWindow.id = targetTab ? targetTab.id : 0;
                     curWindow.windowId = win.id;
                     curWindow.type = "window";
+                    // Ensure window is in front and ready on user's screen
+                    await chrome.windows.update(win.id, {
+                        focused: true,
+                        state: "normal",
+                        drawAttention: true
+                    }).catch(() => {});
                 }
             }
             await saveState();
         } else {
             const tabOptions = {
-                active: false,
+                active: true,
                 ...data,
                 url: streamUrl
             };
@@ -1982,7 +2077,9 @@ async function windowManager(func, data = {}) {
                     curWindow.type = "tab";
                     await saveState();
                     if (targetTab.url !== tabOptions.url) {
-                        await chrome.tabs.update(targetTab.id, { url: tabOptions.url }).catch(() => {});
+                        await chrome.tabs.update(targetTab.id, { url: tabOptions.url, active: true }).catch(() => {});
+                    } else {
+                        await chrome.tabs.update(targetTab.id, { active: true }).catch(() => {});
                     }
                 } else {
                     targetTab = await chrome.tabs.create(tabOptions);
@@ -2010,7 +2107,9 @@ async function windowManager(func, data = {}) {
                     }
                 }
                 if (tabOptions.url && targetTab.url !== tabOptions.url) {
-                    await chrome.tabs.update(curWindow.id, { url: tabOptions.url }).catch(() => {});
+                    await chrome.tabs.update(curWindow.id, { url: tabOptions.url, active: true }).catch(() => {});
+                } else {
+                    await chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
                 }
             }
         }
@@ -2029,9 +2128,6 @@ async function windowManager(func, data = {}) {
                     if (settings.autoMute !== false) {
                         chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
                         chrome.tabs.sendMessage(targetTab.id, { type: "setTabAudio", muted: true }).catch(() => {});
-                        if (!isPopout && prevActiveTab && prevActiveTab.id && prevActiveTab.id !== targetTab.id) {
-                            chrome.tabs.update(prevActiveTab.id, { active: true }).catch(() => {});
-                        }
                     } else {
                         chrome.tabs.update(targetTab.id, { muted: false }).catch(() => {});
                         chrome.tabs.sendMessage(targetTab.id, { type: "setTabAudio", muted: false }).catch(() => {});

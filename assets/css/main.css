@@ -1029,6 +1029,31 @@ body {
     color: var(--twitch-purple-light);
 }
 
+.endedBadge {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.rewardEndDate {
+    display: block;
+    font-size: 10px;
+    color: var(--text-muted, #94a3b8);
+    margin-top: 3px;
+}
+
+.rewardEndDateExpired {
+    color: #f87171;
+    font-weight: 600;
+}
+
+.activeRewardEndDate {
+    display: block;
+    font-size: 10px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
 /* Auto Games Queue */
 .autoGamesNoticeCard {
     background: rgba(145, 70, 255, 0.06);

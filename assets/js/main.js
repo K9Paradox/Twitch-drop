@@ -972,6 +972,24 @@ function filterDropdownItems(query) {
     });
 }
 
+function formatDropEndDate(dateVal) {
+    if (!dateVal) return "";
+    try {
+        const d = new Date(dateVal);
+        if (isNaN(d.getTime())) return "";
+        return d.toLocaleDateString("en-US", {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            timeZoneName: "short"
+        });
+    } catch (e) {
+        return "";
+    }
+}
+
 function updateDropProgressUI(data) {
     if (!data || !data.activeStream || data.activeStream.campaign === "none" || !data.activeStream.campaign) {
         $("#stopCampaignBtn").hide();
@@ -1119,6 +1137,7 @@ function updateDropProgressUI(data) {
                     return reqA - reqB;
                 });
 
+                const now = Date.now();
                 allClaimed = true;
                 allItems.forEach(i => {
                     const req = i.reqTime || i.requiredMinutesWatched || 60;
@@ -1126,7 +1145,11 @@ function updateDropProgressUI(data) {
                         ? i.self.currentMinutesWatched
                         : (curCamp.minutesWatched || 0);
                     const isClaimed = Boolean((i.self && i.self.isClaimed === true) || (itemWatched >= req && req > 0));
+                    const dropEnd = i.endAt ? new Date(i.endAt).getTime() : (i.endsAt ? new Date(i.endsAt).getTime() : (curCamp.endsAt || NaN));
+                    const isEnded = Boolean(!isNaN(dropEnd) && dropEnd <= now);
+
                     i._computedClaimed = isClaimed;
+                    i._computedEnded = isEnded;
                     i._computedWatched = itemWatched;
                     i._computedReq = req;
 
@@ -1135,7 +1158,9 @@ function updateDropProgressUI(data) {
                     }
                 });
 
-                currentRewardItem = allItems.find(i => !i._computedClaimed) || allItems[allItems.length - 1];
+                currentRewardItem = allItems.find(i => !i._computedClaimed && !i._computedEnded)
+                    || allItems.find(i => !i._computedClaimed)
+                    || allItems[allItems.length - 1];
             } else {
                 allClaimed = false;
             }
@@ -1148,14 +1173,24 @@ function updateDropProgressUI(data) {
         $(".dropProgressContainer").prepend(detailsBox);
     }
 
-    // ALL DROPS FOR GAME COMPLETED
-    if (allItems.length > 0 && allClaimed) {
-        $("#dropStatus").text(`All drops for ${gameName} completed`);
-        $("#dropGame").html(`Game: <strong style="color:var(--emerald-green);">${escapeHtml(gameName)}</strong> &bull; All Rewards Claimed`);
-        $("#headerStatusPill").html('<span class="statusDot activeDot"></span><span>Completed</span>').addClass("activePill");
-        $(".progressBarInner").css({ "width": "100%", "background": "linear-gradient(90deg, #00f59b 0%, #00d684 100%)" });
-        $(".progressPercentText").text("100% (All Rewards Claimed)");
-        $("#streamToolbar").hide();
+    // ALL DROPS FOR GAME COMPLETED OR ENDED
+    const allEndedOrClaimed = allItems.length > 0 && allItems.every(i => i._computedClaimed || i._computedEnded);
+    if (allItems.length > 0 && (allClaimed || allEndedOrClaimed)) {
+        if (allClaimed) {
+            $("#dropStatus").text(`All drops for ${gameName} completed`);
+            $("#dropGame").html(`Game: <strong style="color:var(--emerald-green);">${escapeHtml(gameName)}</strong> &bull; All Rewards Claimed`);
+            $("#headerStatusPill").html('<span class="statusDot activeDot"></span><span>Completed</span>').addClass("activePill");
+            $(".progressBarInner").css({ "width": "100%", "background": "linear-gradient(90deg, #00f59b 0%, #00d684 100%)" });
+            $(".progressPercentText").text("100% (All Rewards Claimed)");
+            $("#streamToolbar").hide();
+        } else {
+            $("#dropStatus").text(`All active drops for ${gameName} ended`);
+            $("#dropGame").html(`Game: <strong style="color:#f0a232;">${escapeHtml(gameName)}</strong> &bull; Campaign Ended`);
+            $("#headerStatusPill").html('<span class="statusDot pausedDot"></span><span>Ended</span>').removeClass("activePill");
+            $(".progressBarInner").css({ "width": "100%", "background": "#52525b" });
+            $(".progressPercentText").text("Campaign Closed");
+            $("#streamToolbar").hide();
+        }
 
         const iconsHtml = allItems.map(item => {
             const pic = item.picture || item.imageAssetURL || item.imageURL || "";
@@ -1163,6 +1198,7 @@ function updateDropProgressUI(data) {
             const title = item.name || item.title || "Reward";
             const reqMins = item.reqTime || item.requiredMinutesWatched || 60;
             const safePic = hasImg ? encodeURI(pic) : "";
+            const isEnded = Boolean(item._computedEnded && !item._computedClaimed);
 
             const imgMarkup = hasImg
                 ? `<img src="${safePic}" class="completedThumb img-with-fallback" alt="${escapeHtml(title)}">
@@ -1170,9 +1206,12 @@ function updateDropProgressUI(data) {
                 : `<div class="rewardGlyphBox miniGlyph">${GIFT_SVG_ICON}</div>`;
 
             return `
-                <div class="completedRewardIconCard" title="${escapeHtml(title)} (${reqMins} min requirement)">
+                <div class="completedRewardIconCard ${isEnded ? "endedIconCard" : ""}" title="${escapeHtml(title)} (${reqMins} min requirement)${isEnded ? " - Ended" : ""}">
                     ${imgMarkup}
-                    <svg class="completedBadgeCheck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    ${isEnded
+                        ? `<span class="completedBadgeCheck" style="color:#f87171; font-weight:bold; font-size:12px;">✕</span>`
+                        : `<svg class="completedBadgeCheck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>`
+                    }
                     <span class="completedRewardLabel">${escapeHtml(title)}</span>
                 </div>
             `;
@@ -1181,8 +1220,8 @@ function updateDropProgressUI(data) {
         detailsBox.html(`
             <div class="allCompletedCardBox">
                 <div class="completedHeader">
-                    <span class="completedTitle">All Running Drops for ${escapeHtml(gameName)} Completed</span>
-                    <span class="completedSub">All rewards claimed & in your inventory</span>
+                    <span class="completedTitle">${allClaimed ? `All Running Drops for ${escapeHtml(gameName)} Completed` : `Drops for ${escapeHtml(gameName)} Closed`}</span>
+                    <span class="completedSub">${allClaimed ? "All rewards claimed & in your inventory" : "All drops for this campaign have reached their scheduled end time"}</span>
                 </div>
                 ${allItems.length > 0 ? `<div class="completedGridRow">${iconsHtml}</div>` : ""}
             </div>
@@ -1224,12 +1263,17 @@ function updateDropProgressUI(data) {
            <div class="rewardGlyphBox" style="display:none;">${GIFT_SVG_ICON}</div>`
         : `<div class="rewardGlyphBox">${GIFT_SVG_ICON}</div>`;
 
+    const activeEndDate = currentRewardItem ? (currentRewardItem.endAt || currentRewardItem.endsAt || curCampObj?.endAt || curCampObj?.endsAt) : (curCampObj?.endAt || curCampObj?.endsAt);
+    const formattedActiveEnd = activeEndDate ? formatDropEndDate(activeEndDate) : "";
+    const activeEndHtml = formattedActiveEnd ? `<span class="activeRewardEndDate">End Date: ${escapeHtml(formattedActiveEnd)}</span>` : "";
+
     detailsBox.html(`
         <div class="activeRewardItem">
             ${imageHtml}
             <div class="activeRewardMeta">
                 <span class="activeRewardTitle" title="${escapeHtml(rewardName)}">${escapeHtml(rewardName)}</span>
                 <span class="activeRewardSub">${percent}% completed &bull; ${etaText}</span>
+                ${activeEndHtml}
             </div>
         </div>
     `);
@@ -1317,6 +1361,7 @@ function renderActiveDropsList(activeStream) {
 
     const campaigns = Array.isArray(activeStream.campaigns) ? activeStream.campaigns : [];
     const allRewardsList = [];
+    const now = Date.now();
 
     campaigns.forEach((campaignObj) => {
         if (!campaignObj) return;
@@ -1333,6 +1378,10 @@ function renderActiveDropsList(activeStream) {
 
                 const isClaimed = Boolean((drop.self && drop.self.isClaimed === true) || (itemMinsWatched >= minsNeeded && minsNeeded > 0));
 
+                const dropEnd = drop.endAt || drop.endsAt || campaignObj.endAt || campaignObj.endsAt || null;
+                const dropEndsAtTs = dropEnd ? new Date(dropEnd).getTime() : null;
+                const isEnded = Boolean(dropEndsAtTs && !isNaN(dropEndsAtTs) && dropEndsAtTs <= now);
+
                 let imgUrl = drop.picture || drop.imageAssetURL || drop.imageURL || "";
                 if (drop.benefitEdges && Array.isArray(drop.benefitEdges) && drop.benefitEdges[0]) {
                     const benefit = drop.benefitEdges[0].benefit || drop.benefitEdges[0].node;
@@ -1346,6 +1395,9 @@ function renderActiveDropsList(activeStream) {
                     minsNeeded,
                     minsWatched: itemMinsWatched,
                     isClaimed,
+                    isEnded,
+                    endAt: dropEnd,
+                    endsAt: dropEndsAtTs,
                     imgUrl
                 });
             });
@@ -1379,20 +1431,39 @@ function renderActiveDropsList(activeStream) {
     }
 
     allRewardsList.sort((a, b) => {
-        if (a.isClaimed !== b.isClaimed) {
-            return a.isClaimed ? 1 : -1;
-        }
+        // Priority: Active unexpired (0) -> Claimed (1) -> Ended uncompleted (2)
+        const getPriority = (item) => {
+            if (item.isClaimed) return 1;
+            if (item.isEnded) return 2;
+            return 0;
+        };
+        const pA = getPriority(a);
+        const pB = getPriority(b);
+        if (pA !== pB) return pA - pB;
         return a.minsNeeded - b.minsNeeded;
     });
 
     allRewardsList.forEach((reward) => {
-        const statusClass = reward.isClaimed ? "claimedBadge" : "pendingBadge";
-        let statusText = reward.isClaimed ? "Claimed" : "In Progress";
+        let statusClass = "pendingBadge";
+        let statusText = "In Progress";
 
-        if (!reward.isClaimed) {
+        if (reward.isClaimed) {
+            statusClass = "claimedBadge";
+            statusText = "Claimed";
+        } else if (reward.isEnded) {
+            statusClass = "endedBadge";
+            statusText = "Ended";
+        } else {
             const pct = Math.min(100, Math.round((reward.minsWatched / Math.max(1, reward.minsNeeded)) * 100));
             statusText = `${pct}% (${reward.minsWatched}/${reward.minsNeeded}m)`;
         }
+
+        const formattedEndDate = reward.endAt ? formatDropEndDate(reward.endAt) : "";
+        const endDateMarkup = formattedEndDate ? `
+            <span class="rewardEndDate ${reward.isEnded && !reward.isClaimed ? "rewardEndDateExpired" : ""}">
+                End Date: ${escapeHtml(formattedEndDate)}
+            </span>
+        ` : "";
 
         const hasValidImg = reward.imgUrl && (typeof reward.imgUrl === "string") && (reward.imgUrl.startsWith("http://") || reward.imgUrl.startsWith("https://"));
         const safeRewardImg = hasValidImg ? encodeURI(reward.imgUrl) : "";
@@ -1402,11 +1473,12 @@ function renderActiveDropsList(activeStream) {
             : `<div class="rewardGlyphBox">${GIFT_SVG_ICON}</div>`;
 
         const card = $(`
-            <div class="dropRewardCard ${reward.isClaimed ? "isClaimedCard" : ""}">
+            <div class="dropRewardCard ${reward.isClaimed ? "isClaimedCard" : ""} ${reward.isEnded && !reward.isClaimed ? "isEndedCard" : ""}">
                 ${imgMarkup}
                 <div class="rewardInfo">
                     <span class="rewardName" title="${escapeHtml(reward.title)}">${escapeHtml(reward.title)}</span>
                     <span class="rewardTime">Requirement: ${reward.minsNeeded} minutes</span>
+                    ${endDateMarkup}
                 </div>
                 <span class="rewardBadge ${statusClass}">${statusText}</span>
             </div>
