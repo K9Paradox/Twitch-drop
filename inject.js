@@ -2,7 +2,7 @@
 
 const injectIntervals = [];
 
-chrome.storage.local.get(["exEnabled"]).then((val) => {
+chrome.storage.local.get(["exEnabled", "settings"]).then((val) => {
     const isEnabled = val.exEnabled !== undefined ? val.exEnabled : true;
     if (isEnabled) {
         window.addEventListener("message", (e) => {
@@ -151,7 +151,22 @@ chrome.storage.local.get(["exEnabled"]).then((val) => {
             }
         }
 
-        injectScript("onPage.js");
+        injectScript("onPage.js", () => {
+            window.postMessage({
+                autoTwitchDrops: {
+                    type: "farmMode",
+                    enabled: isFarmMode
+                }
+            }, "*");
+            if (val.settings && typeof val.settings === "object") {
+                window.postMessage({
+                    autoTwitchDrops: {
+                        type: "settingsChanged",
+                        settings: val.settings
+                    }
+                }, "*");
+            }
+        });
 
         window.addEventListener("beforeunload", () => {
             injectIntervals.forEach(id => clearInterval(id));
@@ -211,9 +226,14 @@ function getCookieValue(cookieName) {
     return "";
 }
 
-function injectScript(src) {
+function injectScript(src, onLoadCallback) {
     const s = document.createElement("script");
     s.src = chrome.runtime.getURL(src);
-    s.onload = () => s.remove();
+    s.onload = () => {
+        if (typeof onLoadCallback === "function") {
+            try { onLoadCallback(); } catch (e) {}
+        }
+        s.remove();
+    };
     (document.head || document.documentElement).appendChild(s);
 }

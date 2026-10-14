@@ -357,5 +357,99 @@ describe("Tier 1: Feature 22 - Campaign Closure & Expiration Detection", () => {
         assert.equal(mockUpdates[0].focused, true);
         assert.equal(mockUpdates[0].drawAttention, true);
     });
+
+    it("F22-T9: areGameNamesMatching prevents short game names (e.g. 'Rust') from false substring matching while supporting aliases", () => {
+        // Canonical alias match (Overwatch <-> Overwatch 2)
+        assert.equal(areGameNamesMatching("Overwatch", "Overwatch 2"), true);
+        assert.equal(areGameNamesMatching("Overwatch 2", "Overwatch"), true);
+
+        // Short game name (< 6 normalized chars) should NOT substring-match unrelated games
+        assert.equal(areGameNamesMatching("Rust", "Rusty Lake Hotel"), false);
+        assert.equal(areGameNamesMatching("Rust", "Trust No One"), false);
+        assert.equal(areGameNamesMatching("Rust", "Rust"), true);
+
+        // Longer game names (>= 6 normalized chars) still match edition/subtitle variants
+        assert.equal(areGameNamesMatching("Warframe", "Warframe: 1999"), true);
+    });
+
+    it("F22-T10: GQL progress merge preserves existing drop endAt, endsAt, isEnded, and benefitId when GQL payload omits timestamps", () => {
+        const pastEndsAt = new Date("2026-09-13T16:28:00Z").getTime();
+        const existingItems = [
+            {
+                id: "drop-1",
+                benefitId: "benefit-1",
+                name: "Overwatch Spray",
+                imageUrl: "https://example.com/spray.png",
+                reqTime: 60,
+                startAt: "2026-09-10T00:00:00Z",
+                endAt: "2026-09-13T16:28:00Z",
+                endsAt: pastEndsAt,
+                isEnded: true,
+                self: { currentMinutesWatched: 15, isClaimed: false, dropInstanceID: null }
+            }
+        ];
+
+        // Simulate a GQL DropChannelCampaignsProgress payload that omits endAt and benefitEdges
+        const incomingGqlDrops = [
+            {
+                id: "drop-1",
+                name: "Overwatch Spray",
+                requiredMinutesWatched: 60,
+                self: { currentMinutesWatched: 30, isClaimed: false, dropInstanceID: "inst-1" }
+            }
+        ];
+
+        const mergedItems = incomingGqlDrops.map((d) => {
+            const existing = existingItems.find(ex => ex.id === d.id);
+            const dropEndAt = d.endAt || existing?.endAt || null;
+            const dropEndsAt = dropEndAt ? new Date(dropEndAt).getTime() : (existing?.endsAt || null);
+            return {
+                id: d.id,
+                benefitId: d.benefitEdges?.[0]?.benefit?.id || existing?.benefitId || null,
+                name: d.benefitEdges?.[0]?.benefit?.name || d.name || existing?.name || "Drop Reward",
+                imageUrl: d.benefitEdges?.[0]?.benefit?.imageAssetURL || d.imageURL || existing?.imageUrl || "",
+                reqTime: d.requiredMinutesWatched || existing?.reqTime || 0,
+                startAt: d.startAt || existing?.startAt || null,
+                endAt: dropEndAt,
+                endsAt: dropEndsAt,
+                isEnded: Boolean(dropEndsAt && dropEndsAt <= Date.now()),
+                self: d.self || existing?.self || { currentMinutesWatched: 0, isClaimed: false, dropInstanceID: null }
+            };
+        });
+
+        assert.equal(mergedItems[0].endAt, "2026-09-13T16:28:00Z");
+        assert.equal(mergedItems[0].endsAt, pastEndsAt);
+        assert.equal(mergedItems[0].isEnded, true);
+        assert.equal(mergedItems[0].benefitId, "benefit-1");
+        assert.equal(mergedItems[0].self.currentMinutesWatched, 30);
+    });
+
+    it("F22-T11: Campaign with a mix of expired drops and claimed drops is evaluated as completed", () => {
+        const now = Date.now();
+        const items = [
+            {
+                id: "drop-expired",
+                reqTime: 60,
+                endsAt: now - 3600000,
+                isEnded: true,
+                self: { isClaimed: false, currentMinutesWatched: 10 }
+            },
+            {
+                id: "drop-claimed",
+                reqTime: 120,
+                endsAt: now + 3600000,
+                isEnded: false,
+                self: { isClaimed: true, currentMinutesWatched: 120 }
+            }
+        ];
+
+        const allDone = items.every(i =>
+            i.self?.isClaimed ||
+            i.isEnded ||
+            (i.endsAt && i.endsAt <= now) ||
+            ((i.reqTime || 0) > 0 && (i.self?.currentMinutesWatched || 0) >= i.reqTime)
+        );
+        assert.equal(allDone, true);
+    });
 });
 

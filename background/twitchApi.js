@@ -876,7 +876,7 @@ export function areGameNamesMatching(gameA, gameB) {
     if (!normA || !normB) return false;
     if (normA === normB) return true;
 
-    if (normA.length >= 4 && normB.length >= 4) {
+    if (normA.length >= 6 && normB.length >= 6) {
         if (normA.includes(normB) || normB.includes(normA)) {
             return true;
         }

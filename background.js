@@ -316,6 +316,7 @@ function syncCampaignProgressWithInventory(inventory) {
         if (matchedDropCamp && matchedDropCamp.timeBasedDrops) {
             let maxWatchedInCamp = 0;
             let allDropsClaimedInCamp = true;
+            const nowTs = Date.now();
 
             if (!curCamp.items || curCamp.items.length === 0) {
                 curCamp.items = [];
@@ -324,12 +325,20 @@ function syncCampaignProgressWithInventory(inventory) {
                     const req = d.requiredMinutesWatched || 60;
                     const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (d.imageURL || d.imageAssetURL || "");
                     const benefitName = (benefit && benefit.name) ? (d.name ? `${d.name} - ${benefit.name}` : benefit.name) : (d.name || "Drop Reward");
+                    const dropEnd = d.endAt || matchedDropCamp.endAt || null;
+                    const dropEndsAt = dropEnd ? new Date(dropEnd).getTime() : null;
+                    const isEnded = Boolean(dropEndsAt && !isNaN(dropEndsAt) && dropEndsAt <= nowTs);
                     
                     curCamp.items.push({
                         id: d.id,
+                        benefitId: benefit?.id || null,
                         name: benefitName,
                         picture: benefitImg,
                         reqTime: req,
+                        startAt: d.startAt || matchedDropCamp.startAt || null,
+                        endAt: dropEnd,
+                        endsAt: (dropEndsAt && !isNaN(dropEndsAt)) ? dropEndsAt : null,
+                        isEnded,
                         self: {
                             isClaimed: Boolean(d.self && d.self.isClaimed),
                             currentMinutesWatched: (d.self && d.self.currentMinutesWatched !== undefined) ? d.self.currentMinutesWatched : 0
@@ -353,18 +362,33 @@ function syncCampaignProgressWithInventory(inventory) {
                     maxWatchedInCamp = currentWatched;
                 }
 
-                if (!isExplicitlyClaimed && currentWatched < reqMinutes) {
+                const dropEnd = drop.endAt || matchedDropCamp.endAt || null;
+                const dropEndsAt = dropEnd ? new Date(dropEnd).getTime() : null;
+                const isDropEnded = Boolean(dropEndsAt && !isNaN(dropEndsAt) && dropEndsAt <= nowTs);
+
+                if (!isExplicitlyClaimed && !isDropEnded && currentWatched < reqMinutes) {
                     allDropsClaimedInCamp = false;
                 }
 
                 if (curCamp.items) {
-                    const matchedItem = curCamp.items.find(i => i.id === drop.id || (drop.benefitEdges && drop.benefitEdges[0] && i.benefitId === drop.benefitEdges[0].benefit.id));
+                    const benefit = drop.benefitEdges && drop.benefitEdges[0] ? (drop.benefitEdges[0].benefit || drop.benefitEdges[0].node) : null;
+                    const matchedItem = curCamp.items.find(i => i.id === drop.id || (benefit && benefit.id && i.benefitId === benefit.id));
                     if (matchedItem) {
                         matchedItem.self = matchedItem.self || {};
                         matchedItem.self.isClaimed = isExplicitlyClaimed;
                         matchedItem.self.currentMinutesWatched = currentWatched;
-                        if (drop.benefitEdges && drop.benefitEdges[0] && drop.benefitEdges[0].benefit.imageAssetURL) {
-                            matchedItem.picture = drop.benefitEdges[0].benefit.imageAssetURL;
+                        if (benefit && benefit.imageAssetURL) {
+                            matchedItem.picture = benefit.imageAssetURL;
+                        }
+                        if (benefit && benefit.id && !matchedItem.benefitId) {
+                            matchedItem.benefitId = benefit.id;
+                        }
+                        if (dropEnd) {
+                            matchedItem.endAt = dropEnd;
+                            if (dropEndsAt && !isNaN(dropEndsAt)) {
+                                matchedItem.endsAt = dropEndsAt;
+                                matchedItem.isEnded = isDropEnded;
+                            }
                         }
                     }
                 }
@@ -377,6 +401,7 @@ function syncCampaignProgressWithInventory(inventory) {
             }
         } else {
             let allItemsClaimed = true;
+            const nowTs = Date.now();
             if (curCamp.items && curCamp.items.length > 0) {
                 for (const item of curCamp.items) {
                     const req = item.reqTime || curCamp.minutesNeeded || 60;
@@ -384,8 +409,9 @@ function syncCampaignProgressWithInventory(inventory) {
                     item.self = item.self || {};
                     item.self.isClaimed = isClaimed;
                     const itemWatched = item.self.currentMinutesWatched || 0;
+                    const itemEnded = Boolean((item.endsAt && item.endsAt <= nowTs) || item.isEnded);
 
-                    if (!isClaimed && itemWatched < req) {
+                    if (!isClaimed && !itemEnded && itemWatched < req) {
                         allItemsClaimed = false;
                     }
                 }
@@ -608,9 +634,10 @@ async function handleWatchdogTick() {
                 await checkClaimDrop();
 
                 if (isDone) {
+                    const nowTs = Date.now();
                     const allDone = activeStream.campaigns && activeStream.campaigns.every(c => {
                         return (c.items && c.items.length > 0)
-                            ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
+                            ? c.items.every(i => (i.self && i.self.isClaimed) || (i.endsAt && i.endsAt <= nowTs) || i.isEnded || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
                             : c.minutesWatched >= c.minutesNeeded;
                     });
 
@@ -801,6 +828,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         }
                     } else if (opName === "Inventory") {
                         const inProg = payload?.currentUser?.inventory?.dropCampaignsInProgress || [];
+                        const nowTs = Date.now();
                         for (const c of inProg) {
                             const gName = c.game?.displayName || c.game?.name || "";
                             if (c.timeBasedDrops && c.timeBasedDrops.length > 0) {
@@ -808,13 +836,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     const benefit = d.benefitEdges?.[0]?.benefit || d.benefitEdges?.[0]?.node;
                                     const benefitImg = benefit?.imageAssetURL || benefit?.imageURL || d.imageURL || d.imageAssetURL || "";
                                     const benefitName = benefit?.name ? (d.name ? `${d.name} - ${benefit.name}` : benefit.name) : (d.name || "Drop Reward");
+                                    const dropEnd = d.endAt || c.endAt || null;
+                                    const dropEndsAt = dropEnd ? new Date(dropEnd).getTime() : null;
+                                    const isEnded = Boolean(dropEndsAt && !isNaN(dropEndsAt) && dropEndsAt <= nowTs);
                                     
                                     extractedItems.push({
                                         id: d.id,
+                                        benefitId: benefit?.id || null,
                                         gameName: gName,
                                         name: benefitName,
                                         picture: benefitImg,
                                         reqTime: d.requiredMinutesWatched || 60,
+                                        startAt: d.startAt || c.startAt || null,
+                                        endAt: dropEnd,
+                                        endsAt: (dropEndsAt && !isNaN(dropEndsAt)) ? dropEndsAt : null,
+                                        isEnded,
                                         self: {
                                             isClaimed: Boolean(d.self?.isClaimed),
                                             currentMinutesWatched: (d.self?.currentMinutesWatched !== undefined) ? d.self.currentMinutesWatched : 0
@@ -825,6 +861,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         }
                     } else if (opName === "DropChannelCampaignsProgress") {
                         const camps = payload?.channel?.dropCampaignsProgress || payload?.user?.dropCampaignsProgress || [];
+                        const nowTs = Date.now();
                         for (const c of camps) {
                             const gName = c.game?.displayName || c.game?.name || "";
                             if (c.timeBasedDrops && c.timeBasedDrops.length > 0) {
@@ -832,13 +869,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     const benefit = d.benefitEdges?.[0]?.benefit || d.benefitEdges?.[0]?.node;
                                     const benefitImg = benefit?.imageAssetURL || benefit?.imageURL || d.imageURL || d.imageAssetURL || "";
                                     const benefitName = benefit?.name ? (d.name ? `${d.name} - ${benefit.name}` : benefit.name) : (d.name || "Drop Reward");
+                                    const dropEnd = d.endAt || c.endAt || null;
+                                    const dropEndsAt = dropEnd ? new Date(dropEnd).getTime() : null;
+                                    const isEnded = Boolean(dropEndsAt && !isNaN(dropEndsAt) && dropEndsAt <= nowTs);
 
                                     extractedItems.push({
                                         id: d.id,
+                                        benefitId: benefit?.id || null,
                                         gameName: gName,
                                         name: benefitName,
                                         picture: benefitImg,
                                         reqTime: d.requiredMinutesWatched || 60,
+                                        startAt: d.startAt || c.startAt || null,
+                                        endAt: dropEnd,
+                                        endsAt: (dropEndsAt && !isNaN(dropEndsAt)) ? dropEndsAt : null,
+                                        isEnded,
                                         self: {
                                             isClaimed: Boolean(d.self?.isClaimed),
                                             currentMinutesWatched: (d.self?.currentMinutesWatched !== undefined) ? d.self.currentMinutesWatched : 0
@@ -856,9 +901,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             const matchedItems = extractedItems.filter(i => !i.gameName || areGameNamesMatching(i.gameName, activeGame));
 
                             if (matchedItems.length > 0) {
-                                curCamp.items = matchedItems;
-                                const highestWatched = Math.max(0, ...matchedItems.map(i => i.self?.currentMinutesWatched || 0));
-                                const highestReq = Math.max(60, ...matchedItems.map(i => i.reqTime || 60));
+                                const prevItems = Array.isArray(curCamp.items) ? curCamp.items : [];
+                                curCamp.items = matchedItems.map(newItem => {
+                                    const existing = prevItems.find(p => p.id === newItem.id || (p.benefitId && newItem.benefitId && p.benefitId === newItem.benefitId));
+                                    if (!existing) return newItem;
+                                    return {
+                                        ...existing,
+                                        ...newItem,
+                                        benefitId: newItem.benefitId || existing.benefitId || null,
+                                        picture: newItem.picture || existing.picture || "",
+                                        startAt: newItem.startAt || existing.startAt || null,
+                                        endAt: newItem.endAt || existing.endAt || null,
+                                        endsAt: newItem.endsAt || existing.endsAt || null,
+                                        isEnded: newItem.endAt ? newItem.isEnded : Boolean(existing.isEnded),
+                                        self: {
+                                            ...(existing.self || {}),
+                                            ...(newItem.self || {}),
+                                            isClaimed: Boolean(newItem.self?.isClaimed || existing.self?.isClaimed)
+                                        }
+                                    };
+                                });
+                                const highestWatched = Math.max(0, ...curCamp.items.map(i => i.self?.currentMinutesWatched || 0));
+                                const highestReq = Math.max(60, ...curCamp.items.map(i => i.reqTime || 60));
                                 curCamp.minutesWatched = highestWatched;
                                 curCamp.minutesNeeded = highestReq;
                             } else if (currentDrop) {
@@ -876,9 +940,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     curCamp.items = curCamp.items || [];
                                     curCamp.items.push({
                                         id: currentDrop.id,
+                                        benefitId: benefit?.id || null,
                                         name: dropTitle,
                                         picture: dropImg,
                                         reqTime: currentDrop.requiredMinutesWatched || 60,
+                                        startAt: currentDrop.startAt || curCamp.startAt || null,
+                                        endAt: currentDrop.endAt || curCamp.endAt || null,
+                                        endsAt: currentDrop.endAt ? new Date(currentDrop.endAt).getTime() : (curCamp.endsAt || null),
                                         self: {
                                             isClaimed: Boolean(currentDrop.isClaimed),
                                             currentMinutesWatched: currentDrop.currentMinutesWatched || 0
@@ -910,7 +978,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 logActivity("points", `+${pts} Channel Points`, "Twitch Channel", pts);
                                 await saveState();
                                 chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
-                                chrome.runtime.sendMessage({ type: "p:activityUpdated", data: { history: activityHistory } }).catch(() => {});
+                                chrome.runtime.sendMessage({ type: "p:activityUpdated", data: activityHistory }).catch(() => {});
                             }
                         }
                     } catch (e) {
@@ -929,7 +997,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         logActivity("points", `+${earned} Channel Points (Watch Bonus)`, "Twitch Stream", earned);
                         await saveState();
                         chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
-                        chrome.runtime.sendMessage({ type: "p:activityUpdated", data: { history: activityHistory } }).catch(() => {});
+                        chrome.runtime.sendMessage({ type: "p:activityUpdated", data: activityHistory }).catch(() => {});
                     }
                 }
                 sendResponse({ success: true });
@@ -1033,9 +1101,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         if (currentInventory && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns) {
                             const isDone = syncCampaignProgressWithInventory(currentInventory);
                             if (isDone && activeStream.campaign) {
+                                const nowTs = Date.now();
                                 const allDone = activeStream.campaigns.every(c => {
                                     return (c.items && c.items.length > 0)
-                                        ? c.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
+                                        ? c.items.every(i => (i.self && i.self.isClaimed) || (i.endsAt && i.endsAt <= nowTs) || i.isEnded || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
                                         : c.minutesWatched >= c.minutesNeeded;
                                 });
                                 if (allDone) {
@@ -1211,11 +1280,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 if (message.data && message.data[0]) {
                     const gameName = message.data[0];
                     const enable = message.data[1];
-                    if (enable && !autoDropGames.includes(gameName)) {
+                    if (enable && !autoDropGames.some(g => areGameNamesMatching(g, gameName))) {
                         autoDropGames.push(gameName);
                     } else if (!enable) {
-                        const idx = autoDropGames.indexOf(gameName);
-                        if (idx !== -1) autoDropGames.splice(idx, 1);
+                        autoDropGames = autoDropGames.filter(g => !areGameNamesMatching(g, gameName));
                     }
                     await saveState();
 
@@ -1263,14 +1331,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             case "streamPlaybackStarted":
                 if (pendingPlaybackHandshake && curWindow.id !== 0) {
-                    const { targetTabId, prevActiveTabId } = pendingPlaybackHandshake;
+                    const { targetTabId } = pendingPlaybackHandshake;
                     pendingPlaybackHandshake = null;
                     if (settings.autoMute !== false && targetTabId) {
                         chrome.tabs.update(targetTabId, { muted: true }).catch(() => {});
                         chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: true }).catch(() => {});
-                        if (prevActiveTabId && prevActiveTabId !== targetTabId) {
-                            chrome.tabs.update(prevActiveTabId, { active: true }).catch(() => {});
-                        }
                     } else if (targetTabId) {
                         chrome.tabs.update(targetTabId, { muted: false }).catch(() => {});
                         chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: false }).catch(() => {});
@@ -1378,9 +1443,10 @@ async function runCampaign(forceNextStreamer = false) {
     }
     activeStream.campaign.requiredStreamers = curCamp.streamers || [];
 
+    const nowTs = Date.now();
     let allDropsGot = activeStream.campaigns.every(camp => {
         if (camp.items && camp.items.length > 0) {
-            return camp.items.every(i => (i.self && i.self.isClaimed) || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)));
+            return camp.items.every(i => (i.self && i.self.isClaimed) || (i.endsAt && i.endsAt <= nowTs) || i.isEnded || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)));
         }
         return camp.minutesWatched >= camp.minutesNeeded && camp.minutesNeeded > 0;
     });
@@ -1906,11 +1972,23 @@ async function checkForDrops() {
                         continue;
                     }
 
-                    const endsAt = campaign.endAt ? new Date(campaign.endAt).getTime() : (now + 86400000);
+                    let endsAt = campaign.endAt ? new Date(campaign.endAt).getTime() : (now + 86400000);
+                    if (Array.isArray(campaign.timeBasedDrops) && campaign.timeBasedDrops.length > 0) {
+                        const activeDropEndTimes = campaign.timeBasedDrops
+                            .filter(d => d && d.endAt)
+                            .map(d => new Date(d.endAt).getTime())
+                            .filter(t => !Number.isNaN(t) && t > now);
+                        if (activeDropEndTimes.length > 0) {
+                            endsAt = Math.min(...activeDropEndTimes);
+                        }
+                    }
                     if (endsAt <= now) continue;
 
-                    if (!gamesToRun.some((g) => areGameNamesMatching(g.game, gameName))) {
+                    const existingEntry = gamesToRun.find((g) => areGameNamesMatching(g.game, gameName));
+                    if (!existingEntry) {
                         gamesToRun.push({ game: gameName, endsAt });
+                    } else if (endsAt < existingEntry.endsAt) {
+                        existingEntry.endsAt = endsAt;
                     }
                 }
             }
@@ -1956,7 +2034,7 @@ async function checkClaimDrop() {
                             notifyUser("Drop Reward Claimed!", `Successfully claimed ${rewardTitle} for ${gameName}`);
                             await saveState();
                             chrome.runtime.sendMessage({ type: "p:statsUpdated", data: extStats }).catch(() => {});
-                            chrome.runtime.sendMessage({ type: "p:activityUpdated", data: { history: activityHistory } }).catch(() => {});
+                            chrome.runtime.sendMessage({ type: "p:activityUpdated", data: activityHistory }).catch(() => {});
                             chrome.runtime.sendMessage({ type: "p:rewardClaimedSound" }).catch(() => {});
                         }
                     } catch (err) {
@@ -2114,7 +2192,7 @@ async function windowManager(func, data = {}) {
             }
         }
 
-        // Store handshake state to switch back once stream actually starts playing
+        // Store handshake state to apply audio settings once stream starts playing
         pendingPlaybackHandshake = {
             targetTabId: targetTab?.id,
             prevActiveTabId: prevActiveTab?.id,
@@ -2178,8 +2256,9 @@ function updateBadgeUI() {
                 const cur = activeStream.campaigns[camp.onCamp || 0] || activeStream.campaigns[0];
                 if (cur) {
                     let left = 0;
+                    const nowMs = Date.now();
                     if (cur.items && cur.items.length > 0) {
-                        const nextItem = cur.items.find(i => !i.self?.isClaimed && (i.self?.currentMinutesWatched || 0) < (i.reqTime || 60));
+                        const nextItem = cur.items.find(i => !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowMs) && (i.self?.currentMinutesWatched || 0) < (i.reqTime || 60));
                         if (nextItem) {
                             const req = nextItem.reqTime || 60;
                             const watched = nextItem.self?.currentMinutesWatched || 0;

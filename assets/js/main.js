@@ -48,7 +48,7 @@ function areGameNamesMatching(gameA, gameB) {
     if (!normA || !normB) return false;
     if (normA === normB) return true;
 
-    if (normA.length >= 4 && normB.length >= 4) {
+    if (normA.length >= 6 && normB.length >= 6) {
         if (normA.includes(normB) || normB.includes(normA)) {
             return true;
         }
@@ -127,6 +127,7 @@ $(() => {
             "extStats",
             "activityHistory",
             "autoDropGames",
+            "activeDropGames",
             "listOfConnected",
             "activeStream",
             "oauthToken",
@@ -261,7 +262,11 @@ $(() => {
                 populateGameDropdown(merged.map(g => ({ game: { displayName: g } })));
             }
 
-            // Auto drop games queue
+            // Active drop games & auto drop games queue
+            if (changes.activeDropGames && Array.isArray(changes.activeDropGames.newValue)) {
+                currentAutoGamesData.allConnected = changes.activeDropGames.newValue;
+                populateAutoGamesGrid(currentAutoGamesData);
+            }
             if (changes.autoDropGames && Array.isArray(changes.autoDropGames.newValue)) {
                 currentAutoGamesData.enabled = changes.autoDropGames.newValue;
                 populateAutoGamesGrid(currentAutoGamesData);
@@ -449,7 +454,7 @@ $(() => {
             chrome.runtime.sendMessage({ type: "p:startAutoQueue" }).then(res => {
                 if (res && res.success) {
                     showToast("Auto Queue started! Finding live streams...");
-                    $(".navItem[data-page='streamPage']").trigger("click");
+                    $(".navItem[data-page='mainPage']").trigger("click");
                 }
             }).catch(() => {});
         }
@@ -568,7 +573,7 @@ $(() => {
 
         $("#dropStatus").text(`Farming: ${selectedGame}`);
         $("#dropGame").text(`Finding live drop stream for ${selectedGame}...`);
-        $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>${selectedGame}</span>`).addClass("activePill");
+        $("#headerStatusPill").html(`<span class="statusDot activeDot"></span><span>${escapeHtml(selectedGame)}</span>`).addClass("activePill");
 
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
             chrome.runtime.sendMessage({ type: "p:startCampaign", data: { campaign: selectedGame, manual: true } }).then(() => {
@@ -860,12 +865,18 @@ function renderActivityHistory(history) {
     const list = $("#activityHistoryList");
     list.empty();
 
-    if (!Array.isArray(history) || history.length === 0) {
+    const items = Array.isArray(history)
+        ? history
+        : (Array.isArray(history?.history)
+            ? history.history
+            : (Array.isArray(history?.activityHistory) ? history.activityHistory : []));
+
+    if (!Array.isArray(items) || items.length === 0) {
         list.html(`<p class="subText">No claims recorded yet. As rewards and points are claimed, they will appear here in real time.</p>`);
         return;
     }
 
-    history.forEach(item => {
+    items.forEach(item => {
         if (!item || typeof item !== "object") return;
         const timeAgo = formatTimeAgo(item.timestamp ? new Date(item.timestamp) : new Date());
         const hasValidImg = item.imgUrl && (typeof item.imgUrl === "string") && (item.imgUrl.startsWith("http://") || item.imgUrl.startsWith("https://"));
@@ -1516,7 +1527,7 @@ function renderClaimedInventory(claimedDrops) {
                <div class="claimedDropGlyph" style="display:none;">${GIFT_SVG_ICON}</div>`
             : `<div class="claimedDropGlyph">${GIFT_SVG_ICON}</div>`;
 
-        const subText = [gameName, timeAgo ? `Claimed ${timeAgo}` : ""].filter(Boolean).join(" &bull; ");
+        const subText = [escapeHtml(gameName), timeAgo ? `Claimed ${escapeHtml(timeAgo)}` : ""].filter(Boolean).join(" &bull; ");
 
         container.append(`
             <div class="claimedDropItem">
@@ -1583,16 +1594,16 @@ function populateAutoGamesGrid(data) {
         const isChecked = Array.from(enabledSet).some(eg => areGameNamesMatching(eg, gameName));
 
         const card = $(`
-            <div class="autoGameCard ${isChecked ? "activeQueueCard" : ""}" data-gamename="${gameName.toLowerCase()}">
+            <div class="autoGameCard ${isChecked ? "activeQueueCard" : ""}" data-gamename="${escapeHtml(gameName.toLowerCase())}">
                 <div class="autoGameMeta">
                     <svg class="autoGameGlyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="6"></rect><line x1="6" y1="12" x2="10" y2="12"></line><line x1="8" y1="10" x2="8" y2="14"></line><line x1="15" y1="11" x2="15.01" y2="11"></line><line x1="18" y1="13" x2="18.01" y2="13"></line></svg>
                     <div class="autoGameTitleGroup">
-                        <span class="autoGameName">${gameName}</span>
+                        <span class="autoGameName">${escapeHtml(gameName)}</span>
                         <span class="autoGameStatusTag">${isChecked ? "Queued for Farming" : "Inactive"}</span>
                     </div>
                 </div>
                 <label class="switch">
-                    <input type="checkbox" class="autoGameToggle" data-game="${gameName}" ${isChecked ? "checked" : ""}>
+                    <input type="checkbox" class="autoGameToggle" data-game="${escapeHtml(gameName)}" ${isChecked ? "checked" : ""}>
                     <span class="slider"></span>
                 </label>
             </div>
@@ -1607,10 +1618,12 @@ function populateAutoGamesGrid(data) {
 
         if (checked) {
             card.addClass("activeQueueCard").find(".autoGameStatusTag").text("Queued for Farming");
-            if (!currentAutoGamesData.enabled.includes(game)) currentAutoGamesData.enabled.push(game);
+            if (!currentAutoGamesData.enabled.some(g => areGameNamesMatching(g, game))) {
+                currentAutoGamesData.enabled.push(game);
+            }
         } else {
             card.removeClass("activeQueueCard").find(".autoGameStatusTag").text("Inactive");
-            currentAutoGamesData.enabled = currentAutoGamesData.enabled.filter(g => g !== game);
+            currentAutoGamesData.enabled = currentAutoGamesData.enabled.filter(g => !areGameNamesMatching(g, game));
         }
 
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
