@@ -828,6 +828,10 @@ export class Client {
     isCampaignActiveWithDrops(campaign, now = getTwitchNow(), inventory = null) {
         return isCampaignActiveWithDrops(campaign, now, inventory);
     }
+
+    isCampaignFarmable(campaign, now = getTwitchNow()) {
+        return isCampaignFarmable(campaign, now);
+    }
 }
 
 export function isCampaignActiveWithDrops(c, now = getTwitchNow(), inventory = null) {
@@ -972,3 +976,61 @@ export function areGameNamesMatching(gameA, gameB) {
 
     return false;
 }
+
+export function isCampaignFarmable(camp, now = getTwitchNow()) {
+    if (!camp || typeof camp !== "object") return false;
+
+    // Check campaign overall end time
+    const endMs = camp.endsAt ? new Date(camp.endsAt).getTime() : (camp.endAt ? new Date(camp.endAt).getTime() : NaN);
+    if (!isNaN(endMs) && endMs <= now) return false;
+
+    // Check status if present
+    if (camp.status && camp.status !== "ACTIVE") return false;
+
+    // Check items or timeBasedDrops
+    const drops = Array.isArray(camp.items) ? camp.items : (Array.isArray(camp.drops) ? camp.drops : (Array.isArray(camp.timeBasedDrops) ? camp.timeBasedDrops : null));
+
+    if (Array.isArray(drops)) {
+        if (drops.length === 0) {
+            if (typeof camp.minutesNeeded === "number" && camp.minutesNeeded > 0) {
+                return (camp.minutesWatched || 0) < camp.minutesNeeded;
+            }
+            return false;
+        }
+
+        // Check if all drops with specified end dates have ended
+        const dropsWithEnd = drops.filter(d => d && (d.endAt || d.endsAt));
+        if (dropsWithEnd.length > 0 && dropsWithEnd.length === drops.length) {
+            const allEnded = dropsWithEnd.every(d => {
+                if (d.isEnded) return true;
+                const dEnd = d.endsAt ? new Date(d.endsAt).getTime() : (d.endAt ? new Date(d.endAt).getTime() : NaN);
+                return !isNaN(dEnd) && dEnd <= now;
+            });
+            if (allEnded) return false;
+        }
+
+        // Check if there is at least one drop that is unclaimed, unended, and watch time not satisfied
+        const hasFarmableDrop = drops.some(drop => {
+            if (!drop) return false;
+            if (drop.isEnded) return false;
+
+            const dEnd = drop.endsAt ? new Date(drop.endsAt).getTime() : (drop.endAt ? new Date(drop.endAt).getTime() : NaN);
+            if (!isNaN(dEnd) && dEnd <= now) return false;
+
+            const isClaimed = Boolean(drop.self && drop.self.isClaimed);
+            if (isClaimed) return false;
+
+            const watched = drop.self?.currentMinutesWatched || 0;
+            const req = drop.reqTime || drop.requiredMinutesWatched || 60;
+            return req <= 0 || watched < req;
+        });
+
+        return hasFarmableDrop;
+    }
+
+    if (typeof camp.minutesNeeded === "number" && camp.minutesNeeded > 0) {
+        return (camp.minutesWatched || 0) < camp.minutesNeeded;
+    }
+
+    return true;
+}

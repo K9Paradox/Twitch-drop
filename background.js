@@ -1,7 +1,7 @@
 /** 
  * Auto Twitch Drops Pro - Background Service Worker (Manifest V3)
  **/
-import { Client, TwitchApiError, isCampaignActiveWithDrops, isOverwatchGame, areGameNamesMatching, getTwitchNow } from "./background/twitchApi.js";
+import { Client, TwitchApiError, isCampaignActiveWithDrops, isCampaignFarmable, isOverwatchGame, areGameNamesMatching, getTwitchNow } from "./background/twitchApi.js";
 
 function mergeCampaignsWithInventory(campaigns, inventory) {
     const merged = Array.isArray(campaigns) ? [...campaigns] : [];
@@ -692,6 +692,21 @@ async function handleWatchdogTick() {
                     }
                 }
 
+                // If currently active campaign finished all its drops/ended, advance to next farmable sibling campaign
+                const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
+                const nowWatchdog = getTwitchNow();
+                if (curCamp && !isCampaignFarmable(curCamp, nowWatchdog)) {
+                    const nextFarmableIdx = activeStream.campaigns.findIndex(c => isCampaignFarmable(c, nowWatchdog));
+                    if (nextFarmableIdx !== -1 && nextFarmableIdx !== (activeStream.campaign.onCamp || 0)) {
+                        console.log(`[Watchdog] Current campaign ${curCamp.id} drops completed/ended. Advancing to sibling campaign index ${nextFarmableIdx} (${activeStream.campaigns[nextFarmableIdx].id}).`);
+                        activeStream.campaign.onCamp = nextFarmableIdx;
+                        activeStream.campaign.requiredStreamers = activeStream.campaigns[nextFarmableIdx].streamers || [];
+                        await saveState();
+                        await runCampaign(true);
+                        return;
+                    }
+                }
+
                 // Check if stream tab is still open and alive
                 if (curWindow.id !== 0) {
                     const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
@@ -941,19 +956,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     }
 
                     if (activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns?.length > 0) {
-                        const curCamp = activeStream.campaigns[activeStream.campaign.onCamp || 0];
-                        if (curCamp) {
-                            const activeGame = activeStream.campaign.game?.name || "";
-                            const exactCampMatches = (curCamp.id && !String(curCamp.id).startsWith("camp-"))
-                                ? extractedItems.filter(i => i.campaignId && i.campaignId === curCamp.id)
+                        const activeGame = activeStream.campaign.game?.name || "";
+                        for (const campObj of activeStream.campaigns) {
+                            const exactCampMatches = (campObj.id && !String(campObj.id).startsWith("camp-"))
+                                ? extractedItems.filter(i => i.campaignId && i.campaignId === campObj.id)
                                 : [];
                             const matchedItems = exactCampMatches.length > 0
                                 ? exactCampMatches
                                 : extractedItems.filter(i => !i.gameName || areGameNamesMatching(i.gameName, activeGame));
 
                             if (matchedItems.length > 0) {
-                                const prevItems = Array.isArray(curCamp.items) ? curCamp.items : [];
-                                curCamp.items = matchedItems.map(newItem => {
+                                const prevItems = Array.isArray(campObj.items) ? campObj.items : [];
+                                campObj.items = matchedItems.map(newItem => {
                                     const existing = prevItems.find(p => p.id === newItem.id || (p.benefitId && newItem.benefitId && p.benefitId === newItem.benefitId));
                                     if (!existing) return newItem;
                                     return {
@@ -972,44 +986,56 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                         }
                                     };
                                 });
-                                const highestWatched = Math.max(0, ...curCamp.items.map(i => i.self?.currentMinutesWatched || 0));
-                                const highestReq = Math.max(60, ...curCamp.items.map(i => i.reqTime || 60));
-                                curCamp.minutesWatched = highestWatched;
-                                curCamp.minutesNeeded = highestReq;
+                                const highestWatched = Math.max(0, ...campObj.items.map(i => i.self?.currentMinutesWatched || 0));
+                                const highestReq = Math.max(60, ...campObj.items.map(i => i.reqTime || 60));
+                                campObj.minutesWatched = highestWatched;
+                                campObj.minutesNeeded = highestReq;
                             } else if (currentDrop) {
                                 const benefit = (currentDrop.benefitEdges && currentDrop.benefitEdges[0]) ? (currentDrop.benefitEdges[0].benefit || currentDrop.benefitEdges[0].node) : null;
                                 const dropImg = benefit?.imageAssetURL || currentDrop.imageURL || currentDrop.imageAssetURL || "";
                                 const dropTitle = benefit?.name ? (currentDrop.name ? `${currentDrop.name} - ${benefit.name}` : benefit.name) : (currentDrop.name || "Drop Reward");
 
-                                const existing = curCamp.items?.find(i => i.id === currentDrop.id);
+                                const existing = campObj.items?.find(i => i.id === currentDrop.id);
                                 if (existing) {
                                     existing.self = existing.self || {};
                                     existing.self.currentMinutesWatched = currentDrop.currentMinutesWatched;
                                     existing.self.isClaimed = Boolean(currentDrop.isClaimed);
                                     if (dropImg) existing.picture = dropImg;
-                                } else {
-                                    curCamp.items = (curCamp.items || []).filter(i => !i.isSynthetic);
-                                    curCamp.items.push({
+                                } else if (campObj === activeStream.campaigns[activeStream.campaign.onCamp || 0]) {
+                                    campObj.items = (campObj.items || []).filter(i => !i.isSynthetic);
+                                    campObj.items.push({
                                         id: currentDrop.id,
                                         benefitId: benefit?.id || null,
                                         name: dropTitle,
                                         picture: dropImg,
                                         reqTime: currentDrop.requiredMinutesWatched || 60,
-                                        startAt: currentDrop.startAt || curCamp.startAt || null,
-                                        endAt: currentDrop.endAt || curCamp.endAt || null,
-                                        endsAt: currentDrop.endAt ? new Date(currentDrop.endAt).getTime() : (curCamp.endsAt || null),
+                                        startAt: currentDrop.startAt || campObj.startAt || null,
+                                        endAt: currentDrop.endAt || campObj.endAt || null,
+                                        endsAt: currentDrop.endAt ? new Date(currentDrop.endAt).getTime() : (campObj.endsAt || null),
                                         self: {
                                             isClaimed: Boolean(currentDrop.isClaimed),
                                             currentMinutesWatched: currentDrop.currentMinutesWatched || 0
                                         }
                                     });
                                 }
-                                curCamp.minutesWatched = currentDrop.currentMinutesWatched || curCamp.minutesWatched;
-                                curCamp.minutesNeeded = currentDrop.requiredMinutesWatched || curCamp.minutesNeeded;
+                                campObj.minutesWatched = currentDrop.currentMinutesWatched || campObj.minutesWatched;
+                                campObj.minutesNeeded = currentDrop.requiredMinutesWatched || campObj.minutesNeeded;
                             }
-                            await saveState();
-                            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
                         }
+
+                        // Check if current onCamp campaign finished and advance if needed
+                        const nowProg = getTwitchNow();
+                        const curCampNow = activeStream.campaigns[activeStream.campaign.onCamp || 0];
+                        if (curCampNow && !isCampaignFarmable(curCampNow, nowProg)) {
+                            const nextFarmableIdx = activeStream.campaigns.findIndex(c => isCampaignFarmable(c, nowProg));
+                            if (nextFarmableIdx !== -1 && nextFarmableIdx !== (activeStream.campaign.onCamp || 0)) {
+                                activeStream.campaign.onCamp = nextFarmableIdx;
+                                activeStream.campaign.requiredStreamers = activeStream.campaigns[nextFarmableIdx].streamers || [];
+                            }
+                        }
+
+                        await saveState();
+                        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
                     }
                 }
                 sendResponse({ success: true });
@@ -1497,14 +1523,21 @@ async function runCampaign(forceNextStreamer = false) {
     if (!activeStream.campaign || activeStream.campaign.status === "no_active_drops" || !activeStream.campaigns || activeStream.campaigns.length === 0) return;
     if (activeStream.campaign.reOpening) activeStream.campaign.reOpening = false;
 
+    const nowTs = getTwitchNow();
     let curCamp = activeStream.campaigns[activeStream.campaign.onCamp];
+    if (!curCamp || !isCampaignFarmable(curCamp, nowTs)) {
+        const nextFarmableIdx = activeStream.campaigns.findIndex(c => isCampaignFarmable(c, nowTs));
+        if (nextFarmableIdx !== -1) {
+            activeStream.campaign.onCamp = nextFarmableIdx;
+            curCamp = activeStream.campaigns[nextFarmableIdx];
+        }
+    }
     if (!curCamp) {
         await endCampaign();
         return;
     }
     activeStream.campaign.requiredStreamers = curCamp.streamers || [];
 
-    const nowTs = getTwitchNow();
     let allDropsGot = activeStream.campaigns.every(camp => {
         if (camp.items && camp.items.length > 0) {
             return camp.items.every(i => (i.self && i.self.isClaimed) || (i.endsAt && i.endsAt <= nowTs) || i.isEnded || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)));
@@ -1548,6 +1581,44 @@ async function runCampaign(forceNextStreamer = false) {
         );
     }
 
+    // MULTI-CAMPAIGN FAILOVER:
+    // If no live streamer was found for the primary campaign (e.g. required channels offline),
+    // check if sibling campaigns in activeStream.campaigns are farmable and have live broadcasters
+    if (!targetStreamer && activeStream.campaigns.length > 1) {
+        for (let i = 0; i < activeStream.campaigns.length; i++) {
+            if (i === activeStream.campaign.onCamp) continue;
+            const siblingCamp = activeStream.campaigns[i];
+            if (!isCampaignFarmable(siblingCamp, nowTs)) continue;
+
+            let siblingStreamer = await client.getLiveBroadcasterForCampaign(
+                activeStream.campaign.game.name,
+                siblingCamp.id,
+                activeStream.campaign.slug,
+                siblingCamp.streamers,
+                skipped
+            );
+
+            if (!siblingStreamer && skipped.length > 0) {
+                siblingStreamer = await client.getLiveBroadcasterForCampaign(
+                    activeStream.campaign.game.name,
+                    siblingCamp.id,
+                    activeStream.campaign.slug,
+                    siblingCamp.streamers,
+                    []
+                );
+            }
+
+            if (siblingStreamer) {
+                console.log(`[CampaignFailover] Primary campaign ${curCamp.id} streamers offline. Failing over to sibling campaign ${siblingCamp.id} streamer @${siblingStreamer}`);
+                activeStream.campaign.onCamp = i;
+                curCamp = siblingCamp;
+                targetStreamer = siblingStreamer;
+                activeStream.campaign.requiredStreamers = curCamp.streamers || [];
+                break;
+            }
+        }
+    }
+
     if (!targetStreamer) {
         console.log(`[AutoQueue] No compatible live stream found for ${activeStream.campaign.game.name}`);
         await windowManager("close");
@@ -1565,7 +1636,8 @@ async function runCampaign(forceNextStreamer = false) {
         }
 
         activeStream.campaign.status = "nostream";
-        activeStream.campaign.requiredStreamers = curCamp.streamers || [];
+        const anyFarmableOpen = activeStream.campaigns.some(c => isCampaignFarmable(c, nowTs) && (!c.streamers || c.streamers.length === 0));
+        activeStream.campaign.requiredStreamers = anyFarmableOpen ? [] : (curCamp.streamers || []);
         await saveState();
         chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
         updateBadgeUI();
@@ -1875,14 +1947,41 @@ async function createCampaign(game, isManual = false) {
         }
     }
 
-    if (activeStream.campaign && activeStream.campaigns.length > 0) {
-        activeStream.campaign.requiredStreamers = activeStream.campaigns[0].streamers || [];
+    if (activeStream.campaigns.length > 0) {
+        // Multi-campaign prioritization:
+        // 1. Prioritize farmable campaigns over ended/completed campaigns
+        // 2. Prioritize open-streamer campaigns (streamers.length === 0) over restricted streamer campaigns
+        // 3. Prioritize earlier ending campaigns so soonest-to-expire drops are farmed first
+        activeStream.campaigns.sort((a, b) => {
+            const aFarmable = isCampaignFarmable(a, now);
+            const bFarmable = isCampaignFarmable(b, now);
+            if (aFarmable !== bFarmable) {
+                return aFarmable ? -1 : 1;
+            }
+            const aOpen = (!a.streamers || a.streamers.length === 0);
+            const bOpen = (!b.streamers || b.streamers.length === 0);
+            if (aOpen !== bOpen) {
+                return aOpen ? -1 : 1;
+            }
+            const aEnd = a.endsAt || Infinity;
+            const bEnd = b.endsAt || Infinity;
+            return aEnd - bEnd;
+        });
+
+        const firstFarmableIdx = activeStream.campaigns.findIndex(c => isCampaignFarmable(c, now));
+        activeStream.campaign.onCamp = firstFarmableIdx !== -1 ? firstFarmableIdx : 0;
+
+        const curSelectedCamp = activeStream.campaigns[activeStream.campaign.onCamp] || activeStream.campaigns[0];
+        if (activeStream.campaign && curSelectedCamp) {
+            activeStream.campaign.requiredStreamers = curSelectedCamp.streamers || [];
+            if (curSelectedCamp.endsAt) {
+                activeStream.campaign.endsAt = curSelectedCamp.endsAt;
+            }
+        }
     }
 
     const totalDropsFound = activeStream.campaigns.reduce((sum, c) => sum + (c.items ? c.items.length : 0), 0);
-    const hasFarmableDrops = activeStream.campaigns.some(camp =>
-        (camp.items || []).some(item => !item.self?.isClaimed && (!item.endsAt || item.endsAt > now))
-    );
+    const hasFarmableDrops = activeStream.campaigns.some(camp => isCampaignFarmable(camp, now));
 
     if (activeStream.campaigns.length === 0 || totalDropsFound === 0 || !hasFarmableDrops) {
         const allClaimed = totalDropsFound > 0 && activeStream.campaigns.every(c =>

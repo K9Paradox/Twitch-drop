@@ -1151,46 +1151,85 @@ function updateDropProgressUI(data) {
     let currentRewardItem = null;
     let allItems = [];
     let allClaimed = false;
+    let chosenCamp = null;
+
+    function processCampItems(c) {
+        if (!c) return { items: [], allClaimed: false, hasFarmable: false };
+        const rawItems = c.items || c.drops || c.timeBasedDrops || [];
+        if (!Array.isArray(rawItems) || rawItems.length === 0) {
+            return { items: [], allClaimed: false, hasFarmable: false };
+        }
+        const sorted = [...rawItems].sort((a, b) => {
+            const reqA = a.reqTime || a.requiredMinutesWatched || 0;
+            const reqB = b.reqTime || b.requiredMinutesWatched || 0;
+            return reqA - reqB;
+        });
+
+        let cAllClaimed = true;
+        let cHasFarmable = false;
+        sorted.forEach(i => {
+            const req = i.reqTime || i.requiredMinutesWatched || 60;
+            const itemWatched = (i.self && i.self.currentMinutesWatched !== undefined)
+                ? i.self.currentMinutesWatched
+                : (c.minutesWatched || 0);
+            const isClaimed = Boolean((i.self && i.self.isClaimed === true) || (itemWatched >= req && req > 0));
+            const dropEnd = i.endAt ? new Date(i.endAt).getTime() : (i.endsAt ? new Date(i.endsAt).getTime() : (c.endsAt || NaN));
+            const isEnded = Boolean(!isNaN(dropEnd) && dropEnd <= effectiveNow);
+
+            i._computedClaimed = isClaimed;
+            i._computedEnded = isEnded;
+            i._computedWatched = itemWatched;
+            i._computedReq = req;
+
+            if (!isClaimed) {
+                cAllClaimed = false;
+            }
+            if (!isClaimed && !isEnded) {
+                cHasFarmable = true;
+            }
+        });
+        return { items: sorted, allClaimed: cAllClaimed, hasFarmable: cHasFarmable };
+    }
 
     if (Array.isArray(active.campaigns) && active.campaigns.length > 0) {
         const curCampIdx = (typeof camp.onCamp === "number" && camp.onCamp >= 0) ? camp.onCamp : 0;
-        const curCamp = active.campaigns[curCampIdx] || active.campaigns[0];
-        if (curCamp) {
-            const items = curCamp.items || curCamp.drops || curCamp.timeBasedDrops || [];
-            if (Array.isArray(items) && items.length > 0) {
-                allItems = [...items].sort((a, b) => {
-                    const reqA = a.reqTime || a.requiredMinutesWatched || 0;
-                    const reqB = b.reqTime || b.requiredMinutesWatched || 0;
-                    return reqA - reqB;
-                });
+        const candidateCamp = active.campaigns[curCampIdx] || active.campaigns[0];
+        const candidateRes = processCampItems(candidateCamp);
 
-                const now = effectiveNow;
-                allClaimed = true;
-                allItems.forEach(i => {
-                    const req = i.reqTime || i.requiredMinutesWatched || 60;
-                    const itemWatched = (i.self && i.self.currentMinutesWatched !== undefined)
-                        ? i.self.currentMinutesWatched
-                        : (curCamp.minutesWatched || 0);
-                    const isClaimed = Boolean((i.self && i.self.isClaimed === true) || (itemWatched >= req && req > 0));
-                    const dropEnd = i.endAt ? new Date(i.endAt).getTime() : (i.endsAt ? new Date(i.endsAt).getTime() : (curCamp.endsAt || NaN));
-                    const isEnded = Boolean(!isNaN(dropEnd) && dropEnd <= now);
-
-                    i._computedClaimed = isClaimed;
-                    i._computedEnded = isEnded;
-                    i._computedWatched = itemWatched;
-                    i._computedReq = req;
-
-                    if (!isClaimed) {
-                        allClaimed = false;
-                    }
-                });
-
-                currentRewardItem = allItems.find(i => !i._computedClaimed && !i._computedEnded)
-                    || allItems.find(i => !i._computedClaimed)
-                    || allItems[allItems.length - 1];
-            } else {
-                allClaimed = false;
+        if (candidateRes.hasFarmable || active.campaigns.length === 1) {
+            chosenCamp = candidateCamp;
+            allItems = candidateRes.items;
+            allClaimed = candidateRes.allClaimed;
+        } else {
+            // candidateCamp has no farmable items (all claimed or ended).
+            // Search for sibling campaign that DOES have farmable items
+            let foundFarmableCamp = null;
+            let foundRes = null;
+            for (let idx = 0; idx < active.campaigns.length; idx++) {
+                if (idx === curCampIdx) continue;
+                const sibCamp = active.campaigns[idx];
+                const sibRes = processCampItems(sibCamp);
+                if (sibRes.hasFarmable) {
+                    foundFarmableCamp = sibCamp;
+                    foundRes = sibRes;
+                    break;
+                }
             }
+            if (foundFarmableCamp && foundRes) {
+                chosenCamp = foundFarmableCamp;
+                allItems = foundRes.items;
+                allClaimed = foundRes.allClaimed;
+            } else {
+                chosenCamp = candidateCamp;
+                allItems = candidateRes.items;
+                allClaimed = candidateRes.allClaimed;
+            }
+        }
+
+        if (allItems.length > 0) {
+            currentRewardItem = allItems.find(i => !i._computedClaimed && !i._computedEnded)
+                || allItems.find(i => !i._computedClaimed)
+                || allItems[allItems.length - 1];
         }
     }
 
@@ -1268,9 +1307,9 @@ function updateDropProgressUI(data) {
     }
     $("#dropStatus").text(`Farming: ${gameName}`);
 
-    const curCampObj = (Array.isArray(active.campaigns) && active.campaigns.length > 0)
+    const curCampObj = chosenCamp || ((Array.isArray(active.campaigns) && active.campaigns.length > 0)
         ? (active.campaigns[camp.onCamp || 0] || active.campaigns[0])
-        : null;
+        : null);
     const itemWatched = currentRewardItem ? (currentRewardItem._computedWatched || 0) : (curCampObj?.minutesWatched || 0);
     const targetMins = currentRewardItem ? (currentRewardItem._computedReq || 60) : (curCampObj?.minutesNeeded || 60);
 
@@ -1319,7 +1358,21 @@ function renderActiveDropsList(activeStream) {
     const gameName = camp.game ? (camp.game.name || camp.game.displayName || "Selected Game") : (typeof camp === "string" ? camp : "Selected Game");
 
     const effectiveNow = getEffectiveNow();
-    const isClosedOrEnded = camp.status === "no_active_drops" || Boolean(camp.endsAt && !isNaN(camp.endsAt) && effectiveNow >= camp.endsAt && !camp.isCompleted);
+    const hasAnyFarmableDrop = Array.isArray(activeStream.campaigns) && activeStream.campaigns.some(c => {
+        if (!c) return false;
+        const cEnd = c.endsAt || (c.endAt ? new Date(c.endAt).getTime() : NaN);
+        if (!isNaN(cEnd) && cEnd <= effectiveNow) return false;
+        const drops = c.items || c.drops || c.timeBasedDrops || [];
+        return drops.some(d => {
+            const dEnd = d.endsAt || (d.endAt ? new Date(d.endAt).getTime() : cEnd);
+            const isEnded = !isNaN(dEnd) && dEnd <= effectiveNow;
+            const isClaimed = Boolean(d.self?.isClaimed || d._computedClaimed);
+            return !isEnded && !isClaimed;
+        });
+    });
+
+    const isClosedOrEnded = (camp.status === "no_active_drops" && !hasAnyFarmableDrop) ||
+        Boolean(camp.endsAt && !isNaN(camp.endsAt) && effectiveNow >= camp.endsAt && !camp.isCompleted && !hasAnyFarmableDrop);
     if (isClosedOrEnded) {
         const isExpired = Boolean(camp.endsAt && effectiveNow >= camp.endsAt && !camp.isCompleted);
         const titleText = isExpired ? `Campaign Closed: ${escapeHtml(gameName)}` : `No Active Drops: ${escapeHtml(gameName)}`;
@@ -1353,12 +1406,41 @@ function renderActiveDropsList(activeStream) {
     }
 
     if (camp.status === "nostream") {
-        const curCamp = (Array.isArray(activeStream.campaigns) && activeStream.campaigns.length > 0)
+        let curCamp = (Array.isArray(activeStream.campaigns) && activeStream.campaigns.length > 0)
             ? (activeStream.campaigns[camp.onCamp || 0] || activeStream.campaigns[0])
             : null;
-        const requiredStreamers = (camp.requiredStreamers && camp.requiredStreamers.length > 0)
-            ? camp.requiredStreamers
-            : (curCamp && Array.isArray(curCamp.streamers) ? curCamp.streamers : []);
+
+        if (Array.isArray(activeStream.campaigns) && activeStream.campaigns.length > 1) {
+            const farmableCamp = activeStream.campaigns.find(c => {
+                if (!c) return false;
+                const cEnd = c.endsAt || (c.endAt ? new Date(c.endAt).getTime() : NaN);
+                if (!isNaN(cEnd) && cEnd <= effectiveNow) return false;
+                const drops = c.items || c.drops || c.timeBasedDrops || [];
+                return drops.some(d => {
+                    const dEnd = d.endsAt || (d.endAt ? new Date(d.endAt).getTime() : cEnd);
+                    const isEnded = !isNaN(dEnd) && dEnd <= effectiveNow;
+                    const isClaimed = Boolean(d.self?.isClaimed || d._computedClaimed);
+                    return !isEnded && !isClaimed;
+                });
+            });
+            if (farmableCamp) curCamp = farmableCamp;
+        }
+
+        const anyFarmableOpen = Array.isArray(activeStream.campaigns) && activeStream.campaigns.some(c => {
+            if (!c) return false;
+            const cEnd = c.endsAt || (c.endAt ? new Date(c.endAt).getTime() : NaN);
+            if (!isNaN(cEnd) && cEnd <= effectiveNow) return false;
+            return !c.streamers || c.streamers.length === 0;
+        });
+
+        let requiredStreamers = [];
+        if (!anyFarmableOpen) {
+            if (Array.isArray(camp.requiredStreamers) && camp.requiredStreamers.length > 0) {
+                requiredStreamers = camp.requiredStreamers;
+            } else if (curCamp && Array.isArray(curCamp.streamers)) {
+                requiredStreamers = curCamp.streamers;
+            }
+        }
 
         const hasSpecific = Array.isArray(requiredStreamers) && requiredStreamers.length > 0;
         const bannerTitle = hasSpecific
