@@ -172,7 +172,11 @@ async function hydrateState() {
             if (val.curWindow) curWindow = val.curWindow;
             if (val.autoGetTokenWindow !== undefined) autoGetTokenWindow = val.autoGetTokenWindow;
             if (val.activeStream && val.activeStream.campaign && val.activeStream.campaign !== "none") {
-                activeStream = val.activeStream;
+                if (val.activeStream.campaign.status === "starting" && (!val.activeStream.campaigns || val.activeStream.campaigns.length === 0)) {
+                    activeStream = { campaign: "none" };
+                } else {
+                    activeStream = val.activeStream;
+                }
             }
 
             await fetchTwitchCookiesAndInitClient();
@@ -308,10 +312,21 @@ function syncCampaignProgressWithInventory(inventory) {
 
     for (const curCamp of activeStream.campaigns) {
         const activeGame = activeStream.campaign.game?.name || "";
-        const matchedDropCamp = inProgressList.find(c =>
-            c.id === curCamp.id ||
-            (c.game && areGameNamesMatching(c.game.displayName || c.game.name, activeGame))
-        );
+        const nowCheck = Date.now();
+        const curItemIds = new Set((curCamp.items || []).map(i => i?.id).filter(Boolean));
+        const matchedDropCamp = (curCamp.id ? inProgressList.find(c => c && c.id === curCamp.id) : null) ||
+            inProgressList.find(c => {
+                if (!c) return false;
+                if (curCamp.id && !String(curCamp.id).startsWith("camp-") && c.id && c.id !== curCamp.id) {
+                    if (curItemIds.size > 0 && Array.isArray(c.timeBasedDrops)) {
+                        return c.timeBasedDrops.some(d => d?.id && curItemIds.has(d.id));
+                    }
+                    return false;
+                }
+                const cEnd = c.endAt ? new Date(c.endAt).getTime() : NaN;
+                if (!isNaN(cEnd) && cEnd <= nowCheck) return false;
+                return Boolean(c.game && areGameNamesMatching(c.game.displayName || c.game.name, activeGame));
+            });
 
         if (matchedDropCamp && matchedDropCamp.timeBasedDrops) {
             let maxWatchedInCamp = 0;
@@ -599,13 +614,19 @@ async function handleWatchdogTick() {
 
                 // Also check if all items in activeStream.campaigns are claimed or expired
                 if (!campaignClosed && activeStream.campaigns && activeStream.campaigns.length > 0) {
-                    const anyFarmable = activeStream.campaigns.some(c => {
+                    const campsWithItems = activeStream.campaigns.filter(c => {
                         const items = c.items || c.drops || [];
-                        return items.some(i => !i.self?.isClaimed && (!i.endsAt || i.endsAt > now));
+                        return items.length > 0;
                     });
-                    if (!anyFarmable) {
-                        console.log(`[Watchdog] All drop rewards for ${activeGame} are either claimed or ended.`);
-                        campaignClosed = true;
+                    if (campsWithItems.length > 0) {
+                        const anyFarmable = campsWithItems.some(c => {
+                            const items = c.items || c.drops || [];
+                            return items.some(i => !i.self?.isClaimed && (!i.endsAt || i.endsAt > now));
+                        });
+                        if (!anyFarmable) {
+                            console.log(`[Watchdog] All drop rewards for ${activeGame} are either claimed or ended.`);
+                            campaignClosed = true;
+                        }
                     }
                 }
 
@@ -830,6 +851,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const inProg = payload?.currentUser?.inventory?.dropCampaignsInProgress || [];
                         const nowTs = Date.now();
                         for (const c of inProg) {
+                            if (!c) continue;
+                            const cEndTs = c.endAt ? new Date(c.endAt).getTime() : NaN;
+                            if (!isNaN(cEndTs) && cEndTs <= nowTs) continue;
+                            if (c.status && c.status !== "ACTIVE") continue;
                             const gName = c.game?.displayName || c.game?.name || "";
                             if (c.timeBasedDrops && c.timeBasedDrops.length > 0) {
                                 for (const d of c.timeBasedDrops) {
@@ -842,6 +867,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     
                                     extractedItems.push({
                                         id: d.id,
+                                        campaignId: c.id || null,
                                         benefitId: benefit?.id || null,
                                         gameName: gName,
                                         name: benefitName,
@@ -863,6 +889,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const camps = payload?.channel?.dropCampaignsProgress || payload?.user?.dropCampaignsProgress || [];
                         const nowTs = Date.now();
                         for (const c of camps) {
+                            if (!c) continue;
+                            const cEndTs = c.endAt ? new Date(c.endAt).getTime() : NaN;
+                            if (!isNaN(cEndTs) && cEndTs <= nowTs) continue;
+                            if (c.status && c.status !== "ACTIVE") continue;
                             const gName = c.game?.displayName || c.game?.name || "";
                             if (c.timeBasedDrops && c.timeBasedDrops.length > 0) {
                                 for (const d of c.timeBasedDrops) {
@@ -875,6 +905,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
                                     extractedItems.push({
                                         id: d.id,
+                                        campaignId: c.id || null,
                                         benefitId: benefit?.id || null,
                                         gameName: gName,
                                         name: benefitName,
@@ -898,7 +929,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const curCamp = activeStream.campaigns[activeStream.campaign.onCamp || 0];
                         if (curCamp) {
                             const activeGame = activeStream.campaign.game?.name || "";
-                            const matchedItems = extractedItems.filter(i => !i.gameName || areGameNamesMatching(i.gameName, activeGame));
+                            const exactCampMatches = (curCamp.id && !String(curCamp.id).startsWith("camp-"))
+                                ? extractedItems.filter(i => i.campaignId && i.campaignId === curCamp.id)
+                                : [];
+                            const matchedItems = exactCampMatches.length > 0
+                                ? exactCampMatches
+                                : extractedItems.filter(i => !i.gameName || areGameNamesMatching(i.gameName, activeGame));
 
                             if (matchedItems.length > 0) {
                                 const prevItems = Array.isArray(curCamp.items) ? curCamp.items : [];
@@ -1075,21 +1111,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "p:startCampaign":
-                if (message.data.campaign === "none") {
-                    if (activeStream.campaign !== "none" && curWindow.id !== 0) {
-                        await endCampaign();
+                try {
+                    if (message.data.campaign === "none") {
+                        if (activeStream.campaign !== "none" && curWindow.id !== 0) {
+                            await endCampaign();
+                        }
+                        activeStream = { campaign: "none" };
+                        await saveState();
+                        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                    } else {
+                        const isManual = Boolean(message.data.manual);
+                        if (isManual) {
+                            clearGameCooldown(message.data.campaign);
+                        }
+                        await createCampaign(message.data.campaign, isManual);
                     }
-                    activeStream = { campaign: "none" };
-                    await saveState();
-                    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
-                } else {
-                    const isManual = Boolean(message.data.manual);
-                    if (isManual) {
-                        clearGameCooldown(message.data.campaign);
-                    }
-                    await createCampaign(message.data.campaign, isManual);
+                    sendResponse({ success: true });
+                } catch (err) {
+                    console.error("Error starting campaign:", err);
+                    sendResponse({ success: false, error: err?.message });
                 }
-                sendResponse({ success: true });
                 break;
 
             case "p:getCurrentDrops":
@@ -1581,6 +1622,7 @@ async function createCampaign(game, isManual = false) {
         endsAt: null
     };
     activeStream.campaigns = [];
+    let earliestEndsAt = null;
 
     if (matchingCampaigns.length > 0) {
         const campAry = matchingCampaigns.map(c => c.id);
@@ -1604,11 +1646,14 @@ async function createCampaign(game, isManual = false) {
         if (itemsToProcess.length === 0) itemsToProcess = matchingCampaigns;
 
         const eventDropsList = (inventory && inventory.gameEventDrops) ? inventory.gameEventDrops : [];
-        let earliestEndsAt = null;
 
         for (const dropCamp of itemsToProcess) {
             if (!dropCamp) continue;
-            const inProgMatch = inventory?.dropCampaignsInProgress?.find(obj => obj && (obj.id === dropCamp.id || (obj.game && areGameNamesMatching(obj.game.displayName || obj.game.name, game))));
+            const inProgMatch = inventory?.dropCampaignsInProgress?.find(obj => obj && obj.id === dropCamp.id) ||
+                inventory?.dropCampaignsInProgress?.find(obj => {
+                    if (!obj || (dropCamp.id && obj.id && obj.id !== dropCamp.id)) return false;
+                    return Boolean(obj.game && areGameNamesMatching(obj.game.displayName || obj.game.name, game));
+                });
             if (!dropCamp.endAt && inProgMatch?.endAt) dropCamp.endAt = inProgMatch.endAt;
             if (!dropCamp.startAt && inProgMatch?.startAt) dropCamp.startAt = inProgMatch.startAt;
 

@@ -451,5 +451,40 @@ describe("Tier 1: Feature 22 - Campaign Closure & Expiration Detection", () => {
         );
         assert.equal(allDone, true);
     });
+
+    it("F22-T12: Expired same-game campaign in inventory does not poison a newer active campaign with a different ID", () => {
+        const now = Date.now();
+        const pastDate = new Date(now - 86400000).toISOString(); // 24h ago
+        const futureDate = new Date(now + 86400000).toISOString(); // 24h in future
+
+        const inventoryWithOldExpiredCamp = {
+            dropCampaignsInProgress: [
+                {
+                    id: "camp-ow-sep13-expired",
+                    game: { displayName: "Overwatch" },
+                    status: "EXPIRED",
+                    endAt: pastDate,
+                    timeBasedDrops: [
+                        { id: "drop-old-1", endAt: pastDate, requiredMinutesWatched: 60, self: { isClaimed: false, currentMinutesWatched: 15 } }
+                    ]
+                }
+            ],
+            gameEventDrops: []
+        };
+
+        const newActiveCampaign = {
+            id: "camp-ow-oct-active",
+            game: { displayName: "Overwatch 2" },
+            status: "ACTIVE",
+            endAt: futureDate,
+            timeBasedDrops: [
+                { id: "drop-new-1", endAt: futureDate, requiredMinutesWatched: 60, self: { isClaimed: false, currentMinutesWatched: 0 } }
+            ]
+        };
+
+        // Old campaign is inactive, but new campaign for the same game MUST remain active!
+        assert.equal(isCampaignActiveWithDrops(inventoryWithOldExpiredCamp.dropCampaignsInProgress[0], now, inventoryWithOldExpiredCamp), false);
+        assert.equal(isCampaignActiveWithDrops(newActiveCampaign, now, inventoryWithOldExpiredCamp), true);
+    });
 });
 

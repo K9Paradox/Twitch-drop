@@ -797,9 +797,20 @@ export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null)
     // Check inventory for completion if inventory is provided
     if (inventory && typeof inventory === "object") {
         const inProgressList = Array.isArray(inventory.dropCampaignsInProgress) ? inventory.dropCampaignsInProgress : [];
-        const inProg = inProgressList.find(p =>
-            p && (p.id === c.id || (p.game && areGameNamesMatching(p.game.displayName || p.game.name, c.game?.displayName || c.game?.name)))
-        );
+        let inProg = c.id ? inProgressList.find(p => p && p.id === c.id) : null;
+        if (!inProg) {
+            const cDropIds = new Set((Array.isArray(c.timeBasedDrops) ? c.timeBasedDrops : []).map(d => d?.id).filter(Boolean));
+            inProg = inProgressList.find(p => {
+                if (!p) return false;
+                if (c.id && p.id && p.id !== c.id) {
+                    if (cDropIds.size > 0 && Array.isArray(p.timeBasedDrops)) {
+                        return p.timeBasedDrops.some(d => d?.id && cDropIds.has(d.id));
+                    }
+                    return false;
+                }
+                return Boolean(p.game && areGameNamesMatching(p.game.displayName || p.game.name, c.game?.displayName || c.game?.name));
+            });
+        }
 
         if (inProg) {
             // Check if in-progress campaign is expired by endAt, endsAt or status
