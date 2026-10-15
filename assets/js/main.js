@@ -77,6 +77,11 @@ let currentClaimedInventory = [];
 let currentAutoGamesData = { allConnected: [], enabled: [] };
 let tabAudioMuted = true;
 let authBannerDismissed = false;
+let twitchServerTimeOffset = 0;
+
+function getEffectiveNow() {
+    return Date.now() + (Number(twitchServerTimeOffset) || 0);
+}
 
 const GIFT_SVG_ICON = `
 <svg class="rewardFallbackGlyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -133,9 +138,14 @@ $(() => {
             "oauthToken",
             "authState",
             "claimedInventory",
-            "githubUpdate"
+            "githubUpdate",
+            "twitchServerTimeOffset"
         ]).then((val) => {
             if (!val) val = {};
+
+            if (typeof val.twitchServerTimeOffset === "number" && !Number.isNaN(val.twitchServerTimeOffset)) {
+                twitchServerTimeOffset = val.twitchServerTimeOffset;
+            }
 
             extEnabled = val.exEnabled !== undefined ? Boolean(val.exEnabled) : true;
             $(".enableEx").prop("checked", extEnabled);
@@ -220,6 +230,10 @@ $(() => {
         chrome.storage.onChanged.addListener((changes, areaName) => {
             if (areaName && areaName !== "local") return;
             if (!changes || typeof changes !== "object") return;
+
+            if (changes.twitchServerTimeOffset && typeof changes.twitchServerTimeOffset.newValue === "number" && !Number.isNaN(changes.twitchServerTimeOffset.newValue)) {
+                twitchServerTimeOffset = changes.twitchServerTimeOffset.newValue;
+            }
 
             // Master enable switch
             if (changes.exEnabled !== undefined) {
@@ -922,10 +936,11 @@ function populateGameDropdown(data) {
     activeDropGamesSet.clear();
 
     if (Array.isArray(data)) {
+        const now = getEffectiveNow();
         data.forEach(camp => {
             let name = "";
             let isActive = false;
-            const isExpired = Boolean(camp && camp.endAt && !isNaN(new Date(camp.endAt).getTime()) && new Date(camp.endAt).getTime() <= Date.now());
+            const isExpired = Boolean(camp && camp.endAt && !isNaN(new Date(camp.endAt).getTime()) && new Date(camp.endAt).getTime() <= now);
 
             if (camp && camp.game && camp.game.displayName) {
                 name = camp.game.displayName;
@@ -1023,10 +1038,11 @@ function updateDropProgressUI(data) {
         $(".selectedGame").text(gameName);
     }
 
-    const isClosedOrEnded = camp.status === "no_active_drops" || Boolean(camp.endsAt && !isNaN(camp.endsAt) && Date.now() >= camp.endsAt && !camp.isCompleted);
+    const effectiveNow = getEffectiveNow();
+    const isClosedOrEnded = camp.status === "no_active_drops" || Boolean(camp.endsAt && !isNaN(camp.endsAt) && effectiveNow >= camp.endsAt && !camp.isCompleted);
     if (isClosedOrEnded) {
         $("#stopCampaignBtn").hide();
-        const isExpired = Boolean(camp.endsAt && Date.now() >= camp.endsAt && !camp.isCompleted);
+        const isExpired = Boolean(camp.endsAt && effectiveNow >= camp.endsAt && !camp.isCompleted);
         const headerTitle = isExpired ? `Campaign Closed: ${gameName}` : `No Active Drops: ${gameName}`;
         const headerPill = isExpired ? 'Campaign Closed' : 'No Active Drops';
         const cardTitle = isExpired ? `Drop Campaign Closed for ${escapeHtml(gameName)}` : `No Active Drops for ${escapeHtml(gameName)}`;
@@ -1148,7 +1164,7 @@ function updateDropProgressUI(data) {
                     return reqA - reqB;
                 });
 
-                const now = Date.now();
+                const now = effectiveNow;
                 allClaimed = true;
                 allItems.forEach(i => {
                     const req = i.reqTime || i.requiredMinutesWatched || 60;
@@ -1302,9 +1318,10 @@ function renderActiveDropsList(activeStream) {
     const camp = activeStream.campaign;
     const gameName = camp.game ? (camp.game.name || camp.game.displayName || "Selected Game") : (typeof camp === "string" ? camp : "Selected Game");
 
-    const isClosedOrEnded = camp.status === "no_active_drops" || Boolean(camp.endsAt && !isNaN(camp.endsAt) && Date.now() >= camp.endsAt && !camp.isCompleted);
+    const effectiveNow = getEffectiveNow();
+    const isClosedOrEnded = camp.status === "no_active_drops" || Boolean(camp.endsAt && !isNaN(camp.endsAt) && effectiveNow >= camp.endsAt && !camp.isCompleted);
     if (isClosedOrEnded) {
-        const isExpired = Boolean(camp.endsAt && Date.now() >= camp.endsAt && !camp.isCompleted);
+        const isExpired = Boolean(camp.endsAt && effectiveNow >= camp.endsAt && !camp.isCompleted);
         const titleText = isExpired ? `Campaign Closed: ${escapeHtml(gameName)}` : `No Active Drops: ${escapeHtml(gameName)}`;
         const bodyText = isExpired
             ? `The official Twitch drop campaign for <strong>${escapeHtml(gameName)}</strong> has reached its scheduled end time and closed. Farming has paused automatically.`
@@ -1372,7 +1389,7 @@ function renderActiveDropsList(activeStream) {
 
     const campaigns = Array.isArray(activeStream.campaigns) ? activeStream.campaigns : [];
     const allRewardsList = [];
-    const now = Date.now();
+    const now = effectiveNow;
 
     campaigns.forEach((campaignObj) => {
         if (!campaignObj) return;

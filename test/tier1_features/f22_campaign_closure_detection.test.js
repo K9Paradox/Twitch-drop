@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { setupTestSandbox } from "../harness/sandbox.js";
-import { Client, isCampaignActiveWithDrops, areGameNamesMatching } from "../../background/twitchApi.js";
+import { Client, isCampaignActiveWithDrops, areGameNamesMatching, getTwitchNow, setTwitchServerTimeOffset } from "../../background/twitchApi.js";
 
 describe("Tier 1: Feature 22 - Campaign Closure & Expiration Detection", () => {
     let sandbox;
@@ -9,6 +9,7 @@ describe("Tier 1: Feature 22 - Campaign Closure & Expiration Detection", () => {
 
     beforeEach(() => {
         sandbox = setupTestSandbox();
+        setTwitchServerTimeOffset(0, false);
         client = new Client({
             clientId: "test-client-id",
             oauthToken: "test-oauth-token-abc"
@@ -486,5 +487,90 @@ describe("Tier 1: Feature 22 - Campaign Closure & Expiration Detection", () => {
         assert.equal(isCampaignActiveWithDrops(inventoryWithOldExpiredCamp.dropCampaignsInProgress[0], now, inventoryWithOldExpiredCamp), false);
         assert.equal(isCampaignActiveWithDrops(newActiveCampaign, now, inventoryWithOldExpiredCamp), true);
     });
+
+    it("F22-T13: Clock skew calibration detects active Overwatch campaigns when system clock is 30 days ahead of Twitch server time", async () => {
+        // Simulate system Date.now() being 30 days ahead of real Twitch server time
+        const simulatedServerNow = Date.now() - (30 * 86400000);
+        const campStart = new Date(simulatedServerNow - (2 * 86400000)).toISOString();
+        const campEnd = new Date(simulatedServerNow + (5 * 86400000)).toISOString();
+
+        sandbox.fetchMock.onGql("ViewerDropsDashboard", () => {
+            return new Response(JSON.stringify({
+                data: {
+                    currentUser: {
+                        dropCampaigns: [
+                            {
+                                id: "camp-ow-skew",
+                                game: { id: "488552", displayName: "Overwatch 2" },
+                                status: "ACTIVE",
+                                startAt: campStart,
+                                endAt: campEnd
+                            }
+                        ]
+                    }
+                }
+            }), {
+                status: 200,
+                headers: {
+                    "Content-Type": "application/json",
+                    "Date": new Date(simulatedServerNow).toUTCString()
+                }
+            });
+        });
+
+        const connected = await client.getConnectedGames();
+        assert.equal(connected.length, 1);
+        assert.equal(connected[0].id, "camp-ow-skew");
+
+        const campWithDrop = {
+            ...connected[0],
+            timeBasedDrops: [
+                {
+                    id: "drop-ow-skew-1",
+                    endAt: campEnd,
+                    requiredMinutesWatched: 60,
+                    self: { isClaimed: false, currentMinutesWatched: 0 }
+                }
+            ]
+        };
+        assert.equal(isCampaignActiveWithDrops(campWithDrop, getTwitchNow(), null), true);
+        setTwitchServerTimeOffset(0, false);
+    });
+
+    it("F22-T14: getDropCampaignDetails auto-detects userId when missing so DropCampaignDetails returns full timeBasedDrops", async () => {
+        const uninitializedClient = new Client({
+            clientId: "test-client-id",
+            oauthToken: "test-oauth-token-abc",
+            userId: ""
+        });
+
+        let capturedVariables = null;
+        sandbox.fetchMock.onGql("DropCampaignDetails", (url, opts, body) => {
+            const parsed = typeof body === "string" ? JSON.parse(body) : body;
+            const op = Array.isArray(parsed) ? parsed[0] : parsed;
+            capturedVariables = op.variables;
+            return new Response(JSON.stringify({
+                data: {
+                    user: {
+                        dropCampaign: {
+                            id: "camp-ow-details",
+                            name: "Overwatch 2 Midseason Drops",
+                            status: "ACTIVE",
+                            timeBasedDrops: [
+                                { id: "drop-1", name: "Loot Box", requiredMinutesWatched: 60 }
+                            ]
+                        }
+                    }
+                }
+            }), { status: 200, headers: { "Content-Type": "application/json" } });
+        });
+
+        const details = await uninitializedClient.getDropCampaignDetails("camp-ow-details");
+        assert.equal(uninitializedClient.userId, "12345678");
+        assert.equal(capturedVariables.channelLogin, "12345678");
+        assert.equal(capturedVariables.dropID, "camp-ow-details");
+        assert.equal(details.timeBasedDrops.length, 1);
+    });
 });
+
 

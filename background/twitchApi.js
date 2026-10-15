@@ -2,6 +2,65 @@
  * Twitch GQL & Internal API Client
  */
 
+let twitchServerTimeOffset = 0;
+let hasCalibratedServerTime = false;
+
+export function getTwitchNow() {
+    return Date.now() + twitchServerTimeOffset;
+}
+
+export function setTwitchServerTimeOffset(offsetMs, calibrated = true) {
+    const num = Number(offsetMs);
+    twitchServerTimeOffset = Number.isFinite(num) ? num : 0;
+    hasCalibratedServerTime = Boolean(calibrated);
+    try {
+        if (typeof chrome !== "undefined" && chrome?.storage?.local) {
+            chrome.storage.local.set({ twitchServerTimeOffset }).catch(() => {});
+        }
+    } catch (e) {}
+}
+
+export function updateServerTimeFromResponse(res) {
+    try {
+        const dateHeader = res?.headers?.get?.("date") || res?.headers?.get?.("Date");
+        if (dateHeader) {
+            const serverMs = Date.parse(dateHeader);
+            if (!isNaN(serverMs) && serverMs > 0) {
+                setTwitchServerTimeOffset(serverMs - Date.now(), true);
+            }
+        }
+    } catch (e) {}
+}
+
+export function calibrateOffsetFromCampaignsList(campaigns) {
+    if (hasCalibratedServerTime || !Array.isArray(campaigns) || campaigns.length < 3) return;
+    const activeWithDates = campaigns.filter(c => c && c.status === "ACTIVE" && (c.endAt || c.endsAt));
+    if (activeWithDates.length < 3) return;
+    const localNow = Date.now();
+    const anyFutureEnd = activeWithDates.some(c => {
+        const endTs = new Date(c.endAt || c.endsAt).getTime();
+        return !isNaN(endTs) && endTs > localNow;
+    });
+    if (anyFutureEnd) return;
+
+    // Every ACTIVE campaign on Twitch's dashboard has an endAt <= local Date.now(),
+    // which indicates the user's PC clock is set ahead of real-world Twitch time.
+    let latestStartMs = 0;
+    let latestEndMs = 0;
+    for (const c of activeWithDates) {
+        const sMs = c.startAt ? new Date(c.startAt).getTime() : NaN;
+        const eMs = new Date(c.endAt || c.endsAt).getTime();
+        if (!isNaN(sMs) && sMs > latestStartMs) latestStartMs = sMs;
+        if (!isNaN(eMs) && eMs > latestEndMs) latestEndMs = eMs;
+    }
+    const estimatedNow = latestStartMs > 0
+        ? (latestStartMs + 3600000)
+        : (latestEndMs > 0 ? (latestEndMs - 86400000) : 0);
+    if (estimatedNow > 0 && estimatedNow < localNow) {
+        setTwitchServerTimeOffset(estimatedNow - localNow, true);
+    }
+}
+
 export class TwitchApiError extends Error {
     constructor(message, { status = null, errors = null, operationName = null } = {}) {
         super(message);
@@ -61,6 +120,8 @@ export class Client {
             body: JSON.stringify(data)
         });
 
+        updateServerTimeFromResponse(res);
+
         if (!res.ok) {
             throw new TwitchApiError(`Twitch GQL HTTP error ${res.status}: ${res.statusText}`, {
                 status: res.status,
@@ -105,6 +166,8 @@ export class Client {
             headers: headers,
             body: JSON.stringify(data)
         });
+
+        updateServerTimeFromResponse(res);
 
         if (!res.ok) {
             throw new TwitchApiError(`Twitch GQL HTTP error ${res.status}: ${res.statusText}`, {
@@ -224,6 +287,12 @@ export class Client {
     }
 
     async getDropCampaigns(includeAll = false) {
+        const finishList = (list) => {
+            if (Array.isArray(list) && list.length > 0) {
+                calibrateOffsetFromCampaignsList(list);
+            }
+            return list;
+        };
         if (this.oauthToken) {
             try {
                 const data = await this.postAuthorized({
@@ -248,18 +317,18 @@ export class Client {
                                 merged.push(rc);
                             }
                         }
-                        return merged;
+                        return finishList(merged);
                     }
-                    return data.currentUser.dropCampaigns;
+                    return finishList(data.currentUser.dropCampaigns);
                 }
                 if (data && Array.isArray(data.dropCampaigns) && data.dropCampaigns.length > 0) {
-                    return data.dropCampaigns;
+                    return finishList(data.dropCampaigns);
                 }
                 if (includeAll && data && Array.isArray(data.rewardCampaignsAvailableToUser)) {
-                    return data.rewardCampaignsAvailableToUser;
+                    return finishList(data.rewardCampaignsAvailableToUser);
                 }
                 if (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) {
-                    return data.currentUser.dropCampaigns;
+                    return finishList(data.currentUser.dropCampaigns);
                 }
             } catch (e) {}
         }
@@ -289,11 +358,11 @@ export class Client {
                         merged.push(c);
                     }
                 }
-                if (merged.length > 0) return merged;
+                if (merged.length > 0) return finishList(merged);
             }
-            if (data && Array.isArray(data.dropCampaigns) && data.dropCampaigns.length > 0) return data.dropCampaigns;
-            if (data && Array.isArray(data.rewardCampaignsAvailableToUser) && data.rewardCampaignsAvailableToUser.length > 0) return data.rewardCampaignsAvailableToUser;
-            if (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) return data.currentUser.dropCampaigns;
+            if (data && Array.isArray(data.dropCampaigns) && data.dropCampaigns.length > 0) return finishList(data.dropCampaigns);
+            if (data && Array.isArray(data.rewardCampaignsAvailableToUser) && data.rewardCampaignsAvailableToUser.length > 0) return finishList(data.rewardCampaignsAvailableToUser);
+            if (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns)) return finishList(data.currentUser.dropCampaigns);
         } catch (e) {}
 
         return [];
@@ -306,7 +375,7 @@ export class Client {
     async getConnectedGames() {
         const campaigns = await this.getDropCampaigns();
         const games = [];
-        const now = Date.now();
+        const now = getTwitchNow();
         if (Array.isArray(campaigns)) {
             for (const campaign of campaigns) {
                 if (campaign && campaign.game && campaign.status !== "EXPIRED") {
@@ -333,9 +402,12 @@ export class Client {
 
     async getDropCampaignDetails(dropId) {
         if (!dropId) return null;
+        if (!this.userId && this.oauthToken) {
+            await this.autoDetectUserId().catch(() => {});
+        }
         try {
             if (typeof dropId === "string") {
-                const data = await this.postAuthorized({
+                const payload = {
                     "operationName": "DropCampaignDetails",
                     "extensions": {
                         "persistedQuery": {
@@ -347,7 +419,10 @@ export class Client {
                         "dropID": dropId,
                         "channelLogin": this.userId || ""
                     }
-                });
+                };
+                const data = this.oauthToken
+                    ? await this.postAuthorized(payload).catch(() => this.post(payload))
+                    : await this.post(payload);
                 return data && data.user ? data.user.dropCampaign : (data?.dropCampaign || null);
             } else if (Array.isArray(dropId)) {
                 if (dropId.length === 0) return [];
@@ -364,7 +439,9 @@ export class Client {
                         "channelLogin": this.userId || ""
                     }
                 }));
-                const data = await this.postAuthorized(dataAry);
+                const data = this.oauthToken
+                    ? await this.postAuthorized(dataAry).catch(() => this.post(dataAry))
+                    : await this.post(dataAry);
                 return Array.isArray(data) ? data : [];
             }
         } catch (e) {
@@ -748,12 +825,12 @@ export class Client {
         return { login: channelLogin };
     }
 
-    isCampaignActiveWithDrops(campaign, now = Date.now(), inventory = null) {
+    isCampaignActiveWithDrops(campaign, now = getTwitchNow(), inventory = null) {
         return isCampaignActiveWithDrops(campaign, now, inventory);
     }
 }
 
-export function isCampaignActiveWithDrops(c, now = Date.now(), inventory = null) {
+export function isCampaignActiveWithDrops(c, now = getTwitchNow(), inventory = null) {
     if (!c) return false;
     if (c.status !== "ACTIVE") return false;
 
