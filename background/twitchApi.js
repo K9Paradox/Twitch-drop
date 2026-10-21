@@ -727,9 +727,20 @@ export class Client {
 
             if (listToCheck.length === 0) return null;
 
+            const isStreamPlayingTargetGame = (streamObj) => {
+                if (!streamObj) return false;
+                const streamGame = streamObj.game?.displayName || streamObj.game?.name;
+                // If ChannelShell includes the game name, verify it matches target game (or Special Events for official broadcasts)
+                if (streamGame && gameName) {
+                    if (streamGame.toLowerCase() === "special events") return true;
+                    return areGameNamesMatching(streamGame, gameName);
+                }
+                return true;
+            };
+
             if (listToCheck.length === 1) {
                 const stream = await this.getStream(listToCheck[0]);
-                if (stream) {
+                if (stream && isStreamPlayingTargetGame(stream)) {
                     return listToCheck[0];
                 }
                 return null;
@@ -739,7 +750,8 @@ export class Client {
                 if (Array.isArray(res)) {
                     for (let i = 0; i < res.length; i++) {
                         const item = res[i];
-                        if (item?.data?.userOrError?.stream) {
+                        const streamObj = item?.data?.userOrError?.stream;
+                        if (streamObj && isStreamPlayingTargetGame(streamObj)) {
                             return batch[i];
                         }
                     }

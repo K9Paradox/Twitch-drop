@@ -726,6 +726,33 @@ async function handleWatchdogTick() {
                     }
                 }
 
+                // IF/OR Requirement Promotion:
+                // If we are currently farming a fallback requirement (e.g. open category streamer because ow_esports was offline),
+                // check if a higher-priority restricted campaign's required channel just went LIVE!
+                const curIdx = activeStream.campaign?.onCamp || 0;
+                if (curIdx > 0 && Array.isArray(activeStream.campaigns)) {
+                    for (let pIdx = 0; pIdx < curIdx; pIdx++) {
+                        const priorityCamp = activeStream.campaigns[pIdx];
+                        if (priorityCamp && isCampaignFarmable(priorityCamp, nowWatchdog) && Array.isArray(priorityCamp.streamers) && priorityCamp.streamers.length > 0) {
+                            const livePriorityStreamer = await client.getLiveBroadcasterForCampaign(
+                                activeStream.campaign.game?.name,
+                                priorityCamp.id,
+                                activeStream.campaign.slug,
+                                priorityCamp.streamers,
+                                activeStream.campaign.skippedStreamers || []
+                            ).catch(() => null);
+                            if (livePriorityStreamer) {
+                                console.log(`[RequirementSwitch] Higher-priority required channel @${livePriorityStreamer} (${priorityCamp.id}) is now LIVE! Switching from fallback.`);
+                                activeStream.campaign.onCamp = pIdx;
+                                activeStream.campaign.requiredStreamers = priorityCamp.streamers || [];
+                                await saveState();
+                                await runCampaign(true);
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 // Ensure headless watch loop is running and verify currently watched streamer
                 startHeadlessWatchLoop();
 
@@ -1456,9 +1483,14 @@ async function runCampaign(forceNextStreamer = false) {
         );
     }
 
-    // MULTI-CAMPAIGN FAILOVER:
-    // If no live streamer was found for the primary campaign (e.g. required channels offline),
-    // check if sibling campaigns in activeStream.campaigns are farmable and have live broadcasters
+    // IF/OR MULTI-CAMPAIGN REQUIREMENT FAILOVER:
+    // If the primary requirement (e.g. restricted channel like ow_esports) is not met because those channels are offline,
+    // immediately switch to the next farmable campaign requirement (e.g. open category streamer) so view time continues uninterrupted.
+    let offlineRestrictedStreamers = [];
+    if (!targetStreamer && Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0) {
+        offlineRestrictedStreamers = [...curCamp.streamers];
+    }
+
     if (!targetStreamer && activeStream.campaigns.length > 1) {
         for (let i = 0; i < activeStream.campaigns.length; i++) {
             if (i === activeStream.campaign.onCamp) continue;
@@ -1484,12 +1516,14 @@ async function runCampaign(forceNextStreamer = false) {
             }
 
             if (siblingStreamer) {
-                console.log(`[CampaignFailover] Primary campaign ${curCamp.id} streamers offline. Failing over to sibling campaign ${siblingCamp.id} streamer @${siblingStreamer}`);
+                console.log(`[CampaignFailover] Primary campaign ${curCamp.id} requirement not met (streamers offline). Switching to sibling campaign ${siblingCamp.id} streamer @${siblingStreamer}`);
                 activeStream.campaign.onCamp = i;
                 curCamp = siblingCamp;
                 targetStreamer = siblingStreamer;
                 activeStream.campaign.requiredStreamers = curCamp.streamers || [];
                 break;
+            } else if (Array.isArray(siblingCamp.streamers) && siblingCamp.streamers.length > 0 && offlineRestrictedStreamers.length === 0) {
+                offlineRestrictedStreamers = [...siblingCamp.streamers];
             }
         }
     }
@@ -1513,6 +1547,7 @@ async function runCampaign(forceNextStreamer = false) {
         activeStream.campaign.status = "nostream";
         const anyFarmableOpen = activeStream.campaigns.some(c => isCampaignFarmable(c, nowTs) && (!c.streamers || c.streamers.length === 0));
         activeStream.campaign.requiredStreamers = anyFarmableOpen ? [] : (curCamp.streamers || []);
+        activeStream.campaign.requirementType = anyFarmableOpen ? "open" : "restricted";
         await saveState();
         chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
         updateBadgeUI();
@@ -1520,6 +1555,17 @@ async function runCampaign(forceNextStreamer = false) {
     }
 
     activeStream.campaign.curWatching = targetStreamer;
+    const isRestrictedActive = Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0;
+    if (isRestrictedActive) {
+        activeStream.campaign.requirementType = "restricted";
+        activeStream.campaign.fallbackFromStreamers = [];
+    } else if (offlineRestrictedStreamers.length > 0) {
+        activeStream.campaign.requirementType = "fallback_open";
+        activeStream.campaign.fallbackFromStreamers = offlineRestrictedStreamers;
+    } else {
+        activeStream.campaign.requirementType = "open";
+        activeStream.campaign.fallbackFromStreamers = [];
+    }
 
     // Reset progress tracking & stall counts for new/re-targeted streamer
     activeStream.campaign.lastMinutesWatched = curCamp.minutesWatched || 0;
@@ -1637,7 +1683,7 @@ async function createCampaign(game, isManual = false) {
                 }
             }
             const streams = [];
-            if (dropCamp.allow && dropCamp.allow.channels) {
+            if (dropCamp.allow && dropCamp.allow.isEnabled !== false && Array.isArray(dropCamp.allow.channels)) {
                 for (const stream of dropCamp.allow.channels) {
                     if (stream && stream.name) streams.push(stream.name);
                 }
@@ -1744,6 +1790,7 @@ async function createCampaign(game, isManual = false) {
             activeStream.campaigns.push({
                 game: dropCamp.game ? (dropCamp.game.displayName || dropCamp.game.name) : game,
                 id: dropCamp.id,
+                name: dropCamp.name || "",
                 endsAt: dropCamp.endAt ? new Date(dropCamp.endAt).getTime() : (earliestEndsAt || null),
                 startAt: dropCamp.startAt || null,
                 endAt: dropCamp.endAt || null,
@@ -1821,9 +1868,10 @@ async function createCampaign(game, isManual = false) {
     }
 
     if (activeStream.campaigns.length > 0) {
-        // Multi-campaign prioritization:
+        // Multi-campaign IF/OR prioritization:
         // 1. Prioritize farmable campaigns over ended/completed campaigns
-        // 2. Prioritize open-streamer campaigns (streamers.length === 0) over restricted streamer campaigns
+        // 2. Prioritize restricted-channel campaigns (e.g. ow_esports) first so we check if they are live;
+        //    if they are offline, runCampaign() automatically fails over (IF/OR) to the open-streamer campaign!
         // 3. Prioritize earlier ending campaigns so soonest-to-expire drops are farmed first
         activeStream.campaigns.sort((a, b) => {
             const aFarmable = isCampaignFarmable(a, now);
@@ -1831,10 +1879,10 @@ async function createCampaign(game, isManual = false) {
             if (aFarmable !== bFarmable) {
                 return aFarmable ? -1 : 1;
             }
-            const aOpen = (!a.streamers || a.streamers.length === 0);
-            const bOpen = (!b.streamers || b.streamers.length === 0);
-            if (aOpen !== bOpen) {
-                return aOpen ? -1 : 1;
+            const aRestricted = Array.isArray(a.streamers) && a.streamers.length > 0;
+            const bRestricted = Array.isArray(b.streamers) && b.streamers.length > 0;
+            if (aRestricted !== bRestricted) {
+                return aRestricted ? -1 : 1;
             }
             const aEnd = a.endsAt || Infinity;
             const bEnd = b.endsAt || Infinity;
