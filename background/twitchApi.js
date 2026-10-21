@@ -79,6 +79,8 @@ export class Client {
         this.integrity = options?.integrity ?? null;
         this.userId = options?.userId ?? null;
         this.uuid = options?.uuid ?? null;
+        this._streamUrlCache = new Map();
+        this._spadeUrlCache = new Map();
     }
 
     extractOperationName(data) {
@@ -771,8 +773,11 @@ export class Client {
                     }
                 }
             });
-            const stream = data?.userOrError?.stream;
+            const userObj = data?.userOrError;
+            const stream = userObj?.stream;
             if (stream) {
+                let channelId = userObj?.id ? String(userObj.id) : undefined;
+                let broadcastId = stream.id ? String(stream.id) : undefined;
                 let game = stream.game?.displayName || stream.game?.name;
                 let title = stream.title || "";
                 let viewers = stream.viewersCount || 0;
@@ -786,17 +791,24 @@ export class Client {
                             "query": "query GetChannelStream($login: String!) { user(login: $login) { id login stream { id game { id name displayName } title viewersCount type } } }",
                             "variables": { "login": channelLogin }
                         });
-                        const directStream = directData?.user?.stream;
-                        if (directStream && directStream.game) {
-                            game = directStream.game.displayName || directStream.game.name;
-                            title = directStream.title || title;
-                            viewers = directStream.viewersCount || viewers;
+                        const directUser = directData?.user;
+                        const directStream = directUser?.stream;
+                        if (directUser?.id && !channelId) channelId = String(directUser.id);
+                        if (directStream) {
+                            if (directStream.id && !broadcastId) broadcastId = String(directStream.id);
+                            if (directStream.game) {
+                                game = directStream.game.displayName || directStream.game.name;
+                                title = directStream.title || title;
+                                viewers = directStream.viewersCount || viewers;
+                            }
                         }
                     } catch (err) {}
                 }
 
                 return {
                     login: channelLogin,
+                    channelId: channelId,
+                    broadcastId: broadcastId,
                     game: game || undefined,
                     title: title,
                     viewers: viewers
@@ -811,10 +823,13 @@ export class Client {
                 "query": "query GetChannelStream($login: String!) { user(login: $login) { id login stream { id game { id name displayName } title viewersCount type } } }",
                 "variables": { "login": channelLogin }
             });
-            const directStream = directData?.user?.stream;
+            const directUser = directData?.user;
+            const directStream = directUser?.stream;
             if (directStream) {
                 return {
                     login: channelLogin,
+                    channelId: directUser?.id ? String(directUser.id) : undefined,
+                    broadcastId: directStream.id ? String(directStream.id) : undefined,
                     game: directStream.game?.displayName || directStream.game?.name || undefined,
                     title: directStream.title || "",
                     viewers: directStream.viewersCount || 0
@@ -823,6 +838,280 @@ export class Client {
         } catch (err) {}
 
         return { login: channelLogin };
+    }
+
+    /**
+     * Headless Watch Engine (TwitchDropsMiner method):
+     * 1. Fetch stream PlaybackAccessToken via GQL
+     * 2. Fetch master HLS playlist from usher.ttvnw.net and pick lowest-quality variant URL
+     * 3. Fetch variant .m3u8 playlist and send HEAD request to latest .ts transport segment
+     * 4. Fallback/secondary: POST Base64-encoded "minute-watched" payload to Spade beacon URL
+     */
+    async getPlaybackAccessToken(channelLogin) {
+        if (!channelLogin) return null;
+        const login = String(channelLogin).toLowerCase();
+        try {
+            const data = await this.postAuthorized({
+                "operationName": "PlaybackAccessToken",
+                "variables": {
+                    "isLive": true,
+                    "login": login,
+                    "isVod": false,
+                    "vodID": "",
+                    "playerType": "site"
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9"
+                    }
+                }
+            });
+            const token = data?.streamPlaybackAccessToken;
+            if (token && token.value && token.signature) {
+                return { value: token.value, signature: token.signature };
+            }
+        } catch (e) {}
+
+        // Fallback to raw GQL query if persistedQuery hash is rejected or unavailable
+        try {
+            const fallbackData = await this.postAuthorized({
+                "operationName": "PlaybackAccessToken_Template",
+                "query": "query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isLive) { value signature __typename } }",
+                "variables": {
+                    "isLive": true,
+                    "login": login,
+                    "isVod": false,
+                    "vodID": "",
+                    "playerType": "site"
+                }
+            });
+            const token = fallbackData?.streamPlaybackAccessToken;
+            if (token && token.value && token.signature) {
+                return { value: token.value, signature: token.signature };
+            }
+        } catch (e) {}
+
+        return null;
+    }
+
+    async getStreamUrl(channelLogin) {
+        if (!channelLogin) return null;
+        const login = String(channelLogin).toLowerCase();
+        const token = await this.getPlaybackAccessToken(login);
+        if (!token) return null;
+
+        const params = new URLSearchParams({
+            sig: token.signature,
+            token: token.value,
+            allow_source: "true",
+            allow_audio_only: "true",
+            fast_bread: "true",
+            player_backend: "mediaplayer",
+            p: String(Math.floor(Math.random() * 900000) + 100000)
+        });
+
+        const usherUrl = `https://usher.ttvnw.net/api/channel/hls/${encodeURIComponent(login)}.m3u8?${params.toString()}`;
+        try {
+            const res = await fetch(usherUrl, { method: "GET" });
+            if (!res || !res.ok) return null;
+            const playlistText = await res.text();
+            if (!playlistText) return null;
+
+            const lines = playlistText
+                .split(/\r?\n/)
+                .map(l => l.trim())
+                .filter(l => l.length > 0 && !l.startsWith("#"));
+
+            if (lines.length === 0) return null;
+            // Twitch lists lowest-resolution/audio_only variants at the bottom of the master playlist
+            return lines[lines.length - 1];
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async sendWatchPlaylist(channelLogin) {
+        if (!channelLogin) return false;
+        const login = String(channelLogin).toLowerCase();
+        if (!this._streamUrlCache) this._streamUrlCache = new Map();
+
+        let variantUrl = this._streamUrlCache.get(login);
+        let variantText = null;
+
+        if (variantUrl) {
+            try {
+                const res = await fetch(variantUrl, { method: "GET" });
+                if (res && res.ok) {
+                    variantText = await res.text();
+                } else {
+                    this._streamUrlCache.delete(login);
+                    variantUrl = null;
+                }
+            } catch (e) {
+                this._streamUrlCache.delete(login);
+                variantUrl = null;
+            }
+        }
+
+        if (!variantUrl) {
+            variantUrl = await this.getStreamUrl(login);
+            if (!variantUrl) return false;
+            try {
+                const res = await fetch(variantUrl, { method: "GET" });
+                if (!res || !res.ok) return false;
+                variantText = await res.text();
+                this._streamUrlCache.set(login, variantUrl);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        if (!variantText) return false;
+        const lines = variantText
+            .split(/\r?\n/)
+            .map(l => l.trim())
+            .filter(l => l.length > 0 && !l.startsWith("#"));
+
+        if (lines.length === 0) {
+            this._streamUrlCache.delete(login);
+            return false;
+        }
+
+        let segmentUrl = lines[lines.length - 1];
+        if (!/^https?:\/\//i.test(segmentUrl)) {
+            try {
+                segmentUrl = new URL(segmentUrl, variantUrl).toString();
+            } catch (e) {
+                return false;
+            }
+        }
+
+        try {
+            const headRes = await fetch(segmentUrl, { method: "HEAD" });
+            if (headRes && (headRes.ok || headRes.status === 200 || headRes.status === 206)) {
+                return true;
+            }
+            // Fallback to GET if HEAD is disallowed by edge node
+            const getRes = await fetch(segmentUrl, { method: "GET" });
+            return Boolean(getRes && getRes.ok);
+        } catch (e) {
+            this._streamUrlCache.delete(login);
+            return false;
+        }
+    }
+
+    async getSpadeUrl(channelLogin) {
+        const DEFAULT_SPADE_URL = "https://video-edge-c2c424.pdx01.abs.hls.ttvnw.net/v1/segment";
+        if (!channelLogin) return DEFAULT_SPADE_URL;
+        const login = String(channelLogin).toLowerCase();
+        if (!this._spadeUrlCache) this._spadeUrlCache = new Map();
+
+        if (this._spadeUrlCache.has(login)) {
+            return this._spadeUrlCache.get(login);
+        }
+
+        const spadeRegex = /"spade_?url"\s*:\s*"(https:\/\/[^"]+)"/i;
+        const settingsJsRegex = /src="(https:\/\/[\w./-]+\/config\/settings\.[0-9a-f]{32}\.js)"/i;
+
+        try {
+            const pageRes = await fetch(`https://www.twitch.tv/${encodeURIComponent(login)}`, { method: "GET" });
+            if (pageRes && pageRes.ok) {
+                const html = await pageRes.text();
+                const directMatch = html.match(spadeRegex);
+                if (directMatch && directMatch[1]) {
+                    this._spadeUrlCache.set(login, directMatch[1]);
+                    return directMatch[1];
+                }
+                const settingsMatch = html.match(settingsJsRegex);
+                if (settingsMatch && settingsMatch[1]) {
+                    const jsRes = await fetch(settingsMatch[1], { method: "GET" });
+                    if (jsRes && jsRes.ok) {
+                        const jsText = await jsRes.text();
+                        const jsSpadeMatch = jsText.match(spadeRegex);
+                        if (jsSpadeMatch && jsSpadeMatch[1]) {
+                            this._spadeUrlCache.set(login, jsSpadeMatch[1]);
+                            return jsSpadeMatch[1];
+                        }
+                    }
+                }
+            }
+        } catch (e) {}
+
+        this._spadeUrlCache.set(login, DEFAULT_SPADE_URL);
+        return DEFAULT_SPADE_URL;
+    }
+
+    async sendWatchSpade(channelLogin, streamMeta = {}) {
+        if (!channelLogin) return false;
+        const login = String(channelLogin).toLowerCase();
+
+        let broadcastId = streamMeta?.broadcastId;
+        let channelId = streamMeta?.channelId;
+
+        if (!broadcastId || !channelId) {
+            try {
+                const meta = await this.getStreamMetadata(login);
+                broadcastId = broadcastId || meta?.broadcastId;
+                channelId = channelId || meta?.channelId;
+            } catch (e) {}
+        }
+
+        if (!broadcastId || !channelId) return false;
+
+        const spadeUrl = await this.getSpadeUrl(login);
+        const payload = [
+            {
+                event: "minute-watched",
+                properties: {
+                    broadcast_id: String(broadcastId),
+                    channel_id: String(channelId),
+                    channel: login,
+                    hidden: false,
+                    live: true,
+                    location: "channel",
+                    logged_in: true,
+                    muted: false,
+                    player: "site",
+                    ...(this.userId ? { user_id: Number(this.userId) || String(this.userId) } : {})
+                }
+            }
+        ];
+
+        const jsonStr = JSON.stringify(payload);
+        let base64Data;
+        if (typeof btoa === "function") {
+            base64Data = btoa(jsonStr);
+        } else {
+            base64Data = Buffer.from(jsonStr, "utf8").toString("base64");
+        }
+
+        try {
+            const res = await fetch(spadeUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                body: `data=${encodeURIComponent(base64Data)}`
+            });
+            return Boolean(res && (res.status === 204 || res.ok));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    async sendWatch(channelLogin, streamMeta = {}) {
+        if (!channelLogin) return { success: false, method: "none" };
+        const hlsOk = await this.sendWatchPlaylist(channelLogin);
+        // Also fire Spade minute-watched beacon if metadata is available or if HLS failed
+        const spadeOk = await this.sendWatchSpade(channelLogin, streamMeta);
+        if (hlsOk) {
+            return { success: true, method: "hls", spade: spadeOk };
+        }
+        if (spadeOk) {
+            return { success: true, method: "spade", spade: true };
+        }
+        return { success: false, method: "none" };
     }
 
     isCampaignActiveWithDrops(campaign, now = getTwitchNow(), inventory = null) {

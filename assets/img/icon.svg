@@ -1,41 +1,38 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
   <defs>
-    <linearGradient id="purpleGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#be87ff" />
-      <stop offset="100%" stop-color="#9146FF" />
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1d1138"/>
+      <stop offset="100%" stop-color="#0b0716"/>
     </linearGradient>
-    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#00ffb0" />
-      <stop offset="100%" stop-color="#00d684" />
+    <linearGradient id="cubeTop" x1="28" y1="22" x2="100" y2="62" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#c49bff"/>
+      <stop offset="100%" stop-color="#9146FF"/>
+    </linearGradient>
+    <linearGradient id="cubeLeft" x1="24" y1="44" x2="64" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#9146FF"/>
+      <stop offset="100%" stop-color="#5c16c5"/>
+    </linearGradient>
+    <linearGradient id="cubeRight" x1="64" y1="44" x2="104" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#772ce8"/>
+      <stop offset="100%" stop-color="#3b0d82"/>
+    </linearGradient>
+    <linearGradient id="mintGlow" x1="48" y1="30" x2="80" y2="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5cffbe"/>
+      <stop offset="100%" stop-color="#00e676"/>
     </linearGradient>
   </defs>
-
-  <!-- Big Bold Twitch Gamepad (Fills Top 70% of canvas) -->
-  <path d="M26 12 C 10 12, 2 24, 2 46 C 2 72, 16 100, 36 100 C 44 100, 52 92, 58 78 C 60 74, 62 72, 64 72 C 66 72, 68 74, 70 78 C 76 92, 84 100, 92 100 C 112 100, 126 72, 126 46 C 126 24, 118 12, 102 12 Z" fill="url(#purpleGrad)"/>
-
-  <!-- Left D-Pad (Bold White) -->
-  <rect x="22" y="38" width="20" height="7" rx="3" fill="#ffffff"/>
-  <rect x="28.5" y="31.5" width="7" height="20" rx="3" fill="#ffffff"/>
-
-  <!-- Right Action Buttons (Bold White) -->
-  <circle cx="94" cy="34" r="5" fill="#ffffff"/>
-  <circle cx="106" cy="45" r="5" fill="#ffffff"/>
-  <circle cx="82" cy="45" r="5" fill="#ffffff"/>
-  <circle cx="94" cy="56" r="5" fill="#ffffff"/>
-
-  <!-- Glowing Emerald Drop Box Center-Bottom (Fills Bottom Half) -->
-  <g transform="translate(32, 54)">
-    <!-- Box Body with crisp dark stroke -->
-    <rect x="4" y="24" width="56" height="46" rx="8" fill="url(#emeraldGrad)" stroke="#121214" stroke-width="4"/>
-    <!-- Box Lid -->
-    <rect x="0" y="14" width="64" height="14" rx="4" fill="#00ffcc" stroke="#121214" stroke-width="4"/>
-    <!-- Vertical Ribbon -->
-    <rect x="26" y="14" width="12" height="56" fill="#ffffff"/>
-    <!-- Horizontal Ribbon -->
-    <rect x="4" y="42" width="56" height="10" fill="#ffffff"/>
-    <!-- Big Ribbon Bow -->
-    <path d="M18 14 C 8 2, 28 2, 30 14 Z" fill="#ffffff" stroke="#121214" stroke-width="3"/>
-    <path d="M46 14 C 56 2, 36 2, 34 14 Z" fill="#ffffff" stroke="#121214" stroke-width="3"/>
-    <circle cx="32" cy="14" r="4.5" fill="#ffffff"/>
-  </g>
+  <!-- Squircle Background -->
+  <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#bgGrad)" stroke="#9146FF" stroke-width="3" stroke-opacity="0.65"/>
+  <!-- Outer Pulse Rings -->
+  <circle cx="64" cy="64" r="48" stroke="#00f59b" stroke-width="1.5" stroke-opacity="0.28" stroke-dasharray="6 6"/>
+  <!-- Isometric Loot Cube -->
+  <polygon points="64,20 104,42 64,64 24,42" fill="url(#cubeTop)" stroke="#e2ccff" stroke-width="2" stroke-linejoin="round"/>
+  <polygon points="24,42 64,64 64,108 24,86" fill="url(#cubeLeft)" stroke="#b17aff" stroke-width="2" stroke-linejoin="round"/>
+  <polygon points="104,42 64,64 64,108 104,86" fill="url(#cubeRight)" stroke="#9146FF" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Cybernetic Neon Ribbon / Seams -->
+  <path d="M44 31 L84 53 L84 97" stroke="#00f59b" stroke-width="3" stroke-linecap="round" stroke-opacity="0.85"/>
+  <path d="M84 31 L44 53 L44 97" stroke="#00f59b" stroke-width="3" stroke-linecap="round" stroke-opacity="0.85"/>
+  <!-- Central Emerald Lightning Bolt Badge -->
+  <circle cx="64" cy="66" r="19" fill="#0e091c" stroke="#00f59b" stroke-width="2.5"/>
+  <path d="M67 49 L53 67 H64 L61 83 L75 65 H64 L67 49 Z" fill="url(#mintGlow)"/>
 </svg>

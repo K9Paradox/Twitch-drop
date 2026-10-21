@@ -24,9 +24,9 @@ describe("Tier 1: Feature 15 - Manifest V3 CSP & QoL Enhancements", () => {
         assert.deepEqual(matches, [], "Found inline onerror handlers in main.js violating MV3 CSP: " + matches.join(", "));
     });
 
-    it("F15-T3: index.html contains #stopCampaignBtn and #setwatchPopout controls", () => {
+    it("F15-T3: index.html contains #stopCampaignBtn and #setautoRefresh controls", () => {
         assert.ok(indexHtml.includes("id=\"stopCampaignBtn\""), "index.html must include #stopCampaignBtn");
-        assert.ok(indexHtml.includes("id=\"setwatchPopout\""), "index.html must include #setwatchPopout");
+        assert.ok(indexHtml.includes("id=\"setautoRefresh\""), "index.html must include #setautoRefresh");
     });
 
     it("F15-T4: HTML escaping helper sanitizes untrusted Twitch broadcaster and reward strings", () => {

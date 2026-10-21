@@ -1,513 +1,212 @@
-// Auto Twitch Drops Pro - Page-level Interceptor & Stream Automation Engine
+/**
+ * Auto Twitch Drops Pro v2.0 — In-Page Helper
+ * Headless HLS & Spade watch pulses run in the background service worker.
+ * This script remains solely to:
+ *   1. Auto-click Channel Points bonus chests when the user is browsing Twitch
+ *   2. Capture Client-Integrity tokens from page fetch calls
+ *   3. Intercept Hermes / PubSub WebSocket drop & community-points events
+ */
 
-if (!window._originalFetch) {
-    const activeIntervals = [];
+// ============================================================================
+// 1. CHANNEL POINTS CHEST AUTO-CLAIMER (DOM + DEDUPLICATION)
+// ============================================================================
+const recentClaims = new Map();
 
-    // Farming mode: only active on managed farm tabs (#atd-managed=1 or farmMode message)
-    window.__atdFarming = window.__atdFarming === true || (typeof window.location !== "undefined" && window.location.hash.includes("atd-managed=1"));
+function isDuplicateClaim(key, ttlMs = 10000) {
+    if (!key) return false;
+    const now = Date.now();
+    for (const [k, ts] of recentClaims.entries()) {
+        if (now - ts > 60000) {
+            recentClaims.delete(k);
+        }
+    }
+    if (recentClaims.has(key) && (now - recentClaims.get(key) < ttlMs)) {
+        return true;
+    }
+    recentClaims.set(key, now);
+    return false;
+}
 
-    // 1. Set Twitch player quality and default volume presets in localStorage without overwriting user choices
-    function applyLowBandwidthPresets(lowQuality = true) {
-        if (!window.__atdFarming) return;
+function triggerSyntheticClick(el) {
+    if (!el) return;
+    try {
+        if (typeof MouseEvent === "function" && typeof el.dispatchEvent === "function") {
+            el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+            el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+            el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        } else if (typeof el.click === "function") {
+            el.click();
+        }
+    } catch (err) {
         try {
-            if (lowQuality) {
-                localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
-            }
-            if (!localStorage.getItem("player-volume")) {
-                localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
-            }
-            if (!localStorage.getItem("volume")) {
-                localStorage.setItem("volume", "0.5");
-            }
-            localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
+            if (typeof el.click === "function") el.click();
         } catch (e) {}
     }
-    if (window.__atdFarming) {
-        applyLowBandwidthPresets(true);
-    }
+}
 
-    let hasSentPlaybackHandshake = false;
-    let desiredMuted = true;
+function autoClaimPointsChests() {
+    try {
+        const selectors = [
+            '[data-a-target="claim-channel-points-button"]',
+            '[aria-label="Claim Bonus"]',
+            'button[aria-label="Claim Bonus"]',
+            'button[aria-label*="Claim Bonus"]',
+            '[data-test-selector="community-points-summary"] button',
+            '.claimable-bonus__icon'
+        ];
 
-    function notifyPlaybackConfirmed() {
-        if (hasSentPlaybackHandshake) return;
-        hasSentPlaybackHandshake = true;
-        window.postMessage({
-            autoTwitchDrops: {
-                type: "streamPlaybackStarted"
-            }
-        }, "*");
-    }
-
-    // 2. Active DOM Watchdog & Continuous Playback Enforcement
-    function checkAndEnforcePlayback() {
-        if (!window.__atdFarming) return;
-        try {
-            // A. Auto-dismiss Twitch mature audience warning and content classification gates
-            const matureBtn = document.querySelector('[data-a-target="player-overlay-mature-accept"], [data-a-target="content-classification-gate-overlay-start-watching-button"], button[data-test-selector="content-classification-gate-overlay-start-watching-button"]');
-            if (matureBtn) {
-                triggerSyntheticClick(matureBtn);
-            } else {
-                const buttons = document.querySelectorAll('button');
-                for (const b of buttons) {
-                    if (b.textContent && b.textContent.trim().toLowerCase() === 'start watching') {
-                        triggerSyntheticClick(b);
-                        break;
-                    }
-                }
-            }
-
-            // B. Auto-recover from Twitch player errors / adblock reload prompts
-            const reloadBtn = document.querySelector('[data-a-target="player-overlay-reload-button"], .player-overlay-reload-button');
-            if (reloadBtn) triggerSyntheticClick(reloadBtn);
-
-            const playOverlay = document.querySelector('[data-a-target="player-overlay-click-to-play"]');
-            if (playOverlay) triggerSyntheticClick(playOverlay);
-
-            // C. Audio synchronization without control thrashing
-            if (!desiredMuted) {
-                const overlay = document.querySelector('[data-a-target="player-overlay-click-to-unmute"], .player-overlay-click-to-unmute');
-                if (overlay) triggerSyntheticClick(overlay);
-
-                const muteBtn = document.querySelector('[data-a-target="player-mute-unmute-button"]');
-                const isMuted = muteBtn && muteBtn.getAttribute('aria-label')?.toLowerCase().includes('unmute');
-                if (isMuted) {
-                    triggerSyntheticClick(muteBtn);
-                    const slider = document.querySelector('[data-a-target="player-volume-slider"]');
-                    if (slider) {
-                        const proto = Object.getPrototypeOf(slider);
-                        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                        if (setter) {
-                            setter.call(slider, "0.5");
-                        } else {
-                            slider.value = "0.5";
+        for (const selector of selectors) {
+            const btn = document.querySelector(selector);
+            if (btn && btn.offsetParent !== null) {
+                triggerSyntheticClick(btn);
+                if (!isDuplicateClaim("dom-chest-click", 5000)) {
+                    window.postMessage({
+                        autoTwitchDrops: {
+                            type: "points-earned",
+                            points: 50,
+                            source: "dom"
                         }
-                        slider.dispatchEvent(new Event('input', { bubbles: true }));
-                        slider.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
+                    }, "*");
                 }
+                break;
             }
+        }
+    } catch (e) {}
+}
 
-            // D. Ensure HTML5 video element is playing through ads and transitions
-            const videos = document.querySelectorAll('video');
-            videos.forEach(v => {
-                if (v) {
-                    if (v.paused) {
-                        v.play().catch(() => {
-                            if (v.paused) {
-                                v.muted = true;
-                                v.play().catch(() => {});
-                            }
-                        });
-                    }
-                    if (!v.paused && v.currentTime > 0.2) {
-                        notifyPlaybackConfirmed();
-                    }
-                }
-            });
-        } catch (e) {}
-    }
+setInterval(autoClaimPointsChests, 1500);
 
-    // MutationObserver to catch dynamic player attachment
-    if (typeof MutationObserver !== "undefined") {
+// ============================================================================
+// 2. FETCH INTERCEPTOR (CLIENT-INTEGRITY & GQL OPERATIONS)
+// ============================================================================
+const _origFetch = window._originalFetch || window.fetch;
+if (typeof _origFetch === "function") {
+    window._originalFetch = _origFetch;
+    window.fetch = async function (...args) {
         try {
-            const playerObserver = new MutationObserver(() => {
-                checkAndEnforcePlayback();
-            });
-            if (document.body) {
-                playerObserver.observe(document.body, { childList: true, subtree: true });
-            } else if (typeof document.addEventListener === "function") {
-                document.addEventListener("DOMContentLoaded", () => {
-                    if (document.body) {
-                        playerObserver.observe(document.body, { childList: true, subtree: true });
-                    }
-                });
-            }
-        } catch (err) {}
-    }
-
-    const playbackInterval = setInterval(checkAndEnforcePlayback, 1000);
-    activeIntervals.push(playbackInterval);
-
-    // Detect manual user unmute gestures so automated enforcement doesn't re-mute
-    function handleUserUnmuteGesture(e) {
-        try {
-            const target = e.target;
-            if (!target) return;
-            const isUnmuteClick = target.closest && (
-                target.closest('[data-a-target="player-overlay-click-to-unmute"]') ||
-                target.closest('.player-overlay-click-to-unmute') ||
-                target.closest('[data-a-target="player-mute-unmute-button"]') ||
-                target.closest('[data-a-target="player-volume-slider"]')
-            );
-            if (isUnmuteClick) {
-                desiredMuted = false;
-            }
-        } catch (err) {}
-    }
-
-    document.addEventListener("click", handleUserUnmuteGesture, true);
-
-    document.addEventListener("volumechange", (e) => {
-        try {
-            if (e.target && e.target.tagName === "VIDEO") {
-                if (!e.target.muted && e.target.volume > 0) {
-                    desiredMuted = false;
+            const reqUrl = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url ? args[0].url : "");
+            const options = args[1];
+            if (reqUrl.includes("gql.twitch.tv/gql") && options && options.headers) {
+                let integ = null;
+                if (typeof options.headers.get === "function") {
+                    integ = options.headers.get("Client-Integrity") || options.headers.get("client-integrity");
+                } else if (typeof options.headers === "object") {
+                    integ = options.headers["Client-Integrity"] || options.headers["client-integrity"];
                 }
-            }
-        } catch (err) {}
-    }, true);
-
-    // Listen for settings and audio state changes relayed from content script
-    window.addEventListener("message", (e) => {
-        if (!e.data || !e.data.autoTwitchDrops) return;
-        const dropData = e.data.autoTwitchDrops;
-        if (dropData.type === "farmMode") {
-            window.__atdFarming = Boolean(dropData.enabled);
-            if (window.__atdFarming) {
-                applyLowBandwidthPresets(true);
-            }
-        } else if (dropData.type === "settingsChanged" && dropData.settings) {
-            if (dropData.settings.lowQualityMode !== undefined) {
-                applyLowBandwidthPresets(dropData.settings.lowQualityMode);
-            }
-        } else if (dropData.type === "setTabAudio") {
-            const shouldMute = Boolean(dropData.muted);
-            desiredMuted = shouldMute;
-            try {
-                const slider = document.querySelector('[data-a-target="player-volume-slider"]');
-                if (slider) {
-                    const proto = Object.getPrototypeOf(slider);
-                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                    if (setter) {
-                        setter.call(slider, shouldMute ? "0.0" : "0.5");
-                    } else {
-                        slider.value = shouldMute ? "0.0" : "0.5";
-                    }
-                    slider.dispatchEvent(new Event('input', { bubbles: true }));
-                    slider.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                const muteBtn = document.querySelector('[data-a-target="player-mute-unmute-button"]');
-                if (muteBtn) {
-                    const isMutedBtn = muteBtn.getAttribute('aria-label')?.toLowerCase().includes('unmute');
-                    if (shouldMute && !isMutedBtn) {
-                        triggerSyntheticClick(muteBtn);
-                    } else if (!shouldMute && isMutedBtn) {
-                        triggerSyntheticClick(muteBtn);
-                    }
-                }
-                const videos = document.querySelectorAll('video');
-                videos.forEach(v => {
-                    if (v) {
-                        v.muted = shouldMute;
-                        if (!shouldMute && v.volume < 0.1) {
-                            v.volume = 0.5;
+                if (integ) {
+                    window.postMessage({
+                        autoTwitchDrops: {
+                            type: "sendInteg",
+                            data: integ
                         }
-                    }
-                });
-            } catch (err) {}
-        }
-    });
-
-    // 2. Safely override Page Visibility API so Twitch never pauses background/minimized streams
-    try {
-        const protoHidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
-        if (protoHidden && protoHidden.configurable) {
-            Object.defineProperty(Document.prototype, 'hidden', {
-                get: function () { return false; },
-                configurable: true
-            });
-        } else {
-            const docHidden = Object.getOwnPropertyDescriptor(document, 'hidden');
-            if (docHidden && docHidden.configurable) {
-                Object.defineProperty(document, 'hidden', {
-                    get: function () { return false; },
-                    configurable: true
-                });
-            }
-        }
-    } catch (e) {}
-
-    try {
-        const protoVis = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
-        if (protoVis && protoVis.configurable) {
-            Object.defineProperty(Document.prototype, 'visibilityState', {
-                get: function () { return 'visible'; },
-                configurable: true
-            });
-        } else {
-            const docVis = Object.getOwnPropertyDescriptor(document, 'visibilityState');
-            if (docVis && docVis.configurable) {
-                Object.defineProperty(document, 'visibilityState', {
-                    get: function () { return 'visible'; },
-                    configurable: true
-                });
-            }
-        }
-    } catch (e) {}
-
-    try {
-        document.addEventListener('visibilitychange', function (e) {
-            e.stopImmediatePropagation();
-        }, true);
-    } catch (e) {}
-
-    /**
-     * Deduplication Cache to prevent double-dispatching and race conditions
-     */
-    const recentClaims = new Map();
-    function isDuplicateClaim(key, ttlMs = 10000) {
-        const now = Date.now();
-        for (const [k, time] of recentClaims.entries()) {
-            if (now - time > 60000) recentClaims.delete(k);
-        }
-        if (recentClaims.has(key) && (now - recentClaims.get(key) < ttlMs)) {
-            return true;
-        }
-        recentClaims.set(key, now);
-        return false;
-    }
-
-    /**
-     * Synthetic Click Trigger
-     */
-    function triggerSyntheticClick(element) {
-        if (!element) return;
-        try {
-            const mouseOpts = { bubbles: true, cancelable: true, view: window };
-            element.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
-            element.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
-            element.dispatchEvent(new MouseEvent('click', mouseOpts));
-            if (typeof element.click === 'function') element.click();
-        } catch (err) {}
-    }
-
-    /**
-     * Auto Claim Channel Points Bonus Chests in Chat
-     */
-    function autoClaimPointsChests() {
-        try {
-            const chestButtons = [
-                '[aria-label="Claim Bonus"]',
-                '[aria-label="Claim bonus"]',
-                '[data-a-target="claim-channel-points-button"]',
-                '.community-points-summary button',
-                '[data-test-selector="community-points-summary"] button'
-            ];
-
-            for (const selector of chestButtons) {
-                const btn = document.querySelector(selector);
-                if (btn && btn.offsetParent !== null) {
-                    triggerSyntheticClick(btn);
-                    if (!isDuplicateClaim("dom-chest-claim", 15000)) {
-                        window.postMessage({
-                            autoTwitchDrops: {
-                                type: "points-earned",
-                                points: 50,
-                                source: "dom"
-                            }
-                        }, "*");
-                    }
+                    }, "*");
                 }
             }
         } catch (e) {}
-    }
+        return _origFetch.apply(this, args);
+    };
+}
 
-    // Run bonus chest claim check every 15 seconds
-    const chestInterval = setInterval(autoClaimPointsChests, 15000);
-    activeIntervals.push(chestInterval);
+// ============================================================================
+// 3. WEBSOCKET INTERCEPTOR (HERMES & PUBSUB-EDGE)
+// ============================================================================
+const _origWS = window._originalWebSocket || window.WebSocket;
+if (typeof _origWS === "function") {
+    window._originalWebSocket = _origWS;
+    window.WebSocket = new Proxy(_origWS, {
+        construct(target, args) {
+            const ws = new target(...args);
+            const wsUrl = String(args[0] || "");
 
-    setTimeout(autoClaimPointsChests, 3000);
-
-    // Garbage collection on unload
-    window.addEventListener('beforeunload', () => {
-        activeIntervals.forEach(id => clearInterval(id));
-        activeIntervals.length = 0;
-        recentClaims.clear();
-    });
-
-    // Network Interceptor (GraphQL & Hermes/PubSub WebSocket)
-    window._originalFetch = window._originalFetch || fetch;
-    window.fetch = new Proxy(fetch, {
-        apply: (f, s, r) => {
-            try {
-                // Intercept Client-Integrity header if present in request headers
-                const headers = r[1]?.headers;
-                if (headers) {
-                    let integToken = null;
-                    if (headers instanceof Headers) {
-                        integToken = headers.get('Client-Integrity') || headers.get('client-integrity');
-                    } else if (typeof headers === 'object') {
-                        integToken = headers['Client-Integrity'] || headers['client-integrity'];
-                    }
-                    if (integToken) {
-                        window.postMessage({
-                            autoTwitchDrops: {
-                                type: "integ",
-                                integrity: { token: integToken, expiration: Date.now() + 3600000 }
-                            }
-                        }, "*");
-                    }
-                }
-            } catch (e) {}
-
-            const req = f.apply(s, r);
-            return req.then(res => {
-                try {
-                    const url = (res && res.url) ? res.url : (r[0] ? (typeof r[0] === 'string' ? r[0] : r[0].url) : '');
-                    if (url && (url.includes('gql.twitch.tv') || url.includes('/gql') || url.includes('/integrity'))) {
-                        res.clone().json().then(data => {
-                            if (url.includes('/integrity') && data && data.token) {
-                                window.postMessage({
-                                    autoTwitchDrops: {
-                                        type: "integ",
-                                        integrity: data
-                                    }
-                                }, "*");
-                            } else if (data) {
-                                const operations = Array.isArray(data) ? data : [data];
-                                operations.forEach(dat => {
-                                    const opName = dat?.extensions?.operationName;
-                                    if (opName) {
-                                        window.postMessage({
-                                            autoTwitchDrops: {
-                                                type: "gqlOperation",
-                                                operation: opName,
-                                                data: dat.data
-                                            }
-                                        }, "*");
-                                    }
-                                });
-                            }
-                        }).catch(() => {});
-                    }
-                } catch (err) {}
-                return res;
-            });
-        }
-    });
-
-    window._originalWebSocket = window._originalWebSocket || WebSocket;
-    window.WebSocket = new Proxy(_originalWebSocket, {
-        construct: (target, args) => {
-            const socket = new target(...args);
-            let targetUrl = "";
-            try {
-                if (typeof args[0] === "string") {
-                    targetUrl = args[0];
-                } else if (args[0] && typeof args[0].url === "string") {
-                    targetUrl = args[0].url;
-                } else if (args[0] && typeof args[0].toString === "function") {
-                    targetUrl = args[0].toString();
-                }
-            } catch (err) {}
-
-            const isHermes = targetUrl.includes("hermes.twitch.tv");
-            const isPubSub = targetUrl.includes("pubsub-edge.twitch.tv");
-
-            if (isHermes || isPubSub) {
-                socket.addEventListener("message", res => {
+            if (wsUrl.includes("hermes.twitch.tv") || wsUrl.includes("pubsub-edge.twitch.tv")) {
+                const wsSource = wsUrl.includes("hermes.twitch.tv") ? "hermes" : "pubsub";
+                ws.addEventListener("message", (res) => {
                     try {
-                        if (!res || !res.data) return;
-                        const rawData = res.data;
-                        if (typeof rawData !== "string") return;
+                        if (!res || typeof res.data !== "string") return;
+                        const outer = JSON.parse(res.data);
+                        if (!outer || typeof outer !== "object") return;
 
-                        let data;
-                        try {
-                            data = JSON.parse(rawData);
-                        } catch (err) {
-                            return;
+                        let topic = "";
+                        let innerPayload = null;
+
+                        if (outer.type === "notification" && outer.notification) {
+                            topic = outer.notification.subscription?.pubsubTopic || outer.notification.topic || "";
+                            const rawPubsub = outer.notification.pubsub;
+                            if (typeof rawPubsub === "string") {
+                                innerPayload = JSON.parse(rawPubsub);
+                            } else if (rawPubsub && typeof rawPubsub === "object") {
+                                innerPayload = rawPubsub;
+                            }
+                        } else if (outer.type === "MESSAGE" && outer.data && typeof outer.data === "object") {
+                            topic = outer.data.topic || "";
+                            const rawMsg = outer.data.message;
+                            if (typeof rawMsg === "string") {
+                                innerPayload = JSON.parse(rawMsg);
+                            } else if (rawMsg && typeof rawMsg === "object") {
+                                innerPayload = rawMsg;
+                            }
                         }
 
-                        if (data && data.type === "MESSAGE" && data.data) {
-                            let parsed = null;
-                            if (data.data.message) {
-                                try {
-                                    parsed = typeof data.data.message === "string" ? JSON.parse(data.data.message) : data.data.message;
-                                } catch (err) {}
-                            }
+                        if (!innerPayload || typeof innerPayload !== "object" || Array.isArray(innerPayload)) return;
 
-                            if (parsed) {
-                                if (parsed.type === "points-earned") {
-                                    const pts = parsed.data?.point_gain?.total_points || parsed.data?.points || 50;
-                                    if (!isDuplicateClaim("ws-points-earned-" + pts, 5000)) {
-                                        window.postMessage({
-                                            autoTwitchDrops: {
-                                                type: "points-earned",
-                                                points: pts,
-                                                source: isHermes ? "hermes" : "pubsub"
-                                            }
-                                        }, "*");
-                                    }
-                                } else if (parsed.type === "claim-available") {
-                                    const claimId = parsed.data?.claim?.id;
-                                    const channelId = parsed.data?.claim?.channel_id;
-                                    if (claimId && !isDuplicateClaim("claim-" + claimId, 15000)) {
-                                        window.postMessage({
-                                            autoTwitchDrops: {
-                                                type: "claim-points",
-                                                claimID: claimId,
-                                                channelID: channelId,
-                                                source: isHermes ? "hermes" : "pubsub"
-                                            }
-                                        }, "*");
-                                    }
-                                } else if (parsed.type === "drop-progress" || parsed.type === "drop-claim") {
-                                    if (!isDuplicateClaim("drop-progress", 5000)) {
-                                        window.postMessage({
-                                            autoTwitchDrops: {
-                                                type: "checkDrop",
-                                                source: isHermes ? "hermes" : "pubsub"
-                                            }
-                                        }, "*");
-                                    }
-                                }
-                            }
+                        const msgType = innerPayload.type || "";
+                        const msgData = (innerPayload.data && typeof innerPayload.data === "object") ? innerPayload.data : {};
 
-                            const topic = data.data.topic;
-                            if (topic && parsed) {
-                                if (topic.includes("community-points-user-v1")) {
-                                    if (parsed.type === "points-earned") {
-                                        const pts = parsed.data?.point_gain?.total_points || parsed.data?.points || 50;
-                                        if (!isDuplicateClaim("ws-points-earned-" + pts, 5000)) {
-                                            window.postMessage({
-                                                autoTwitchDrops: {
-                                                    type: "points-earned",
-                                                    points: pts,
-                                                    source: "pubsub"
-                                                }
-                                            }, "*");
+                        // A. Community Points Bonus Chest Available
+                        if (msgType === "claim-available") {
+                            const claim = msgData.claim || innerPayload.claim;
+                            if (claim && typeof claim.id === "string" && claim.id && claim.channel_id) {
+                                if (!isDuplicateClaim("claim-" + claim.id, 15000)) {
+                                    window.postMessage({
+                                        autoTwitchDrops: {
+                                            type: "claim-points",
+                                            claimID: claim.id,
+                                            channelID: claim.channel_id
                                         }
-                                    } else if (parsed.type === "claim-available") {
-                                        const claimId = parsed.data?.claim?.id;
-                                        const channelId = parsed.data?.claim?.channel_id;
-                                        if (claimId && !isDuplicateClaim("claim-" + claimId, 15000)) {
-                                            window.postMessage({
-                                                autoTwitchDrops: {
-                                                    type: "claim-points",
-                                                    claimID: claimId,
-                                                    channelID: channelId,
-                                                    source: "pubsub"
-                                                }
-                                            }, "*");
-                                        }
-                                    }
-                                } else if (topic.includes("user-drop-events") || topic.includes("drop-progress")) {
-                                    if (!isDuplicateClaim("drop-progress", 5000)) {
-                                        window.postMessage({
-                                            autoTwitchDrops: {
-                                                type: "checkDrop",
-                                                source: "pubsub"
-                                            }
-                                        }, "*");
-                                    }
+                                    }, "*");
                                 }
                             }
                         }
-                    } catch (e) {}
+                        // B. Community Points Earned
+                        else if (msgType === "points-earned") {
+                            const gain = msgData.point_gain || innerPayload.point_gain;
+                            if (gain && typeof gain === "object") {
+                                const pts = Number(gain.total_points || gain.baseline_points) || 50;
+                                if (!isDuplicateClaim(`points-earned-${pts}-${wsSource}`, 3000)) {
+                                    window.postMessage({
+                                        autoTwitchDrops: {
+                                            type: "points-earned",
+                                            points: pts,
+                                            source: wsSource
+                                        }
+                                    }, "*");
+                                }
+                            }
+                        }
+                        // C. Drop Progress / Drop Claim
+                        else if (
+                            topic.startsWith("user-drop-events") ||
+                            msgType === "drop-progress" ||
+                            msgType === "drop-claim"
+                        ) {
+                            window.postMessage({
+                                autoTwitchDrops: {
+                                    type: "claim-drop",
+                                    eventType: msgType,
+                                    dropInstanceID: msgData.drop_instance_id || msgData.drop_id || null,
+                                    currentProgressMin: msgData.current_progress_min ?? null,
+                                    requiredProgressMin: msgData.required_progress_min ?? null
+                                }
+                            }, "*");
+                        }
+                    } catch (e) {
+                        // Never throw on malformed or non-JSON frames
+                    }
                 });
             }
-            return socket;
+
+            return ws;
         }
     });
 }
+

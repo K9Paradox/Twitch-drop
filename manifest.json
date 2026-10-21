@@ -1,46 +1,52 @@
 {
-   "manifest_version": 3,
-   "name": "Auto Twitch Drops Pro",
-   "version": "1.5.1",
-   "description": "Automatically claim Twitch drops, channel points, and monitor drop campaigns in the background.",
-   "action": {
-      "default_popup": "index.html"
-   },
-   "background": {
-      "service_worker": "background.js",
-      "type": "module"
-   },
-   "permissions": [
-      "alarms",
-      "storage",
-      "tabs",
-      "cookies",
-      "contentSettings",
-      "notifications"
-   ],
-   "host_permissions": [
-      "*://*.twitch.tv/*",
-      "https://gql.twitch.tv/*",
-      "https://api.github.com/*",
-      "https://raw.githubusercontent.com/*"
-   ],
-   "icons": {
+  "name": "Auto Twitch Drops Pro",
+  "description": "Headless Twitch Drops & Channel Points farmer — zero stream tabs, zero video bandwidth, automatic HLS & Spade watch pulses.",
+  "version": "2.0.0",
+  "manifest_version": 3,
+  "icons": {
+    "16": "assets/img/atd-16.png",
+    "32": "assets/img/atd-32.png",
+    "48": "assets/img/atd-48.png",
+    "128": "assets/img/atd-128.png"
+  },
+  "action": {
+    "default_popup": "index.html",
+    "default_icon": {
       "16": "assets/img/atd-16.png",
-      "32": "assets/img/atd-32.png",
-      "48": "assets/img/atd-48.png",
-      "128": "assets/img/atd-128.png"
-   },
-   "content_scripts": [
-      {
-         "js": [ "inject.js" ],
-         "matches": [ "https://*.twitch.tv/*" ],
-         "run_at": "document_start"
-      }
-   ],
-   "web_accessible_resources": [
-      {
-         "matches": [ "https://*.twitch.tv/*" ],
-         "resources": [ "assets/img/*.png", "onPage.js" ]
-      }
-   ]
+      "32": "assets/img/atd-32.png"
+    },
+    "default_title": "Auto Twitch Drops Pro v2.0"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.twitch.tv/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["onPage.js"],
+      "matches": ["*://*.twitch.tv/*"]
+    }
+  ],
+  "permissions": [
+    "alarms",
+    "storage",
+    "tabs",
+    "cookies",
+    "notifications"
+  ],
+  "host_permissions": [
+    "*://*.twitch.tv/*",
+    "https://gql.twitch.tv/*",
+    "https://usher.ttvnw.net/*",
+    "https://*.ttvnw.net/*",
+    "https://api.github.com/*",
+    "https://raw.githubusercontent.com/*"
+  ]
 }

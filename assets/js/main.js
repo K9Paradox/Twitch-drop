@@ -1,7 +1,7 @@
 // Auto Twitch Drops Pro - Popup UI Controller (Manifest V3)
 const maniData = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getManifest)
     ? chrome.runtime.getManifest()
-    : { version: "1.5.0" };
+    : { version: "2.0.0" };
 
 const POPULAR_DROP_GAMES = [
     "Overwatch",
@@ -61,12 +61,10 @@ let settings = {
     autoRefresh: true,
     showAllGames: true,
     autoGetToken: true,
-    watchPopout: true,
-    autoMute: true,
     setShowBadges: true,
     soundOnClaim: false,
     desktopNotifications: true,
-    lowQualityMode: true
+    autoCheckUpdates: true
 };
 let extEnabled = true;
 let gameSelectOpen = false;
@@ -75,7 +73,6 @@ let activeDropGamesSet = new Set();
 let currentActiveStream = null;
 let currentClaimedInventory = [];
 let currentAutoGamesData = { allConnected: [], enabled: [] };
-let tabAudioMuted = true;
 let authBannerDismissed = false;
 let twitchServerTimeOffset = 0;
 
@@ -118,7 +115,7 @@ document.addEventListener("error", (e) => {
 
 $(() => {
     // Set Manifest Version
-    $("#extVersion").text(`v${maniData.version || "1.5.0"}`);
+    $("#extVersion").text(`v${maniData.version || "2.0.0"}`);
 
     // Pre-populate default popular games immediately to eliminate empty-state flashing
     populateGameDropdown(POPULAR_DROP_GAMES.map(g => ({ game: { displayName: g } })));
@@ -210,11 +207,6 @@ $(() => {
                 chrome.runtime.sendMessage({ type: "getExtStats" }).catch(() => {});
                 chrome.runtime.sendMessage({ type: "p:getUpdateState" }).then((res) => {
                     if (res) renderUpdateInfo(res);
-                }).catch(() => {});
-                chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
-                    if (res && res.muted !== undefined) {
-                        updateAudioButtonUI(res.muted);
-                    }
                 }).catch(() => {});
                 chrome.runtime.sendMessage({ type: "getActivityHistory" }).then((res) => {
                     if (res && Array.isArray(res.activityHistory)) {
@@ -362,32 +354,11 @@ $(() => {
         }, 2000);
     });
 
-    $("#toggleAudioBtn").on("click", () => {
-        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-            chrome.runtime.sendMessage({ type: "p:toggleTabAudio" }).then((res) => {
-                if (res && res.success && res.muted !== undefined) {
-                    updateAudioButtonUI(res.muted);
-                    showToast(res.muted ? "Muted stream tab audio" : "Unmuted stream tab audio");
-                } else {
-                    tabAudioMuted = !tabAudioMuted;
-                    updateAudioButtonUI(tabAudioMuted);
-                    showToast(tabAudioMuted ? "Muted stream tab audio" : "Unmuted stream tab audio");
-                }
-            }).catch(() => {
-                tabAudioMuted = !tabAudioMuted;
-                updateAudioButtonUI(tabAudioMuted);
-            });
-        } else {
-            tabAudioMuted = !tabAudioMuted;
-            updateAudioButtonUI(tabAudioMuted);
-        }
-    });
-
     $("#reloadStreamBtn").on("click", () => {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
             chrome.runtime.sendMessage({ type: "p:reloadStream" }).catch(() => {});
         }
-        showToast("Stream tab reloaded");
+        showToast("Sent headless watch pulse");
     });
 
     $("#focusStreamTabBtn").on("click", () => {
@@ -652,11 +623,6 @@ $(() => {
                     renderClaimedInventory(currentClaimedInventory);
                 }
                 updateLastCheckTime();
-                if (chrome.runtime && chrome.runtime.sendMessage) {
-                    chrome.runtime.sendMessage({ type: "p:getTabAudioState" }).then((res) => {
-                        if (res && res.muted !== undefined) updateAudioButtonUI(res.muted);
-                    }).catch(() => {});
-                }
             } else if (message.type === "setAutoDropGames") {
                 if (message.data) {
                     currentAutoGamesData = message.data;
@@ -734,7 +700,7 @@ $(() => {
 
 function renderUpdateInfo(update) {
     if (!update || typeof update !== "object") return;
-    const currentVer = update.currentVersion || (typeof chrome !== "undefined" && chrome.runtime?.getManifest?.()?.version) || "1.5.1";
+    const currentVer = update.currentVersion || (typeof chrome !== "undefined" && chrome.runtime?.getManifest?.()?.version) || "2.0.0";
     $("#currentVerDisplay").text(`v${currentVer}`);
     $("#extVersion").text(`v${currentVer}`);
 
@@ -796,22 +762,6 @@ async function checkAuthStatus() {
         }
     } catch (e) {
         console.warn("Error checking auth status:", e);
-    }
-}
-
-function updateAudioButtonUI(isMuted) {
-    tabAudioMuted = Boolean(isMuted);
-    const btn = $("#toggleAudioBtn");
-    const textSpan = $("#audioBtnText");
-
-    if (tabAudioMuted) {
-        textSpan.text("Unmute");
-        btn.attr("title", "Unmute stream tab audio to listen");
-        btn.find(".audioGlyph").html('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>');
-    } else {
-        textSpan.text("Mute");
-        btn.attr("title", "Mute stream tab audio for silence");
-        btn.find(".audioGlyph").html('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>');
     }
 }
 

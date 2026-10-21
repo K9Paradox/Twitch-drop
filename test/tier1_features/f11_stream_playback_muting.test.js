@@ -1,68 +1,167 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { setupTestSandbox } from "../harness/sandbox.js";
+import { Client } from "../../background/twitchApi.js";
 
-describe("Tier 1: Feature 11 - Stream Playback, Muting & 160p30", () => {
+describe("Tier 1: Feature 11 - Headless HLS & Spade Watch Engine (v2.0)", () => {
     let sandbox;
+    let client;
 
     beforeEach(() => {
         sandbox = setupTestSandbox();
+        client = new Client({
+            clientId: "test-client-id",
+            oauthToken: "test-oauth-token",
+            userId: "12345678"
+        });
     });
 
-    it("F11-T1: Sets low-bandwidth video-quality 160p30 and player-volume presets in localStorage", () => {
-        sandbox.domMock.localStorage.setItem("video-quality", JSON.stringify({ "default": "160p30" }));
-        sandbox.domMock.localStorage.setItem("player-volume", JSON.stringify({ "default": 0.5, "volume": 0.5, "muted": false }));
-        sandbox.domMock.localStorage.setItem("low-latency", JSON.stringify({ "default": false }));
+    it("F11-T1: getPlaybackAccessToken() requests streamPlaybackAccessToken with playerType 'site'", async () => {
+        sandbox.fetchMock.onGql("PlaybackAccessToken", {
+            data: {
+                streamPlaybackAccessToken: {
+                    value: '{"channel":"shroud"}',
+                    signature: "sig123abc",
+                    __typename: "PlaybackAccessToken"
+                }
+            }
+        });
 
-        const vq = JSON.parse(sandbox.domMock.localStorage.getItem("video-quality"));
-        const pv = JSON.parse(sandbox.domMock.localStorage.getItem("player-volume"));
-        const ll = JSON.parse(sandbox.domMock.localStorage.getItem("low-latency"));
-
-        assert.equal(vq.default, "160p30");
-        assert.equal(pv.volume, 0.5);
-        assert.equal(ll.default, false);
+        const token = await client.getPlaybackAccessToken("Shroud");
+        assert.ok(token);
+        assert.equal(token.value, '{"channel":"shroud"}');
+        assert.equal(token.signature, "sig123abc");
     });
 
-    it("F11-T2: Page Visibility API override forces document.hidden to false", () => {
-        // Test property getter override logic
-        let hidden = false;
-        const fakeDoc = {
-            get hidden() { return false; },
-            get visibilityState() { return "visible"; }
+    it("F11-T2: getStreamUrl() parses Usher master M3U8 playlist and selects the lowest-bandwidth variant", async () => {
+        sandbox.fetchMock.onGql("PlaybackAccessToken", {
+            data: {
+                streamPlaybackAccessToken: {
+                    value: '{"channel":"shroud"}',
+                    signature: "sig123abc"
+                }
+            }
+        });
+
+        const masterM3u8 = [
+            "#EXTM3U",
+            '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,NAME="1080p60"',
+            "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/high_1080p.m3u8",
+            '#EXT-X-STREAM-INF:BANDWIDTH=240000,RESOLUTION=284x160,NAME="160p"',
+            "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/low_160p.m3u8"
+        ].join("\n");
+
+        const origFetch = globalThis.fetch;
+        globalThis.fetch = async (url, opts) => {
+            if (String(url).includes("usher.ttvnw.net/api/channel/hls/shroud.m3u8")) {
+                return {
+                    ok: true,
+                    status: 200,
+                    text: async () => masterM3u8
+                };
+            }
+            return origFetch(url, opts);
         };
 
-        assert.equal(fakeDoc.hidden, false);
-        assert.equal(fakeDoc.visibilityState, "visible");
+        try {
+            const variantUrl = await client.getStreamUrl("shroud");
+            assert.equal(variantUrl, "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/low_160p.m3u8");
+        } finally {
+            globalThis.fetch = origFetch;
+        }
     });
 
-    it("F11-T3: Autoplay content settings allow playback on twitch.tv domains", () => {
-        sandbox.chrome.contentSettings.autoplay.set({
-            primaryPattern: "*://*.twitch.tv/*",
-            setting: "allow"
-        });
+    it("F11-T3: sendWatchPlaylist() fetches variant playlist and dispatches HEAD request on latest segment URL", async () => {
+        client._streamUrlCache.set("shroud", "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/low_160p.m3u8");
 
-        const res = sandbox.chrome.contentSettings.autoplay.get({ primaryUrl: "*://*.twitch.tv/*" });
-        assert.equal(res.setting, "allow");
+        const mediaPlaylist = [
+            "#EXTM3U",
+            "#EXT-X-TARGETDURATION:2",
+            "#EXTINF:2.000,live",
+            "https://video-edge-1.sjc02.abs.hls.ttvnw.net/v1/segment/seg1.ts",
+            "#EXTINF:2.000,live",
+            "https://video-edge-1.sjc02.abs.hls.ttvnw.net/v1/segment/seg2.ts"
+        ].join("\n");
+
+        let headTargetUrl = null;
+        let headMethod = null;
+        const origFetch = globalThis.fetch;
+        globalThis.fetch = async (url, opts = {}) => {
+            if (String(url).includes("low_160p.m3u8")) {
+                return {
+                    ok: true,
+                    status: 200,
+                    text: async () => mediaPlaylist
+                };
+            }
+            if (String(url).includes("seg2.ts")) {
+                headTargetUrl = String(url);
+                headMethod = opts.method;
+                return { ok: true, status: 200, text: async () => "" };
+            }
+            return origFetch(url, opts);
+        };
+
+        try {
+            const ok = await client.sendWatchPlaylist("shroud");
+            assert.equal(ok, true);
+            assert.equal(headMethod, "HEAD");
+            assert.equal(headTargetUrl, "https://video-edge-1.sjc02.abs.hls.ttvnw.net/v1/segment/seg2.ts");
+        } finally {
+            globalThis.fetch = origFetch;
+        }
     });
 
-    it("F11-T4: Safe playback watchdog plays paused video elements", async () => {
-        const video = sandbox.domMock.addElement("video");
-        video.paused = true;
+    it("F11-T4: sendWatchSpade() encodes base64 minute-watched event payload and POSTs to Spade endpoint", async () => {
+        client._spadeUrlCache.set("shroud", "https://spade.twitch.tv/track");
 
-        assert.equal(video.paused, true);
-        await video.play();
-        assert.equal(video.paused, false);
+        let postedUrl = null;
+        let postedBody = null;
+        const origFetch = globalThis.fetch;
+        globalThis.fetch = async (url, opts = {}) => {
+            if (String(url).includes("spade.twitch.tv/track")) {
+                postedUrl = String(url);
+                postedBody = opts.body;
+                return { ok: true, status: 204 };
+            }
+            return origFetch(url, opts);
+        };
+
+        try {
+            const ok = await client.sendWatchSpade("shroud", {
+                channelId: "37402112",
+                broadcastId: "9988776655",
+                login: "shroud"
+            });
+            assert.equal(ok, true);
+            assert.equal(postedUrl, "https://spade.twitch.tv/track");
+            assert.ok(postedBody.startsWith("data="));
+
+            const b64 = decodeURIComponent(postedBody.slice(5));
+            const decoded = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+            assert.equal(decoded[0].event, "minute-watched");
+            assert.equal(decoded[0].properties.broadcast_id, "9988776655");
+            assert.equal(decoded[0].properties.channel_id, "37402112");
+            assert.equal(decoded[0].properties.channel, "shroud");
+            assert.equal(decoded[0].properties.player, "site");
+        } finally {
+            globalThis.fetch = origFetch;
+        }
     });
 
-    it("F11-T5: Safe playback watchdog clicks player unmute overlays when visible", () => {
-        const btn = sandbox.domMock.addElement("button", { "data-a-target": "player-overlay-click-to-unmute" });
-        let clicked = false;
+    it("F11-T5: sendWatch() combines HLS playlist pulse and Spade beacon and returns success if either succeeds", async () => {
+        client.sendWatchPlaylist = async () => true;
+        client.sendWatchSpade = async () => false;
 
-        btn.addEventListener("click", () => {
-            clicked = true;
-        });
+        const res1 = await client.sendWatch("shroud", { channelId: "37402112", broadcastId: "111" });
+        assert.equal(res1.success, true);
+        assert.equal(res1.method, "hls");
 
-        btn.click();
-        assert.equal(clicked, true);
+        client.sendWatchPlaylist = async () => false;
+        client.sendWatchSpade = async () => true;
+
+        const res2 = await client.sendWatch("shroud", { channelId: "37402112", broadcastId: "111" });
+        assert.equal(res2.success, true);
+        assert.equal(res2.method, "spade");
     });
 });
