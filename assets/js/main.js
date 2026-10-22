@@ -1286,13 +1286,13 @@ function updateDropProgressUI(data) {
     const curStreamers = (curCampObj && Array.isArray(curCampObj.streamers)) ? curCampObj.streamers : (Array.isArray(camp.requiredStreamers) ? camp.requiredStreamers : []);
     const fallbackFrom = Array.isArray(camp.fallbackFromStreamers) ? camp.fallbackFromStreamers : [];
     let reqBadgeHtml = "";
-    if (curStreamers.length > 0) {
+    if (camp.requirementType === "fallback_open" && fallbackFrom.length > 0) {
+        const preview = fallbackFrom.slice(0, 2).map(s => `@${escapeHtml(s)}`).join(", ");
+        reqBadgeHtml = `<span class="activeRewardEndDate" style="color: #00f59b;">Requirement: Any Drops Stream (Switched &mdash; ${preview} offline)</span>`;
+    } else if (curStreamers.length > 0) {
         const preview = curStreamers.slice(0, 2).map(s => `@${escapeHtml(s)}`).join(", ");
         const extra = curStreamers.length > 2 ? ` +${curStreamers.length - 2} more` : "";
         reqBadgeHtml = `<span class="activeRewardEndDate" style="color: #bf94ff;">Requirement: Specific Channel (${preview}${extra})</span>`;
-    } else if (camp.requirementType === "fallback_open" && fallbackFrom.length > 0) {
-        const preview = fallbackFrom.slice(0, 2).map(s => `@${escapeHtml(s)}`).join(", ");
-        reqBadgeHtml = `<span class="activeRewardEndDate" style="color: #00f59b;">Requirement: Any Drops Stream (Switched &mdash; ${preview} offline)</span>`;
     } else {
         reqBadgeHtml = `<span class="activeRewardEndDate" style="color: var(--text-secondary);">Requirement: Any Drops-Enabled Stream</span>`;
     }

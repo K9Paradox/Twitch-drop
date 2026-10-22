@@ -728,8 +728,22 @@ async function handleWatchdogTick() {
 
                 // IF/OR Requirement Promotion:
                 // If we are currently farming a fallback requirement (e.g. open category streamer because ow_esports was offline),
-                // check if a higher-priority restricted campaign's required channel just went LIVE!
+                // check if a higher-priority restricted campaign's required channel (or curCamp's featured channels) just went LIVE!
                 const curIdx = activeStream.campaign?.onCamp || 0;
+                if (activeStream.campaign?.requirementType === "fallback_open" && curCamp && Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0) {
+                    const livePreferredStreamer = await client.getLiveBroadcasterForCampaign(
+                        activeStream.campaign.game?.name,
+                        curCamp.id,
+                        activeStream.campaign.slug,
+                        curCamp.streamers,
+                        activeStream.campaign.skippedStreamers || []
+                    ).catch(() => null);
+                    if (livePreferredStreamer && livePreferredStreamer.toLowerCase() !== (activeStream.campaign.curWatching || "").toLowerCase()) {
+                        console.log(`[RequirementSwitch] Featured required channel @${livePreferredStreamer} (${curCamp.id}) is now LIVE! Switching from directory fallback.`);
+                        await runCampaign(true);
+                        return;
+                    }
+                }
                 if (curIdx > 0 && Array.isArray(activeStream.campaigns)) {
                     for (let pIdx = 0; pIdx < curIdx; pIdx++) {
                         const priorityCamp = activeStream.campaigns[pIdx];
@@ -785,6 +799,10 @@ async function handleWatchdogTick() {
                         activeStream.campaign.consecutiveOfflineChecks = 0;
                         await performHeadlessWatch(meta);
                     }
+                } else if (activeStream.campaign && (activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
+                    console.log(`[Watchdog] Active campaign for ${activeStream.campaign.game?.name} has no active stream (${activeStream.campaign.status}). Retrying streamer search...`);
+                    await runCampaign(true);
+                    return;
                 }
 
                 // 2. Stream Stall Watchdog (6-minute threshold)
@@ -1233,6 +1251,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 }
                                 await saveState();
                             }
+                            if (extEnabled && activeStream.campaign && (activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
+                                await runCampaign(true).catch(() => {});
+                            }
                         }
                     } catch (err) {}
                 }
@@ -1407,9 +1428,13 @@ async function startup() {
     updateBadgeUI();
 
     if (extEnabled) {
-        if (activeStream?.campaign && activeStream.campaign !== "none" && activeStream.campaign.status === "watching") {
-            startHeadlessWatchLoop();
-            performHeadlessWatch().catch(() => {});
+        if (activeStream?.campaign && activeStream.campaign !== "none") {
+            if (activeStream.campaign.status === "watching" && activeStream.campaign.curWatching) {
+                startHeadlessWatchLoop();
+                performHeadlessWatch().catch(() => {});
+            } else if ((activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
+                setTimeout(() => runCampaign(true).catch(() => {}), 1500);
+            }
         }
         setTimeout(autoGetToken, 3000);
         setTimeout(checkForDrops, 4000);
@@ -1528,6 +1553,36 @@ async function runCampaign(forceNextStreamer = false) {
         }
     }
 
+    // SINGLE-CAMPAIGN / DIRECTORY FALLBACK (IF/OR):
+    // Many Twitch campaigns (e.g. Overwatch 2 "go to a participating live channel (?filter=drops) including /ow_esports and /ow_esports_jp")
+    // populate allow.channels with featured channels even though any Drops-enabled stream in the game directory counts.
+    // If all listed channels are offline, fall back to any live Drops-enabled broadcaster in the category directory!
+    let usedOpenDirectoryFallback = false;
+    if (!targetStreamer && offlineRestrictedStreamers.length > 0 && typeof client.getChannelWithDrops === "function") {
+        let dirChannel = await client.getChannelWithDrops(
+            activeStream.campaign.game.name,
+            curCamp.id,
+            activeStream.campaign.slug,
+            skipped
+        ).catch(() => null);
+
+        if (!dirChannel && skipped.length > 0) {
+            activeStream.campaign.skippedStreamers = [];
+            dirChannel = await client.getChannelWithDrops(
+                activeStream.campaign.game.name,
+                curCamp.id,
+                activeStream.campaign.slug,
+                []
+            ).catch(() => null);
+        }
+
+        if (dirChannel && dirChannel.broadcaster && dirChannel.broadcaster.login) {
+            targetStreamer = dirChannel.broadcaster.login;
+            usedOpenDirectoryFallback = true;
+            console.log(`[DirectoryFallback] Listed channels (${offlineRestrictedStreamers.slice(0, 3).join(", ")}) are offline. Falling back to participating live category channel @${targetStreamer}`);
+        }
+    }
+
     if (!targetStreamer) {
         console.log(`[AutoQueue] No compatible live stream found for ${activeStream.campaign.game.name}`);
         await windowManager("close");
@@ -1555,7 +1610,7 @@ async function runCampaign(forceNextStreamer = false) {
     }
 
     activeStream.campaign.curWatching = targetStreamer;
-    const isRestrictedActive = Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0;
+    const isRestrictedActive = Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0 && !usedOpenDirectoryFallback;
     if (isRestrictedActive) {
         activeStream.campaign.requirementType = "restricted";
         activeStream.campaign.fallbackFromStreamers = [];
