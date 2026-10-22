@@ -1111,6 +1111,7 @@ async function handleWatchdogTick() {
                     activeStream.campaign.lastMinutesWatched = currentMinutes;
                     activeStream.campaign.lastProgressTimestamp = now;
                     activeStream.campaign.stallCount = 0;
+                    if (curCamp) curCamp.strictAllowlistOnly = false;
                 } else {
                     // Progress has stalled for >6 minutes
                     const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
@@ -1127,7 +1128,12 @@ async function handleWatchdogTick() {
                             }
                             await performHeadlessWatch();
                         } else if (activeStream.campaign.stallCount >= 2) {
-                            console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 12m). Rotating to next channel.`);
+                            if (activeStream.campaign.requirementType === "fallback_open" && curCamp && Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0) {
+                                console.log(`[DirectoryFallback] Open category streamer @${activeStream.campaign.curWatching} yielded 0m in 12m. Campaign ${curCamp.id} strictly requires allowlisted channels (${curCamp.streamers.slice(0, 3).join(", ")}). Disabling category fallback.`);
+                                curCamp.strictAllowlistOnly = true;
+                            } else {
+                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 12m). Rotating to next channel.`);
+                            }
                             activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
                             if (activeStream.campaign.curWatching && !activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
                                 activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
@@ -1868,7 +1874,7 @@ async function runCampaign(forceNextStreamer = false) {
     // populate allow.channels with featured channels even though any Drops-enabled stream in the game directory counts.
     // If all listed channels are offline, fall back to any live Drops-enabled broadcaster in the category directory!
     let usedOpenDirectoryFallback = false;
-    if (!targetStreamer && offlineRestrictedStreamers.length > 0 && typeof client.getChannelWithDrops === "function") {
+    if (!targetStreamer && offlineRestrictedStreamers.length > 0 && !curCamp.strictAllowlistOnly && typeof client.getChannelWithDrops === "function") {
         let dirChannel = await client.getChannelWithDrops(
             activeStream.campaign.game.name,
             curCamp.id,
