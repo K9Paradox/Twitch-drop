@@ -161,20 +161,26 @@ function applyDropSessionProgress(session) {
     }
 
     if (matchedItem) {
+        const wasSynthetic = Boolean(matchedItem.isSynthetic);
         matchedItem.self = matchedItem.self || {};
         const prevWatched = matchedItem.self.currentMinutesWatched || 0;
         if (watched > prevWatched) {
             matchedItem.self.currentMinutesWatched = watched;
             changed = true;
         }
-        if (matchedItem.isSynthetic && dropId) {
+        if (wasSynthetic && dropId) {
             matchedItem.id = dropId;
             matchedItem.isSynthetic = false;
             changed = true;
         }
-        if (req > 0 && (matchedItem.isSynthetic || !matchedItem.reqTime)) {
-            matchedItem.reqTime = req;
-            changed = true;
+        if (req > 0 && (wasSynthetic || matchedItem.isSynthetic || !matchedItem.reqTime)) {
+            if (matchedItem.reqTime !== req || wasSynthetic) {
+                matchedItem.reqTime = req;
+                changed = true;
+            }
+            if (wasSynthetic) {
+                matchedCamp.minutesNeeded = req;
+            }
         }
     }
 
@@ -418,18 +424,24 @@ async function fetchTwitchCookiesAndInitClient() {
         deviceId = deviceId || localData.deviceId;
         const integrity = localData.twitchInteg || null;
 
+        const onIntegrityError = () => {
+            if (client) client.integrity = null;
+            autoGetToken(true);
+            return false;
+        };
+
         if (oauthToken) {
             await chrome.storage.local.set({ oauthToken, deviceId }).catch(() => {});
             if (client === null) {
-                client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid, integrity });
+                client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid, integrity, onIntegrityError });
             } else {
-                client.updateUserInfo({ oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid, integrity });
+                client.updateUserInfo({ oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid, integrity, onIntegrityError });
             }
             if (!localData.userId) {
                 await client.autoDetectUserId().catch(() => {});
             }
         } else if (client === null) {
-            client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", integrity });
+            client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", integrity, onIntegrityError });
         }
     } catch (e) {
         console.warn("Error fetching Twitch cookies:", e);
@@ -437,6 +449,97 @@ async function fetchTwitchCookiesAndInitClient() {
             client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko" });
         }
     }
+}
+
+async function refreshSyntheticCampaignDetails(inventory = null) {
+    if (!client || !activeStream || !activeStream.campaign || activeStream.campaign === "none" || !Array.isArray(activeStream.campaigns)) {
+        return false;
+    }
+    const syntheticCamps = activeStream.campaigns.filter(c =>
+        c && c.id && !String(c.id).startsWith("camp-") &&
+        (!Array.isArray(c.items) || c.items.length === 0 || c.items.some(i => i && i.isSynthetic))
+    );
+    if (syntheticCamps.length === 0) return false;
+
+    const campIds = syntheticCamps.map(c => c.id);
+    const campDeets = await client.getDropCampaignDetails(campIds).catch(() => null);
+    if (!Array.isArray(campDeets) || campDeets.length === 0) return false;
+
+    const eventDropsList = Array.isArray(inventory?.gameEventDrops) ? inventory.gameEventDrops : [];
+    const now = getTwitchNow();
+    let updatedAny = false;
+
+    for (const c of campDeets) {
+        const dropCamp = c?.data?.user?.dropCampaign || c?.data?.dropCampaign || c?.user?.dropCampaign || c?.dropCampaign;
+        if (!dropCamp || !Array.isArray(dropCamp.timeBasedDrops) || dropCamp.timeBasedDrops.length === 0) continue;
+
+        const targetCamp = activeStream.campaigns.find(sc => sc && sc.id === dropCamp.id);
+        if (!targetCamp) continue;
+
+        const allDrops = [];
+        let maxTime = 0;
+        let timeWatched = targetCamp.minutesWatched || 0;
+
+        for (const drop of dropCamp.timeBasedDrops) {
+            if (!drop) continue;
+            const reqMins = drop.requiredMinutesWatched || 60;
+            if (reqMins > maxTime) maxTime = reqMins;
+            if (reqMins === 0) continue;
+
+            const dropStartAt = drop.startAt || dropCamp.startAt || targetCamp.startAt || null;
+            const dropEndAt = drop.endAt || dropCamp.endAt || targetCamp.endAt || null;
+            const dropEndsAtTs = dropEndAt ? new Date(dropEndAt).getTime() : null;
+            const isEnded = Boolean(dropEndsAtTs && !isNaN(dropEndsAtTs) && dropEndsAtTs <= now);
+
+            const benefit = (drop.benefitEdges && drop.benefitEdges[0]) ? (drop.benefitEdges[0].benefit || drop.benefitEdges[0].node) : null;
+            const benefitId = benefit ? benefit.id : "";
+            const benefitName = (benefit && benefit.name) ? (drop.name ? `${drop.name} - ${benefit.name}` : benefit.name) : (drop.name || "Drop Reward");
+            const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (drop.imageURL || drop.imageAssetURL || "");
+
+            const isClaimed = isDropItemClaimedStrict(drop, eventDropsList) || Boolean(drop.self && drop.self.isClaimed);
+            const currentWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
+                ? drop.self.currentMinutesWatched
+                : (isClaimed ? reqMins : 0);
+            if (currentWatched > timeWatched) timeWatched = currentWatched;
+
+            allDrops.push({
+                name: benefitName,
+                picture: benefitImg,
+                reqTime: reqMins,
+                id: drop.id,
+                benefitId: benefitId,
+                badge: Boolean(dropCamp.owner && dropCamp.owner.name === "Twitch Gaming"),
+                startAt: dropStartAt,
+                endAt: dropEndAt,
+                endsAt: dropEndsAtTs,
+                isEnded: isEnded,
+                self: { isClaimed, currentMinutesWatched: currentWatched }
+            });
+        }
+
+        if (allDrops.length > 0) {
+            targetCamp.items = allDrops;
+            targetCamp.minutesNeeded = maxTime || 60;
+            targetCamp.minutesWatched = Math.max(targetCamp.minutesWatched || 0, timeWatched);
+            if (dropCamp.allow && dropCamp.allow.isEnabled !== false && Array.isArray(dropCamp.allow.channels)) {
+                const streams = dropCamp.allow.channels.map(ch => ch?.name).filter(Boolean);
+                if (streams.length > 0) {
+                    targetCamp.streamers = streams;
+                }
+            }
+            updatedAny = true;
+        }
+    }
+
+    if (updatedAny) {
+        if (inventory) {
+            syncCampaignProgressWithInventory(inventory);
+        }
+        await saveState();
+        updateBadgeUI();
+        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+    }
+    return updatedAny;
 }
 
 function isDropItemClaimedStrict(item, eventDropsList) {
@@ -751,6 +854,7 @@ async function handleWatchdogTick() {
         if (client) {
             // 1. Inventory Sync & Drop Claiming
             const inventory = await client.getInventory().catch(() => null);
+            await refreshSyntheticCampaignDetails(inventory).catch(() => {});
             if (inventory) {
                 // Check if the current campaign has closed/expired
                 const now = getTwitchNow();
@@ -839,148 +943,148 @@ async function handleWatchdogTick() {
                         return;
                     }
                 }
+            }
 
-                // If currently active campaign finished all its drops/ended, advance to next farmable sibling campaign
-                const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
-                const nowWatchdog = getTwitchNow();
-                if (curCamp && !isCampaignFarmable(curCamp, nowWatchdog)) {
-                    const nextFarmableIdx = activeStream.campaigns.findIndex(c => isCampaignFarmable(c, nowWatchdog));
-                    if (nextFarmableIdx !== -1 && nextFarmableIdx !== (activeStream.campaign.onCamp || 0)) {
-                        console.log(`[Watchdog] Current campaign ${curCamp.id} drops completed/ended. Advancing to sibling campaign index ${nextFarmableIdx} (${activeStream.campaigns[nextFarmableIdx].id}).`);
-                        activeStream.campaign.onCamp = nextFarmableIdx;
-                        activeStream.campaign.requiredStreamers = activeStream.campaigns[nextFarmableIdx].streamers || [];
-                        await saveState();
-                        await runCampaign(true);
-                        return;
-                    }
-                }
-
-                // IF/OR Requirement Promotion:
-                // If we are currently farming a fallback requirement (e.g. open category streamer because ow_esports was offline),
-                // check if a higher-priority restricted campaign's required channel (or curCamp's featured channels) just went LIVE!
-                const curIdx = activeStream.campaign?.onCamp || 0;
-                if (activeStream.campaign?.requirementType === "fallback_open" && curCamp && Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0) {
-                    const livePreferredStreamer = await client.getLiveBroadcasterForCampaign(
-                        activeStream.campaign.game?.name,
-                        curCamp.id,
-                        activeStream.campaign.slug,
-                        curCamp.streamers,
-                        activeStream.campaign.skippedStreamers || []
-                    ).catch(() => null);
-                    if (livePreferredStreamer && livePreferredStreamer.toLowerCase() !== (activeStream.campaign.curWatching || "").toLowerCase()) {
-                        console.log(`[RequirementSwitch] Featured required channel @${livePreferredStreamer} (${curCamp.id}) is now LIVE! Switching from directory fallback.`);
-                        await runCampaign(true);
-                        return;
-                    }
-                }
-                if (curIdx > 0 && Array.isArray(activeStream.campaigns)) {
-                    for (let pIdx = 0; pIdx < curIdx; pIdx++) {
-                        const priorityCamp = activeStream.campaigns[pIdx];
-                        if (priorityCamp && isCampaignFarmable(priorityCamp, nowWatchdog) && Array.isArray(priorityCamp.streamers) && priorityCamp.streamers.length > 0) {
-                            const livePriorityStreamer = await client.getLiveBroadcasterForCampaign(
-                                activeStream.campaign.game?.name,
-                                priorityCamp.id,
-                                activeStream.campaign.slug,
-                                priorityCamp.streamers,
-                                activeStream.campaign.skippedStreamers || []
-                            ).catch(() => null);
-                            if (livePriorityStreamer) {
-                                console.log(`[RequirementSwitch] Higher-priority required channel @${livePriorityStreamer} (${priorityCamp.id}) is now LIVE! Switching from fallback.`);
-                                activeStream.campaign.onCamp = pIdx;
-                                activeStream.campaign.requiredStreamers = priorityCamp.streamers || [];
-                                await saveState();
-                                await runCampaign(true);
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                // Ensure headless watch loop is running and verify currently watched streamer
-                startHeadlessWatchLoop();
-
-                // Check if currently watched streamer went offline or changed game category
-                if (activeStream.campaign && activeStream.campaign.status === "watching" && activeStream.campaign.curWatching) {
-                    const meta = await client.getStreamMetadata(activeStream.campaign.curWatching).catch(() => null);
-                    const isOffline = !meta || !meta.game;
-                    const targetGame = activeStream.campaign.game?.name || "";
-                    
-                    let gameChanged = false;
-                    if (meta?.game && targetGame) {
-                        gameChanged = !areGameNamesMatching(meta.game, targetGame);
-                    }
-
-                    if (isOffline || gameChanged) {
-                        activeStream.campaign.consecutiveOfflineChecks = (activeStream.campaign.consecutiveOfflineChecks || 0) + 1;
-                        if (activeStream.campaign.consecutiveOfflineChecks >= 2) {
-                            console.log(`Streamer ${activeStream.campaign.curWatching} is confirmed ${isOffline ? "offline" : "playing " + meta.game + " instead of " + targetGame}. Rotating channel.`);
-                            activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
-                            if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
-                                activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
-                            }
-                            activeStream.campaign.consecutiveOfflineChecks = 0;
-                            await runCampaign(true);
-                            return;
-                        } else {
-                            console.log(`Streamer ${activeStream.campaign.curWatching} appears ${isOffline ? "offline" : "in different category"} (check 1/2). Re-verifying next tick before rotating.`);
-                        }
-                    } else {
-                        activeStream.campaign.consecutiveOfflineChecks = 0;
-                        await performHeadlessWatch(meta);
-                    }
-                } else if (activeStream.campaign && (activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
-                    console.log(`[Watchdog] Active campaign for ${activeStream.campaign.game?.name} has no active stream (${activeStream.campaign.status}). Retrying streamer search...`);
+            // If currently active campaign finished all its drops/ended, advance to next farmable sibling campaign
+            const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
+            const nowWatchdog = getTwitchNow();
+            if (curCamp && !isCampaignFarmable(curCamp, nowWatchdog)) {
+                const nextFarmableIdx = activeStream.campaigns.findIndex(c => isCampaignFarmable(c, nowWatchdog));
+                if (nextFarmableIdx !== -1 && nextFarmableIdx !== (activeStream.campaign.onCamp || 0)) {
+                    console.log(`[Watchdog] Current campaign ${curCamp.id} drops completed/ended. Advancing to sibling campaign index ${nextFarmableIdx} (${activeStream.campaigns[nextFarmableIdx].id}).`);
+                    activeStream.campaign.onCamp = nextFarmableIdx;
+                    activeStream.campaign.requiredStreamers = activeStream.campaigns[nextFarmableIdx].streamers || [];
+                    await saveState();
                     await runCampaign(true);
                     return;
                 }
+            }
 
-                // 2. Stream Stall Watchdog (6-minute threshold)
-                if (settings.autoRefresh !== false && activeStream.campaign) {
-                    const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
-                    const currentMinutes = curCamp ? (curCamp.minutesWatched || 0) : 0;
-                    const now = Date.now();
-
-                    if (activeStream.campaign.lastMinutesWatched === undefined || activeStream.campaign.lastProgressTimestamp === undefined) {
-                        activeStream.campaign.lastMinutesWatched = currentMinutes;
-                        activeStream.campaign.lastProgressTimestamp = now;
-                        activeStream.campaign.stallCount = 0;
-                    } else if (currentMinutes > activeStream.campaign.lastMinutesWatched) {
-                        // Progress successfully advanced! Reset stall timer & counter
-                        activeStream.campaign.lastMinutesWatched = currentMinutes;
-                        activeStream.campaign.lastProgressTimestamp = now;
-                        activeStream.campaign.stallCount = 0;
-                    } else {
-                        // Progress has stalled for >6 minutes
-                        const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
-                        const stallThresholdMs = 6 * 60 * 1000;
-
-                        if (elapsedMs >= stallThresholdMs) {
-                            activeStream.campaign.stallCount = (activeStream.campaign.stallCount || 0) + 1;
-                            activeStream.campaign.lastProgressTimestamp = now;
-
-                            if (activeStream.campaign.stallCount === 1) {
-                                console.log(`Headless watch stall detected for ${activeStream.campaign.curWatching} (0m gained in 6m). Resetting HLS token & re-pulsing.`);
-                                if (client && client._streamUrlCache && activeStream.campaign.curWatching) {
-                                    client._streamUrlCache.delete(activeStream.campaign.curWatching.toLowerCase());
-                                }
-                                await performHeadlessWatch();
-                            } else if (activeStream.campaign.stallCount >= 2) {
-                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 12m). Rotating to next channel.`);
-                                activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
-                                if (activeStream.campaign.curWatching && !activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
-                                    activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
-                                }
-                                activeStream.campaign.stallCount = 0;
-                                await runCampaign(true);
-                                return;
-                            }
+            // IF/OR Requirement Promotion:
+            // If we are currently farming a fallback requirement (e.g. open category streamer because ow_esports was offline),
+            // check if a higher-priority restricted campaign's required channel (or curCamp's featured channels) just went LIVE!
+            const curIdx = activeStream.campaign?.onCamp || 0;
+            if (activeStream.campaign?.requirementType === "fallback_open" && curCamp && Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0) {
+                const livePreferredStreamer = await client.getLiveBroadcasterForCampaign(
+                    activeStream.campaign.game?.name,
+                    curCamp.id,
+                    activeStream.campaign.slug,
+                    curCamp.streamers,
+                    activeStream.campaign.skippedStreamers || []
+                ).catch(() => null);
+                if (livePreferredStreamer && livePreferredStreamer.toLowerCase() !== (activeStream.campaign.curWatching || "").toLowerCase()) {
+                    console.log(`[RequirementSwitch] Featured required channel @${livePreferredStreamer} (${curCamp.id}) is now LIVE! Switching from directory fallback.`);
+                    await runCampaign(true);
+                    return;
+                }
+            }
+            if (curIdx > 0 && Array.isArray(activeStream.campaigns)) {
+                for (let pIdx = 0; pIdx < curIdx; pIdx++) {
+                    const priorityCamp = activeStream.campaigns[pIdx];
+                    if (priorityCamp && isCampaignFarmable(priorityCamp, nowWatchdog) && Array.isArray(priorityCamp.streamers) && priorityCamp.streamers.length > 0) {
+                        const livePriorityStreamer = await client.getLiveBroadcasterForCampaign(
+                            activeStream.campaign.game?.name,
+                            priorityCamp.id,
+                            activeStream.campaign.slug,
+                            priorityCamp.streamers,
+                            activeStream.campaign.skippedStreamers || []
+                        ).catch(() => null);
+                        if (livePriorityStreamer) {
+                            console.log(`[RequirementSwitch] Higher-priority required channel @${livePriorityStreamer} (${priorityCamp.id}) is now LIVE! Switching from fallback.`);
+                            activeStream.campaign.onCamp = pIdx;
+                            activeStream.campaign.requiredStreamers = priorityCamp.streamers || [];
+                            await saveState();
+                            await runCampaign(true);
+                            return;
                         }
                     }
                 }
-
-                await saveState();
-                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
             }
+
+            // Ensure headless watch loop is running and verify currently watched streamer
+            startHeadlessWatchLoop();
+
+            // Check if currently watched streamer went offline or changed game category
+            if (activeStream.campaign && activeStream.campaign.status === "watching" && activeStream.campaign.curWatching) {
+                const meta = await client.getStreamMetadata(activeStream.campaign.curWatching).catch(() => null);
+                const isOffline = !meta || (!meta.broadcastId && !meta.game);
+                const targetGame = activeStream.campaign.game?.name || "";
+                
+                let gameChanged = false;
+                if (meta?.game && targetGame) {
+                    gameChanged = !areGameNamesMatching(meta.game, targetGame);
+                }
+
+                if (isOffline || gameChanged) {
+                    activeStream.campaign.consecutiveOfflineChecks = (activeStream.campaign.consecutiveOfflineChecks || 0) + 1;
+                    if (activeStream.campaign.consecutiveOfflineChecks >= 2) {
+                        console.log(`Streamer ${activeStream.campaign.curWatching} is confirmed ${isOffline ? "offline" : "playing " + meta.game + " instead of " + targetGame}. Rotating channel.`);
+                        activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                        if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
+                            activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                        }
+                        activeStream.campaign.consecutiveOfflineChecks = 0;
+                        await runCampaign(true);
+                        return;
+                    } else {
+                        console.log(`Streamer ${activeStream.campaign.curWatching} appears ${isOffline ? "offline" : "in different category"} (check 1/2). Re-verifying next tick before rotating.`);
+                    }
+                } else {
+                    activeStream.campaign.consecutiveOfflineChecks = 0;
+                    await performHeadlessWatch(meta);
+                }
+            } else if (activeStream.campaign && (activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
+                console.log(`[Watchdog] Active campaign for ${activeStream.campaign.game?.name} has no active stream (${activeStream.campaign.status}). Retrying streamer search...`);
+                await runCampaign(true);
+                return;
+            }
+
+            // 2. Stream Stall Watchdog (6-minute threshold)
+            if (settings.autoRefresh !== false && activeStream.campaign) {
+                const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
+                const currentMinutes = curCamp ? (curCamp.minutesWatched || 0) : 0;
+                const now = Date.now();
+
+                if (activeStream.campaign.lastMinutesWatched === undefined || activeStream.campaign.lastProgressTimestamp === undefined) {
+                    activeStream.campaign.lastMinutesWatched = currentMinutes;
+                    activeStream.campaign.lastProgressTimestamp = now;
+                    activeStream.campaign.stallCount = 0;
+                } else if (currentMinutes > activeStream.campaign.lastMinutesWatched) {
+                    // Progress successfully advanced! Reset stall timer & counter
+                    activeStream.campaign.lastMinutesWatched = currentMinutes;
+                    activeStream.campaign.lastProgressTimestamp = now;
+                    activeStream.campaign.stallCount = 0;
+                } else {
+                    // Progress has stalled for >6 minutes
+                    const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
+                    const stallThresholdMs = 6 * 60 * 1000;
+
+                    if (elapsedMs >= stallThresholdMs) {
+                        activeStream.campaign.stallCount = (activeStream.campaign.stallCount || 0) + 1;
+                        activeStream.campaign.lastProgressTimestamp = now;
+
+                        if (activeStream.campaign.stallCount === 1) {
+                            console.log(`Headless watch stall detected for ${activeStream.campaign.curWatching} (0m gained in 6m). Resetting HLS token & re-pulsing.`);
+                            if (client && client._streamUrlCache && activeStream.campaign.curWatching) {
+                                client._streamUrlCache.delete(activeStream.campaign.curWatching.toLowerCase());
+                            }
+                            await performHeadlessWatch();
+                        } else if (activeStream.campaign.stallCount >= 2) {
+                            console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 12m). Rotating to next channel.`);
+                            activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                            if (activeStream.campaign.curWatching && !activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
+                                activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                            }
+                            activeStream.campaign.stallCount = 0;
+                            await runCampaign(true);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            await saveState();
+            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
         }
     }
 }
@@ -1046,6 +1150,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     autoGetTokenWindow = 0;
                     await chrome.storage.local.set({ autoGetTokenWindow: 0 }).catch(() => {});
                 }
+                refreshSyntheticCampaignDetails().catch(() => {});
                 sendResponse({ success: true });
                 break;
 
@@ -1370,20 +1475,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 if (client) {
                     try {
                         currentInventory = await client.getInventory().catch(() => null);
-                        if (currentInventory && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns) {
-                            const isDone = syncCampaignProgressWithInventory(currentInventory);
-                            if (isDone && activeStream.campaign) {
-                                const nowTs = getTwitchNow();
-                                const allDone = activeStream.campaigns.every(c => {
-                                    return (c.items && c.items.length > 0)
-                                        ? c.items.every(i => (i.self && i.self.isClaimed) || (i.endsAt && i.endsAt <= nowTs) || i.isEnded || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
-                                        : c.minutesWatched >= c.minutesNeeded;
-                                });
-                                if (allDone) {
-                                    activeStream.campaign.isCompleted = true;
-                                    activeStream.campaign.curWatching = null;
+                        await refreshSyntheticCampaignDetails(currentInventory).catch(() => {});
+                        if (activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns) {
+                            if (currentInventory) {
+                                const isDone = syncCampaignProgressWithInventory(currentInventory);
+                                if (isDone && activeStream.campaign) {
+                                    const nowTs = getTwitchNow();
+                                    const allDone = activeStream.campaigns.every(c => {
+                                        return (c.items && c.items.length > 0)
+                                            ? c.items.every(i => (i.self && i.self.isClaimed) || (i.endsAt && i.endsAt <= nowTs) || i.isEnded || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
+                                            : c.minutesWatched >= c.minutesNeeded;
+                                    });
+                                    if (allDone) {
+                                        activeStream.campaign.isCompleted = true;
+                                        activeStream.campaign.curWatching = null;
+                                    }
+                                    await saveState();
                                 }
-                                await saveState();
+                            }
+                            if (activeStream.campaign?.status === "watching" && activeStream.campaign.curWatching) {
+                                const session = await client.getCurrentDropSession(
+                                    activeStream.campaign.streamMeta?.channelId || "",
+                                    activeStream.campaign.curWatching
+                                ).catch(() => null);
+                                if (session && applyDropSessionProgress(session)) {
+                                    await saveState();
+                                    updateBadgeUI();
+                                }
                             }
                             if (extEnabled && activeStream.campaign && (activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
                                 await runCampaign(true).catch(() => {});
@@ -2357,9 +2475,9 @@ async function checkClaimDrop() {
     }
 }
 
-function autoGetToken() {
+function autoGetToken(force = false) {
     if (settings.autoGetToken === true && autoGetTokenWindow === 0) {
-        if (!client || !client.integrity || client.integrity.expiration - 960000 < Date.now()) {
+        if (force || !client || !client.integrity || client.integrity.expiration - 960000 < Date.now()) {
             chrome.windows.create({ focused: false, type: "popup", url: "https://www.twitch.tv/drops/inventory/" }).then(async (window) => {
                 if (window) {
                     autoGetTokenWindow = window.id;

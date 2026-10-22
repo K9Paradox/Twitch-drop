@@ -79,8 +79,21 @@ export class Client {
         this.integrity = options?.integrity ?? null;
         this.userId = options?.userId ?? null;
         this.uuid = options?.uuid ?? null;
+        this.onIntegrityError = options?.onIntegrityError ?? null;
         this._streamUrlCache = new Map();
         this._spadeUrlCache = new Map();
+    }
+
+    hasIntegrityError(json) {
+        if (!json) return false;
+        const items = Array.isArray(json) ? json : [json];
+        return items.some(item =>
+            Array.isArray(item?.errors) &&
+            item.errors.some(err =>
+                err?.extensions?.code === "IntegrityCheckFailed" ||
+                (typeof err?.message === "string" && err.message.toLowerCase().includes("integrity"))
+            )
+        );
     }
 
     extractOperationName(data) {
@@ -152,7 +165,7 @@ export class Client {
         return (json && json.data !== undefined) ? json.data : json;
     }
 
-    async postAuthorized(data) {
+    async postAuthorized(data, _retried = false) {
         const opName = this.extractOperationName(data);
         if (!this.oauthToken) {
             throw new TwitchApiError("Unauthorized: Missing OAuth token", {
@@ -179,6 +192,16 @@ export class Client {
         }
 
         const json = await res.json();
+
+        if (!_retried && this.hasIntegrityError(json) && typeof this.onIntegrityError === "function") {
+            try {
+                const refreshed = await this.onIntegrityError();
+                if (refreshed) {
+                    return await this.postAuthorized(data, true);
+                }
+            } catch (e) {}
+        }
+
         if (Array.isArray(json)) {
             return json;
         }
@@ -225,6 +248,7 @@ export class Client {
         if (options.userId !== undefined) this.userId = options.userId;
         if (options.uuid !== undefined) this.uuid = options.uuid;
         if (options.integrity !== undefined) this.integrity = options.integrity;
+        if (options.onIntegrityError !== undefined) this.onIntegrityError = options.onIntegrityError;
     }
 
     async getUserId() {
@@ -456,6 +480,9 @@ export class Client {
         try {
             const data = await this.postAuthorized({
                 "operationName": "Inventory",
+                "variables": {
+                    "fetchRewardCampaigns": false
+                },
                 "extensions": {
                     "persistedQuery": {
                         "version": 1,
@@ -772,6 +799,24 @@ export class Client {
 
     async getStreamMetadata(channelLogin) {
         if (!channelLogin) return { login: "" };
+        const login = String(channelLogin).toLowerCase();
+
+        const queryOverlayMeta = async () => {
+            const overlayData = await this.post({
+                "operationName": "VideoPlayerStreamInfoOverlayChannel",
+                "variables": {
+                    "channel": login
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "198492e0857f6aedead9665c81c5a06d67b25b58034649687124083ff288597d"
+                    }
+                }
+            });
+            return overlayData?.user || null;
+        };
+
         try {
             const data = await this.post({
                 "operationName": "ChannelShell",
@@ -796,7 +841,26 @@ export class Client {
                 let viewers = stream.viewersCount || 0;
 
                 // ChannelShell in production Twitch GQL only returns stream ID & viewersCount without game.
-                // Fetch direct stream details if game is missing.
+                // Fetch stream game details via PersistedQuery VideoPlayerStreamInfoOverlayChannel (with GetChannelStream fallback).
+                if (!game) {
+                    try {
+                        const overlayUser = await queryOverlayMeta();
+                        if (overlayUser) {
+                            if (overlayUser.id && !channelId) channelId = String(overlayUser.id);
+                            if (overlayUser.stream?.id && !broadcastId) broadcastId = String(overlayUser.stream.id);
+                            if (overlayUser.stream?.viewersCount) viewers = overlayUser.stream.viewersCount;
+                            const bs = overlayUser.broadcastSettings;
+                            if (bs) {
+                                if (bs.title) title = bs.title;
+                                if (bs.game) {
+                                    game = bs.game.displayName || bs.game.name;
+                                    if (bs.game.id) gameId = String(bs.game.id);
+                                }
+                            }
+                        }
+                    } catch (err) {}
+                }
+
                 if (!game) {
                     try {
                         const directData = await this.post({
@@ -831,7 +895,24 @@ export class Client {
             }
         } catch (e) {}
 
-        // Fallback: direct GraphQL query if ChannelShell failed or returned null
+        // Fallback 1: PersistedQuery VideoPlayerStreamInfoOverlayChannel if ChannelShell failed
+        try {
+            const overlayUser = await queryOverlayMeta();
+            if (overlayUser && overlayUser.stream) {
+                const bs = overlayUser.broadcastSettings;
+                return {
+                    login: channelLogin,
+                    channelId: overlayUser.id ? String(overlayUser.id) : undefined,
+                    broadcastId: overlayUser.stream.id ? String(overlayUser.stream.id) : undefined,
+                    game: bs?.game?.displayName || bs?.game?.name || undefined,
+                    gameId: bs?.game?.id ? String(bs.game.id) : undefined,
+                    title: bs?.title || "",
+                    viewers: overlayUser.stream.viewersCount || 0
+                };
+            }
+        } catch (err) {}
+
+        // Fallback 2: direct GraphQL query if persisted queries failed or returned null
         try {
             const directData = await this.post({
                 "operationName": "GetChannelStream",
@@ -920,11 +1001,12 @@ export class Client {
         const token = await this.getPlaybackAccessToken(login);
         if (!token) return null;
 
+        // Omit allow_audio_only so Twitch Usher returns video variants (lowest: 160p30);
+        // Twitch does not credit Drops watch time for audio_only HLS streams on web.
         const params = new URLSearchParams({
             sig: token.signature,
             token: token.value,
             allow_source: "true",
-            allow_audio_only: "true",
             fast_bread: "true",
             player_backend: "mediaplayer",
             p: String(Math.floor(Math.random() * 900000) + 100000)
@@ -937,14 +1019,35 @@ export class Client {
             const playlistText = await res.text();
             if (!playlistText) return null;
 
-            const lines = playlistText
+            const rawLines = playlistText
                 .split(/\r?\n/)
                 .map(l => l.trim())
-                .filter(l => l.length > 0 && !l.startsWith("#"));
+                .filter(l => l.length > 0);
 
-            if (lines.length === 0) return null;
-            // Twitch lists lowest-resolution/audio_only variants at the bottom of the master playlist
-            return lines[lines.length - 1];
+            const videoUrls = [];
+            const allUrls = [];
+            let pendingAudioOnly = false;
+
+            for (const line of rawLines) {
+                if (line.startsWith("#")) {
+                    if (line.startsWith("#EXT-X-STREAM-INF") || line.startsWith("#EXT-X-MEDIA")) {
+                        if (/audio_only/i.test(line)) {
+                            pendingAudioOnly = true;
+                        }
+                    }
+                } else {
+                    allUrls.push(line);
+                    if (!pendingAudioOnly && !/audio_only/i.test(line)) {
+                        videoUrls.push(line);
+                    }
+                    pendingAudioOnly = false;
+                }
+            }
+
+            const candidates = videoUrls.length > 0 ? videoUrls : allUrls;
+            if (candidates.length === 0) return null;
+            // Twitch lists lowest-resolution video variant (e.g. 160p30) last among video variants
+            return candidates[candidates.length - 1];
         } catch (e) {
             return null;
         }
@@ -1033,7 +1136,7 @@ export class Client {
         }
 
         const spadeRegex = /"(?:spade|beacon)_?url"\s*:\s*"(https:\/\/[^"]+)"/i;
-        const settingsJsRegex = /src="(https:\/\/[\w./-]+\/config\/settings\.[0-9a-f]{32}\.js)"/i;
+        const settingsJsRegex = /https:\/\/[\w./-]+\/config\/settings\.[0-9a-f]+\.js/i;
 
         for (const pageUrl of [
             `https://www.twitch.tv/${encodeURIComponent(login)}`,
@@ -1049,8 +1152,9 @@ export class Client {
                         return directMatch[1];
                     }
                     const settingsMatch = html.match(settingsJsRegex);
-                    if (settingsMatch && settingsMatch[1]) {
-                        const jsRes = await fetch(settingsMatch[1], { method: "GET" });
+                    const settingsUrl = settingsMatch ? (settingsMatch[1] || settingsMatch[0]) : null;
+                    if (settingsUrl) {
+                        const jsRes = await fetch(settingsUrl, { method: "GET" });
                         if (jsRes && jsRes.ok) {
                             const jsText = await jsRes.text();
                             const jsSpadeMatch = jsText.match(spadeRegex);

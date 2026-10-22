@@ -214,6 +214,13 @@ $(() => {
                     }
                 }).catch(() => {});
             }
+
+            // Periodic live progress refresh while popup remains open
+            setInterval(() => {
+                if (extEnabled && chrome.runtime && chrome.runtime.sendMessage) {
+                    chrome.runtime.sendMessage({ type: "p:getCurrentDrops" }).catch(() => {});
+                }
+            }, 15000);
         }).catch(() => {});
     }
 

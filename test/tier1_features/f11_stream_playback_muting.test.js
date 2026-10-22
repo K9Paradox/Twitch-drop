@@ -43,7 +43,7 @@ describe("Tier 1: Feature 11 - Headless HLS & Spade Watch Engine (v2.0)", () => 
         assert.equal(capturedVars?.playerType, "site");
     });
 
-    it("F11-T2: getStreamUrl() parses Usher master M3U8 playlist and selects the lowest-bandwidth variant", async () => {
+    it("F11-T2: getStreamUrl() parses Usher master M3U8 playlist and selects the lowest-bandwidth video variant (skipping audio_only)", async () => {
         sandbox.fetchMock.onGql("PlaybackAccessToken", {
             data: {
                 streamPlaybackAccessToken: {
@@ -55,15 +55,20 @@ describe("Tier 1: Feature 11 - Headless HLS & Spade Watch Engine (v2.0)", () => 
 
         const masterM3u8 = [
             "#EXTM3U",
-            '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,NAME="1080p60"',
+            '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,NAME="1080p60",VIDEO="chunked"',
             "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/high_1080p.m3u8",
-            '#EXT-X-STREAM-INF:BANDWIDTH=240000,RESOLUTION=284x160,NAME="160p"',
-            "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/low_160p.m3u8"
+            '#EXT-X-STREAM-INF:BANDWIDTH=240000,RESOLUTION=284x160,NAME="160p",VIDEO="160p30"',
+            "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/low_160p.m3u8",
+            '#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="audio_only",NAME="audio_only",AUTOSELECT=YES,DEFAULT=NO',
+            '#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS="mp4a.40.2",VIDEO="audio_only"',
+            "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/audio_only.m3u8"
         ].join("\n");
 
+        let capturedUsherUrl = null;
         const origFetch = globalThis.fetch;
         globalThis.fetch = async (url, opts) => {
             if (String(url).includes("usher.ttvnw.net/api/channel/hls/shroud.m3u8")) {
+                capturedUsherUrl = String(url);
                 return {
                     ok: true,
                     status: 200,
@@ -76,6 +81,7 @@ describe("Tier 1: Feature 11 - Headless HLS & Spade Watch Engine (v2.0)", () => 
         try {
             const variantUrl = await client.getStreamUrl("shroud");
             assert.equal(variantUrl, "https://video-weaver.sjc02.hls.ttvnw.net/v1/playlist/low_160p.m3u8");
+            assert.ok(capturedUsherUrl && !capturedUsherUrl.includes("allow_audio_only"), "Usher URL must not request audio_only");
         } finally {
             globalThis.fetch = origFetch;
         }
