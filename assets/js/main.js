@@ -1184,7 +1184,8 @@ function updateDropProgressUI(data) {
         }
 
         if (allItems.length > 0) {
-            currentRewardItem = allItems.find(i => !i._computedClaimed && !i._computedEnded)
+            currentRewardItem = (camp.activeDropId ? allItems.find(i => i.id === camp.activeDropId && !i._computedClaimed && !i._computedEnded) : null)
+                || allItems.find(i => !i._computedClaimed && !i._computedEnded)
                 || allItems.find(i => !i._computedClaimed)
                 || allItems[allItems.length - 1];
         }

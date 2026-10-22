@@ -137,12 +137,17 @@ function applyDropSessionProgress(session) {
     let matchedItem = null;
 
     if (dropId) {
-        for (const campObj of activeStream.campaigns) {
+        for (let idx = 0; idx < activeStream.campaigns.length; idx++) {
+            const campObj = activeStream.campaigns[idx];
             if (!Array.isArray(campObj.items)) continue;
             const found = campObj.items.find(i => i && i.id === dropId);
             if (found) {
                 matchedCamp = campObj;
                 matchedItem = found;
+                if (activeStream.campaign.onCamp !== idx) {
+                    activeStream.campaign.onCamp = idx;
+                    changed = true;
+                }
                 break;
             }
         }
@@ -155,9 +160,14 @@ function applyDropSessionProgress(session) {
 
     if (!matchedItem && Array.isArray(matchedCamp.items) && matchedCamp.items.length > 0) {
         const nowTs = getTwitchNow();
+        const sortedCandidates = [...matchedCamp.items]
+            .filter(i => i && !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowTs))
+            .sort((a, b) => (a.reqTime || a.requiredMinutesWatched || 60) - (b.reqTime || b.requiredMinutesWatched || 60));
         matchedItem = matchedCamp.items.find(i => i && i.isSynthetic)
-            || (req > 0 ? matchedCamp.items.find(i => i && !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowTs) && i.reqTime === req) : null)
-            || matchedCamp.items.find(i => i && !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowTs));
+            || (req > 0 ? sortedCandidates.find(i => (i.reqTime || i.requiredMinutesWatched || 60) === req && (i.self?.currentMinutesWatched || 0) < req) : null)
+            || (req > 0 ? sortedCandidates.find(i => (i.reqTime || i.requiredMinutesWatched || 60) === req) : null)
+            || sortedCandidates.find(i => (i.self?.currentMinutesWatched || 0) < (i.reqTime || i.requiredMinutesWatched || 60))
+            || sortedCandidates[0];
     }
 
     if (matchedItem) {
@@ -171,6 +181,10 @@ function applyDropSessionProgress(session) {
         if (wasSynthetic && dropId) {
             matchedItem.id = dropId;
             matchedItem.isSynthetic = false;
+            changed = true;
+        }
+        if (matchedItem.id && activeStream.campaign.activeDropId !== matchedItem.id) {
+            activeStream.campaign.activeDropId = matchedItem.id;
             changed = true;
         }
         if (req > 0 && (wasSynthetic || matchedItem.isSynthetic || !matchedItem.reqTime)) {
@@ -383,6 +397,7 @@ async function hydrateState() {
 
             await fetchTwitchCookiesAndInitClient();
             isHydrated = true;
+            updateBadgeUI();
         } catch (e) {
             console.warn("Error hydrating state:", e);
         } finally {
@@ -749,6 +764,7 @@ function syncCampaignProgressWithInventory(inventory) {
     }
 
     saveState();
+    updateBadgeUI();
     return allCampaignsCompleted;
 }
 
@@ -2577,20 +2593,56 @@ function updateBadgeUI() {
                 text = "";
                 color = "#52525b";
             } else if (activeStream.campaigns && activeStream.campaigns.length > 0) {
-                const cur = activeStream.campaigns[camp.onCamp || 0] || activeStream.campaigns[0];
-                if (cur) {
-                    let left = 0;
-                    const nowMs = getTwitchNow();
-                    if (cur.items && cur.items.length > 0) {
-                        const nextItem = cur.items.find(i => !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowMs) && (i.self?.currentMinutesWatched || 0) < (i.reqTime || 60));
-                        if (nextItem) {
-                            const req = nextItem.reqTime || 60;
-                            const watched = nextItem.self?.currentMinutesWatched || 0;
-                            left = Math.max(0, req - watched);
-                        }
-                    } else if (cur.minutesNeeded) {
-                        left = Math.max(0, cur.minutesNeeded - (cur.minutesWatched || 0));
+                const nowMs = getTwitchNow();
+                const getFarmableItemForCamp = (c) => {
+                    if (!c || !Array.isArray(c.items) || c.items.length === 0) return null;
+                    const sorted = [...c.items].sort((a, b) => {
+                        const reqA = a?.reqTime || a?.requiredMinutesWatched || 60;
+                        const reqB = b?.reqTime || b?.requiredMinutesWatched || 60;
+                        return reqA - reqB;
+                    });
+                    const isItemFarmable = (i) => {
+                        if (!i || i.self?.isClaimed) return false;
+                        const req = i.reqTime || i.requiredMinutesWatched || 60;
+                        const watched = (i.self && typeof i.self.currentMinutesWatched === "number")
+                            ? i.self.currentMinutesWatched
+                            : (c.minutesWatched || 0);
+                        if (req > 0 && watched >= req) return false;
+                        const dropEnd = i.endAt ? new Date(i.endAt).getTime() : (i.endsAt ? new Date(i.endsAt).getTime() : (c.endsAt || NaN));
+                        if (i.isEnded || (!isNaN(dropEnd) && dropEnd <= nowMs)) return false;
+                        return true;
+                    };
+                    if (camp.activeDropId) {
+                        const activeMatch = sorted.find(i => i && i.id === camp.activeDropId && isItemFarmable(i));
+                        if (activeMatch) return { item: activeMatch, camp: c };
                     }
+                    const firstFarmable = sorted.find(isItemFarmable);
+                    return firstFarmable ? { item: firstFarmable, camp: c } : null;
+                };
+
+                const primaryIdx = (typeof camp.onCamp === "number" && camp.onCamp >= 0) ? camp.onCamp : 0;
+                const primaryCamp = activeStream.campaigns[primaryIdx] || activeStream.campaigns[0];
+                let found = getFarmableItemForCamp(primaryCamp);
+                if (!found && activeStream.campaigns.length > 1) {
+                    for (let idx = 0; idx < activeStream.campaigns.length; idx++) {
+                        if (idx === primaryIdx) continue;
+                        found = getFarmableItemForCamp(activeStream.campaigns[idx]);
+                        if (found) break;
+                    }
+                }
+
+                if (found && found.item) {
+                    const req = found.item.reqTime || found.item.requiredMinutesWatched || 60;
+                    const watched = (found.item.self && typeof found.item.self.currentMinutesWatched === "number")
+                        ? found.item.self.currentMinutesWatched
+                        : (found.camp.minutesWatched || 0);
+                    const left = Math.max(0, Math.ceil(req - watched));
+                    text = left > 0 ? `${left}m` : "✓";
+                    color = left > 0 ? "#9146FF" : "#00e676";
+                } else if (primaryCamp) {
+                    const left = primaryCamp.minutesNeeded
+                        ? Math.max(0, Math.ceil(primaryCamp.minutesNeeded - (primaryCamp.minutesWatched || 0)))
+                        : 0;
                     text = left > 0 ? `${left}m` : "✓";
                     color = left > 0 ? "#9146FF" : "#00e676";
                 } else {
@@ -2601,7 +2653,6 @@ function updateBadgeUI() {
             text = "";
         }
 
-        if (text === lastBadgeState) return;
         lastBadgeState = text;
         chrome.action.setBadgeText({ text }).catch(() => {});
         chrome.action.setBadgeBackgroundColor({ color }).catch(() => {});
