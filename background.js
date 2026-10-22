@@ -253,15 +253,36 @@ async function performHeadlessWatch(preFetchedMeta = null) {
 
         const watchRes = await client.sendWatch(streamer, meta || {});
         if (watchRes && watchRes.success) {
-            activeStream.campaign.lastWatchPulse = Date.now();
+            const nowMs = Date.now();
+            activeStream.campaign.lastWatchPulse = nowMs;
             activeStream.campaign.watchMethod = watchRes.method || "hls";
 
+            let sessionAdvanced = false;
             if (typeof client.getCurrentDropSession === "function") {
                 const session = await client.getCurrentDropSession(meta?.channelId || "", streamer).catch(() => null);
                 if (session && applyDropSessionProgress(session)) {
+                    sessionAdvanced = true;
                     await saveState();
                     updateBadgeUI();
                     chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                }
+            }
+
+            if (!sessionAdvanced && typeof client.getInventory === "function" && nowMs - (activeStream.campaign.lastInventorySyncTs || 0) >= 55000) {
+                activeStream.campaign.lastInventorySyncTs = nowMs;
+                const inv = await client.getInventory().catch(() => null);
+                if (inv) {
+                    const prevMinutes = activeStream.campaigns?.[activeStream.campaign.onCamp || 0]?.minutesWatched || 0;
+                    syncCampaignProgressWithInventory(inv);
+                    const newMinutes = activeStream.campaigns?.[activeStream.campaign.onCamp || 0]?.minutesWatched || 0;
+                    if (newMinutes > prevMinutes) {
+                        activeStream.campaign.lastMinutesWatched = newMinutes;
+                        activeStream.campaign.lastProgressTimestamp = nowMs;
+                        activeStream.campaign.stallCount = 0;
+                        await saveState();
+                        updateBadgeUI();
+                        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                    }
                 }
             }
             return true;
@@ -277,6 +298,9 @@ async function performHeadlessWatch(preFetchedMeta = null) {
 function startHeadlessWatchLoop() {
     if (headlessWatchInterval) return;
     headlessWatchInterval = setInterval(() => {
+        try {
+            chrome?.runtime?.getPlatformInfo?.(() => {});
+        } catch (e) {}
         if (!extEnabled || !activeStream?.campaign || activeStream.campaign === "none" || activeStream.campaign.status !== "watching") {
             stopHeadlessWatchLoop();
             return;
@@ -422,6 +446,23 @@ async function fetchTwitchCookiesAndInitClient() {
 
         oauthToken = oauthToken || localData.oauthToken;
         deviceId = deviceId || localData.deviceId;
+        let resolvedUserId = localData.userId || null;
+        if (!resolvedUserId) {
+            try {
+                let persistentCookie = await chrome.cookies.get({ url: "https://www.twitch.tv", name: "persistent" }).catch(() => null);
+                if (!persistentCookie) {
+                    const allPersist = await chrome.cookies.getAll({ name: "persistent" }).catch(() => []);
+                    persistentCookie = allPersist.find(c => c.domain.includes("twitch.tv") && c.value) || allPersist[0];
+                }
+                if (persistentCookie && persistentCookie.value) {
+                    const rawId = decodeURIComponent(persistentCookie.value).split(":")[0];
+                    if (/^\d+$/.test(rawId)) {
+                        resolvedUserId = rawId;
+                        await chrome.storage.local.set({ userId: resolvedUserId }).catch(() => {});
+                    }
+                }
+            } catch (e) {}
+        }
         const integrity = localData.twitchInteg || null;
 
         const onIntegrityError = () => {
@@ -433,11 +474,11 @@ async function fetchTwitchCookiesAndInitClient() {
         if (oauthToken) {
             await chrome.storage.local.set({ oauthToken, deviceId }).catch(() => {});
             if (client === null) {
-                client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid, integrity, onIntegrityError });
+                client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", oauthToken, deviceId, userId: resolvedUserId, uuid: localData.uuid, integrity, onIntegrityError });
             } else {
-                client.updateUserInfo({ oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid, integrity, onIntegrityError });
+                client.updateUserInfo({ oauthToken, deviceId, userId: resolvedUserId, uuid: localData.uuid, integrity, onIntegrityError });
             }
-            if (!localData.userId) {
+            if (!resolvedUserId) {
                 await client.autoDetectUserId().catch(() => {});
             }
         } else if (client === null) {
@@ -1490,8 +1531,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                         activeStream.campaign.isCompleted = true;
                                         activeStream.campaign.curWatching = null;
                                     }
-                                    await saveState();
                                 }
+                                await saveState();
+                                updateBadgeUI();
                             }
                             if (activeStream.campaign?.status === "watching" && activeStream.campaign.curWatching) {
                                 const session = await client.getCurrentDropSession(

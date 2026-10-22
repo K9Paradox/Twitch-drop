@@ -96,6 +96,25 @@ export class Client {
         );
     }
 
+    hasTransientGqlError(json) {
+        if (!json) return false;
+        const transientMessages = [
+            "service error",
+            "service timeout",
+            "service unavailable",
+            "request cancelled",
+            "context deadline exceeded"
+        ];
+        const items = Array.isArray(json) ? json : [json];
+        return items.some(item =>
+            Array.isArray(item?.errors) &&
+            item.errors.some(err => {
+                const msg = typeof err?.message === "string" ? err.message.toLowerCase() : "";
+                return transientMessages.some(t => msg.includes(t));
+            })
+        );
+    }
+
     extractOperationName(data) {
         if (!data) return null;
         if (Array.isArray(data)) {
@@ -125,7 +144,7 @@ export class Client {
         return headers;
     }
 
-    async post(data) {
+    async post(data, _transientRetryCount = 0) {
         const opName = this.extractOperationName(data);
         const headers = this.buildHeaders(false);
 
@@ -145,6 +164,11 @@ export class Client {
         }
 
         const json = await res.json();
+        if (_transientRetryCount < 1 && this.hasTransientGqlError(json)) {
+            await new Promise(r => setTimeout(r, 150));
+            return await this.post(data, _transientRetryCount + 1);
+        }
+
         if (Array.isArray(json)) {
             return json;
         }
@@ -165,7 +189,7 @@ export class Client {
         return (json && json.data !== undefined) ? json.data : json;
     }
 
-    async postAuthorized(data, _retried = false) {
+    async postAuthorized(data, _retried = false, _transientRetryCount = 0) {
         const opName = this.extractOperationName(data);
         if (!this.oauthToken) {
             throw new TwitchApiError("Unauthorized: Missing OAuth token", {
@@ -197,9 +221,14 @@ export class Client {
             try {
                 const refreshed = await this.onIntegrityError();
                 if (refreshed) {
-                    return await this.postAuthorized(data, true);
+                    return await this.postAuthorized(data, true, _transientRetryCount);
                 }
             } catch (e) {}
+        }
+
+        if (_transientRetryCount < 1 && this.hasTransientGqlError(json)) {
+            await new Promise(r => setTimeout(r, 150));
+            return await this.postAuthorized(data, _retried, _transientRetryCount + 1);
         }
 
         if (Array.isArray(json)) {
@@ -274,8 +303,31 @@ export class Client {
                         await chrome.storage.local.set({ userId: data.currentUser.id });
                     }
                 } catch (err) {}
+                return this.userId;
             }
         } catch (e) {}
+
+        if (!this.userId && this.oauthToken) {
+            try {
+                const res = await fetch("https://id.twitch.tv/oauth2/validate", {
+                    method: "GET",
+                    headers: {
+                        "Authorization": `OAuth ${this.oauthToken}`
+                    }
+                });
+                if (res && res.ok) {
+                    const valJson = await res.json();
+                    if (valJson && valJson.user_id) {
+                        this.userId = String(valJson.user_id);
+                        try {
+                            if (typeof chrome !== "undefined" && chrome?.storage?.local) {
+                                await chrome.storage.local.set({ userId: this.userId });
+                            }
+                        } catch (err) {}
+                    }
+                }
+            } catch (e) {}
+        }
         return this.userId;
     }
 
@@ -319,9 +371,11 @@ export class Client {
             }
             return list;
         };
+        const DASHBOARD_HASH = "c16bb890cc8ce7647a96ee69cd313d423a378a3dedadf630a1017cde18975feb";
+        const LEGACY_DASHBOARD_HASH = "5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619";
         if (this.oauthToken) {
             try {
-                const data = await this.postAuthorized({
+                let data = await this.postAuthorized({
                     "operationName": "ViewerDropsDashboard",
                     "variables": {
                         "fetchRewardCampaigns": true
@@ -329,10 +383,24 @@ export class Client {
                     "extensions": {
                         "persistedQuery": {
                             "version": 1,
-                            "sha256Hash": "5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619"
+                            "sha256Hash": DASHBOARD_HASH
                         }
                     }
-                });
+                }).catch(() => null);
+                if (!data) {
+                    data = await this.postAuthorized({
+                        "operationName": "ViewerDropsDashboard",
+                        "variables": {
+                            "fetchRewardCampaigns": true
+                        },
+                        "extensions": {
+                            "persistedQuery": {
+                                "version": 1,
+                                "sha256Hash": LEGACY_DASHBOARD_HASH
+                            }
+                        }
+                    });
+                }
                 if (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns) && data.currentUser.dropCampaigns.length > 0) {
                     if (includeAll && Array.isArray(data.rewardCampaignsAvailableToUser)) {
                         const merged = [...data.currentUser.dropCampaigns];
@@ -360,7 +428,7 @@ export class Client {
         }
 
         try {
-            const data = await this.post({
+            let data = await this.post({
                 "operationName": "ViewerDropsDashboard",
                 "variables": {
                     "fetchRewardCampaigns": true
@@ -368,10 +436,24 @@ export class Client {
                 "extensions": {
                     "persistedQuery": {
                         "version": 1,
-                        "sha256Hash": "5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619"
+                        "sha256Hash": DASHBOARD_HASH
                     }
                 }
-            });
+            }).catch(() => null);
+            if (!data) {
+                data = await this.post({
+                    "operationName": "ViewerDropsDashboard",
+                    "variables": {
+                        "fetchRewardCampaigns": true
+                    },
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": LEGACY_DASHBOARD_HASH
+                        }
+                    }
+                });
+            }
             if (includeAll) {
                 const merged = [];
                 const seen = new Set();
@@ -477,8 +559,10 @@ export class Client {
     }
 
     async getInventory() {
+        const INVENTORY_HASH = "8337eb8541b314040b0edde0c09c5c7a2783ba1960aa9edfbf3bac16d0fec404";
+        const LEGACY_INVENTORY_HASH = "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b";
         try {
-            const data = await this.postAuthorized({
+            let data = await this.postAuthorized({
                 "operationName": "Inventory",
                 "variables": {
                     "fetchRewardCampaigns": false
@@ -486,11 +570,28 @@ export class Client {
                 "extensions": {
                     "persistedQuery": {
                         "version": 1,
-                        "sha256Hash": "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b"
+                        "sha256Hash": INVENTORY_HASH
                     }
                 }
             });
-            const inv = data && data.currentUser ? data.currentUser.inventory : null;
+            let inv = data && data.currentUser ? data.currentUser.inventory : null;
+            if (!inv && data && data.currentUser && data.currentUser.id) {
+                const fallbackData = await this.postAuthorized({
+                    "operationName": "Inventory",
+                    "variables": {
+                        "fetchRewardCampaigns": false
+                    },
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": LEGACY_INVENTORY_HASH
+                        }
+                    }
+                }).catch(() => null);
+                if (fallbackData && fallbackData.currentUser && fallbackData.currentUser.inventory) {
+                    inv = fallbackData.currentUser.inventory;
+                }
+            }
             if (inv) {
                 if (!inv.gameEventDrops && inv.gameEventDropsConnection?.edges) {
                     inv.gameEventDrops = inv.gameEventDropsConnection.edges
@@ -1001,15 +1102,11 @@ export class Client {
         const token = await this.getPlaybackAccessToken(login);
         if (!token) return null;
 
-        // Omit allow_audio_only so Twitch Usher returns video variants (lowest: 160p30);
-        // Twitch does not credit Drops watch time for audio_only HLS streams on web.
+        // Match TwitchDropsMiner Usher request: omit fast_bread and allow_audio_only so Twitch
+        // returns standard 2s video segments (lowest: 160p30) that reliably advance Drop progress.
         const params = new URLSearchParams({
             sig: token.signature,
-            token: token.value,
-            allow_source: "true",
-            fast_bread: "true",
-            player_backend: "mediaplayer",
-            p: String(Math.floor(Math.random() * 900000) + 100000)
+            token: token.value
         });
 
         const usherUrl = `https://usher.ttvnw.net/api/channel/hls/${encodeURIComponent(login)}.m3u8?${params.toString()}`;
@@ -1019,7 +1116,12 @@ export class Client {
             const playlistText = await res.text();
             if (!playlistText) return null;
 
-            const rawLines = playlistText
+            const trimmed = playlistText.trim();
+            if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                return null;
+            }
+
+            const rawLines = trimmed
                 .split(/\r?\n/)
                 .map(l => l.trim())
                 .filter(l => l.length > 0);
@@ -1066,6 +1168,12 @@ export class Client {
                 const res = await fetch(variantUrl, { method: "GET" });
                 if (res && res.ok) {
                     variantText = await res.text();
+                    const trimmed = (variantText || "").trim();
+                    if (!trimmed || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                        this._streamUrlCache.delete(login);
+                        variantUrl = null;
+                        variantText = null;
+                    }
                 } else {
                     this._streamUrlCache.delete(login);
                     variantUrl = null;
@@ -1083,6 +1191,10 @@ export class Client {
                 const res = await fetch(variantUrl, { method: "GET" });
                 if (!res || !res.ok) return false;
                 variantText = await res.text();
+                const trimmed = (variantText || "").trim();
+                if (!trimmed || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                    return false;
+                }
                 this._streamUrlCache.set(login, variantUrl);
             } catch (e) {
                 return false;
@@ -1102,22 +1214,36 @@ export class Client {
             return false;
         }
 
-        let segmentUrl = lines[lines.length - 1];
-        if (!/^https?:\/\//i.test(segmentUrl)) {
-            try {
-                segmentUrl = new URL(segmentUrl, variantUrl).toString();
-            } catch (e) {
-                return false;
+        const segmentUrls = [];
+        for (const rawSeg of lines) {
+            if (/^https?:\/\//i.test(rawSeg)) {
+                segmentUrls.push(rawSeg);
+            } else {
+                try {
+                    segmentUrls.push(new URL(rawSeg, variantUrl).toString());
+                } catch (e) {}
             }
         }
 
+        if (segmentUrls.length === 0) {
+            this._streamUrlCache.delete(login);
+            return false;
+        }
+
         try {
-            const headRes = await fetch(segmentUrl, { method: "HEAD" });
-            if (headRes && (headRes.ok || headRes.status === 200 || headRes.status === 206)) {
+            // Send HEAD requests to all segment chunks in the variant playlist (matches TwitchDropsMiner f693b0c)
+            const headResults = await Promise.allSettled(
+                segmentUrls.map(segUrl => fetch(segUrl, { method: "HEAD" }))
+            );
+            const anyHeadOk = headResults.some(
+                r => r.status === "fulfilled" && r.value && (r.value.ok || r.value.status === 200 || r.value.status === 206)
+            );
+            if (anyHeadOk) {
                 return true;
             }
-            // Fallback to GET if HEAD is disallowed by edge node
-            const getRes = await fetch(segmentUrl, { method: "GET" });
+            // Fallback to GET on the latest segment if HEAD is disallowed by edge node
+            const lastSegUrl = segmentUrls[segmentUrls.length - 1];
+            const getRes = await fetch(lastSegUrl, { method: "GET" });
             return Boolean(getRes && getRes.ok);
         } catch (e) {
             this._streamUrlCache.delete(login);
@@ -1269,12 +1395,13 @@ export class Client {
 
     async sendWatch(channelLogin, streamMeta = {}) {
         if (!channelLogin) return { success: false, method: "none" };
+        // Primary method: playlist HEAD requests to all chunks (matches TwitchDropsMiner commit f693b0c)
         const hlsOk = await this.sendWatchPlaylist(channelLogin);
-        // Also fire Spade minute-watched beacon if metadata is available or if HLS failed
-        const spadeOk = await this.sendWatchSpade(channelLogin, streamMeta);
         if (hlsOk) {
-            return { success: true, method: "hls", spade: spadeOk };
+            return { success: true, method: "hls", spade: false };
         }
+        // Fallback: Spade minute-watched beacon only if HLS playlist pulse failed
+        const spadeOk = await this.sendWatchSpade(channelLogin, streamMeta);
         if (spadeOk) {
             return { success: true, method: "spade", spade: true };
         }

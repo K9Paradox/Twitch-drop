@@ -64,6 +64,6 @@ describe("Tier 1: Feature 2 - GraphQL ViewerDropsDashboard", () => {
         await client.getDropCampaigns();
 
         const req = sandbox.fetchMock.history[0];
-        assert.equal(req.body.extensions.persistedQuery.sha256Hash, "5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619");
+        assert.equal(req.body.extensions.persistedQuery.sha256Hash, "c16bb890cc8ce7647a96ee69cd313d423a378a3dedadf630a1017cde18975feb");
     });
 });
