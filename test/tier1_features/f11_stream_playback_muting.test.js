@@ -16,21 +16,31 @@ describe("Tier 1: Feature 11 - Headless HLS & Spade Watch Engine (v2.0)", () => 
         });
     });
 
-    it("F11-T1: getPlaybackAccessToken() requests streamPlaybackAccessToken with playerType 'site'", async () => {
-        sandbox.fetchMock.onGql("PlaybackAccessToken", {
-            data: {
-                streamPlaybackAccessToken: {
-                    value: '{"channel":"shroud"}',
-                    signature: "sig123abc",
-                    __typename: "PlaybackAccessToken"
-                }
-            }
+    it("F11-T1: getPlaybackAccessToken() requests streamPlaybackAccessToken with platform 'web' and playerType 'site'", async () => {
+        let capturedVars = null;
+        sandbox.fetchMock.onGql("PlaybackAccessToken", (url, opts, body) => {
+            capturedVars = Array.isArray(body) ? body[0]?.variables : body?.variables;
+            return {
+                status: 200,
+                ok: true,
+                json: async () => ({
+                    data: {
+                        streamPlaybackAccessToken: {
+                            value: '{"channel":"shroud"}',
+                            signature: "sig123abc",
+                            __typename: "PlaybackAccessToken"
+                        }
+                    }
+                })
+            };
         });
 
         const token = await client.getPlaybackAccessToken("Shroud");
         assert.ok(token);
         assert.equal(token.value, '{"channel":"shroud"}');
         assert.equal(token.signature, "sig123abc");
+        assert.equal(capturedVars?.platform, "web");
+        assert.equal(capturedVars?.playerType, "site");
     });
 
     it("F11-T2: getStreamUrl() parses Usher master M3U8 playlist and selects the lowest-bandwidth variant", async () => {
@@ -149,7 +159,7 @@ describe("Tier 1: Feature 11 - Headless HLS & Spade Watch Engine (v2.0)", () => 
         }
     });
 
-    it("F11-T5: sendWatch() combines HLS playlist pulse and Spade beacon and returns success if either succeeds", async () => {
+    it("F11-T5: sendWatch() and getCurrentDropSession() combine HLS/Spade watch pulse with DropCurrentSessionContext progress query", async () => {
         client.sendWatchPlaylist = async () => true;
         client.sendWatchSpade = async () => false;
 
@@ -163,5 +173,22 @@ describe("Tier 1: Feature 11 - Headless HLS & Spade Watch Engine (v2.0)", () => 
         const res2 = await client.sendWatch("shroud", { channelId: "37402112", broadcastId: "111" });
         assert.equal(res2.success, true);
         assert.equal(res2.method, "spade");
+
+        sandbox.fetchMock.onGql("DropCurrentSessionContext", {
+            data: {
+                currentUser: {
+                    dropCurrentSession: {
+                        dropID: "drop-tier-1",
+                        currentMinutesWatched: 14,
+                        requiredMinutesWatched: 60
+                    }
+                }
+            }
+        });
+        const session = await client.getCurrentDropSession("37402112", "shroud");
+        assert.ok(session);
+        assert.equal(session.dropID, "drop-tier-1");
+        assert.equal(session.currentMinutesWatched, 14);
+        assert.equal(session.requiredMinutesWatched, 60);
     });
 });

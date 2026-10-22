@@ -120,6 +120,103 @@ let hydrationPromise = null;
 let headlessWatchInterval = null;
 let isSendingWatchPulse = false;
 
+function applyDropSessionProgress(session) {
+    if (!session || !activeStream || !activeStream.campaign || activeStream.campaign === "none" || !Array.isArray(activeStream.campaigns)) {
+        return false;
+    }
+    const dropData = session.currentDrop || session;
+    if (!dropData || typeof dropData.currentMinutesWatched !== "number") {
+        return false;
+    }
+    const watched = dropData.currentMinutesWatched;
+    const req = dropData.requiredMinutesWatched || 0;
+    const dropId = dropData.dropID || dropData.id || null;
+
+    let changed = false;
+    let matchedCamp = null;
+    let matchedItem = null;
+
+    if (dropId) {
+        for (const campObj of activeStream.campaigns) {
+            if (!Array.isArray(campObj.items)) continue;
+            const found = campObj.items.find(i => i && i.id === dropId);
+            if (found) {
+                matchedCamp = campObj;
+                matchedItem = found;
+                break;
+            }
+        }
+    }
+
+    if (!matchedCamp) {
+        matchedCamp = activeStream.campaigns[activeStream.campaign.onCamp || 0] || activeStream.campaigns[0] || null;
+    }
+    if (!matchedCamp) return false;
+
+    if (!matchedItem && Array.isArray(matchedCamp.items) && matchedCamp.items.length > 0) {
+        const nowTs = getTwitchNow();
+        matchedItem = matchedCamp.items.find(i => i && i.isSynthetic)
+            || (req > 0 ? matchedCamp.items.find(i => i && !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowTs) && i.reqTime === req) : null)
+            || matchedCamp.items.find(i => i && !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowTs));
+    }
+
+    if (matchedItem) {
+        matchedItem.self = matchedItem.self || {};
+        const prevWatched = matchedItem.self.currentMinutesWatched || 0;
+        if (watched > prevWatched) {
+            matchedItem.self.currentMinutesWatched = watched;
+            changed = true;
+        }
+        if (matchedItem.isSynthetic && dropId) {
+            matchedItem.id = dropId;
+            matchedItem.isSynthetic = false;
+            changed = true;
+        }
+        if (req > 0 && (matchedItem.isSynthetic || !matchedItem.reqTime)) {
+            matchedItem.reqTime = req;
+            changed = true;
+        }
+    }
+
+    if (Array.isArray(matchedCamp.items) && matchedCamp.items.length > 0) {
+        const nowTs = getTwitchNow();
+        const sortedUnclaimed = matchedCamp.items
+            .filter(i => i && !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowTs))
+            .sort((a, b) => (a.reqTime || 60) - (b.reqTime || 60));
+        const activeTierItem = sortedUnclaimed[0];
+        if (activeTierItem && activeTierItem !== matchedItem && watched <= (activeTierItem.reqTime || 60)) {
+            activeTierItem.self = activeTierItem.self || {};
+            if (watched > (activeTierItem.self.currentMinutesWatched || 0)) {
+                activeTierItem.self.currentMinutesWatched = watched;
+                changed = true;
+            }
+        }
+    }
+
+    if (watched > (matchedCamp.minutesWatched || 0)) {
+        matchedCamp.minutesWatched = watched;
+        changed = true;
+    }
+    if (req > (matchedCamp.minutesNeeded || 0)) {
+        matchedCamp.minutesNeeded = req;
+        changed = true;
+    }
+
+    if (changed && activeStream.campaign) {
+        if (watched > (activeStream.campaign.lastMinutesWatched || 0)) {
+            activeStream.campaign.lastMinutesWatched = watched;
+            activeStream.campaign.lastProgressTimestamp = Date.now();
+            activeStream.campaign.stallCount = 0;
+        }
+    }
+
+    if (req > 0 && watched >= req) {
+        checkClaimDrop().catch(() => {});
+    }
+
+    return changed;
+}
+
 async function performHeadlessWatch(preFetchedMeta = null) {
     if (!extEnabled || isSendingWatchPulse) return false;
     if (!activeStream || !activeStream.campaign || activeStream.campaign === "none") return false;
@@ -131,10 +228,36 @@ async function performHeadlessWatch(preFetchedMeta = null) {
         if (!client) return false;
 
         const streamer = activeStream.campaign.curWatching;
-        const watchRes = await client.sendWatch(streamer, preFetchedMeta || {});
+        let meta = preFetchedMeta;
+        if (meta && meta.channelId && meta.broadcastId) {
+            activeStream.campaign.streamMeta = { ...meta, login: streamer.toLowerCase() };
+        } else if (
+            activeStream.campaign.streamMeta &&
+            activeStream.campaign.streamMeta.login === streamer.toLowerCase() &&
+            activeStream.campaign.streamMeta.channelId &&
+            activeStream.campaign.streamMeta.broadcastId
+        ) {
+            meta = activeStream.campaign.streamMeta;
+        } else if (typeof client.getStreamMetadata === "function") {
+            meta = await client.getStreamMetadata(streamer).catch(() => null);
+            if (meta && meta.channelId && meta.broadcastId) {
+                activeStream.campaign.streamMeta = { ...meta, login: streamer.toLowerCase() };
+            }
+        }
+
+        const watchRes = await client.sendWatch(streamer, meta || {});
         if (watchRes && watchRes.success) {
             activeStream.campaign.lastWatchPulse = Date.now();
             activeStream.campaign.watchMethod = watchRes.method || "hls";
+
+            if (typeof client.getCurrentDropSession === "function") {
+                const session = await client.getCurrentDropSession(meta?.channelId || "", streamer).catch(() => null);
+                if (session && applyDropSessionProgress(session)) {
+                    await saveState();
+                    updateBadgeUI();
+                    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                }
+            }
             return true;
         }
         return false;
@@ -401,10 +524,17 @@ function syncCampaignProgressWithInventory(inventory) {
                     curCamp.minutesNeeded = reqMinutes;
                 }
 
+                const benefit = drop.benefitEdges && drop.benefitEdges[0] ? (drop.benefitEdges[0].benefit || drop.benefitEdges[0].node) : null;
+                const matchedItem = curCamp.items ? curCamp.items.find(i => i.id === drop.id || (benefit && benefit.id && i.benefitId === benefit.id)) : null;
+
                 const isExplicitlyClaimed = (drop.self && drop.self.isClaimed === true) || isDropItemClaimedStrict(drop, eventDropsList);
-                const currentWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
+                const invWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
                     ? drop.self.currentMinutesWatched
                     : (isExplicitlyClaimed ? reqMinutes : 0);
+                // Preserve real-time session progress from DropCurrentSessionContext if Inventory lags behind
+                const currentWatched = (matchedItem && matchedItem.id === drop.id && (matchedItem.self?.currentMinutesWatched || 0) > invWatched)
+                    ? matchedItem.self.currentMinutesWatched
+                    : invWatched;
 
                 if (currentWatched > maxWatchedInCamp) {
                     maxWatchedInCamp = currentWatched;
@@ -418,31 +548,27 @@ function syncCampaignProgressWithInventory(inventory) {
                     allDropsClaimedInCamp = false;
                 }
 
-                if (curCamp.items) {
-                    const benefit = drop.benefitEdges && drop.benefitEdges[0] ? (drop.benefitEdges[0].benefit || drop.benefitEdges[0].node) : null;
-                    const matchedItem = curCamp.items.find(i => i.id === drop.id || (benefit && benefit.id && i.benefitId === benefit.id));
-                    if (matchedItem) {
-                        matchedItem.self = matchedItem.self || {};
-                        matchedItem.self.isClaimed = isExplicitlyClaimed;
-                        matchedItem.self.currentMinutesWatched = currentWatched;
-                        if (benefit && benefit.imageAssetURL) {
-                            matchedItem.picture = benefit.imageAssetURL;
-                        }
-                        if (benefit && benefit.id && !matchedItem.benefitId) {
-                            matchedItem.benefitId = benefit.id;
-                        }
-                        if (dropEnd) {
-                            matchedItem.endAt = dropEnd;
-                            if (dropEndsAt && !isNaN(dropEndsAt)) {
-                                matchedItem.endsAt = dropEndsAt;
-                                matchedItem.isEnded = isDropEnded;
-                            }
+                if (matchedItem) {
+                    matchedItem.self = matchedItem.self || {};
+                    matchedItem.self.isClaimed = isExplicitlyClaimed;
+                    matchedItem.self.currentMinutesWatched = currentWatched;
+                    if (benefit && benefit.imageAssetURL) {
+                        matchedItem.picture = benefit.imageAssetURL;
+                    }
+                    if (benefit && benefit.id && !matchedItem.benefitId) {
+                        matchedItem.benefitId = benefit.id;
+                    }
+                    if (dropEnd) {
+                        matchedItem.endAt = dropEnd;
+                        if (dropEndsAt && !isNaN(dropEndsAt)) {
+                            matchedItem.endsAt = dropEndsAt;
+                            matchedItem.isEnded = isDropEnded;
                         }
                     }
                 }
             }
 
-            curCamp.minutesWatched = maxWatchedInCamp;
+            curCamp.minutesWatched = Math.max(curCamp.minutesWatched || 0, maxWatchedInCamp);
 
             if (!allDropsClaimedInCamp) {
                 allCampaignsCompleted = false;
@@ -451,18 +577,21 @@ function syncCampaignProgressWithInventory(inventory) {
             let allItemsClaimed = true;
             const nowTs = getTwitchNow();
             if (curCamp.items && curCamp.items.length > 0) {
+                let maxItemWatched = curCamp.minutesWatched || 0;
                 for (const item of curCamp.items) {
                     const req = item.reqTime || curCamp.minutesNeeded || 60;
                     const isClaimed = isDropItemClaimedStrict(item, eventDropsList) || (item.self && item.self.isClaimed === true);
                     item.self = item.self || {};
                     item.self.isClaimed = isClaimed;
                     const itemWatched = item.self.currentMinutesWatched || 0;
+                    if (itemWatched > maxItemWatched) maxItemWatched = itemWatched;
                     const itemEnded = Boolean((item.endsAt && item.endsAt <= nowTs) || item.isEnded);
 
                     if (!isClaimed && !itemEnded && itemWatched < req) {
                         allItemsClaimed = false;
                     }
                 }
+                curCamp.minutesWatched = maxItemWatched;
             } else {
                 if ((curCamp.minutesWatched || 0) < curCamp.minutesNeeded) {
                     allItemsClaimed = false;
@@ -931,6 +1060,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const session = payload?.currentUser?.dropCurrentSession;
                         if (session && session.currentDrop) {
                             currentDrop = session.currentDrop;
+                        } else if (session && (session.dropID || session.currentMinutesWatched !== undefined)) {
+                            currentDrop = {
+                                ...session,
+                                id: session.dropID || session.id
+                            };
                         }
                     } else if (opName === "Inventory") {
                         const inProg = payload?.currentUser?.inventory?.dropCampaignsInProgress || [];

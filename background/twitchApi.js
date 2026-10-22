@@ -791,6 +791,7 @@ export class Client {
                 let channelId = userObj?.id ? String(userObj.id) : undefined;
                 let broadcastId = stream.id ? String(stream.id) : undefined;
                 let game = stream.game?.displayName || stream.game?.name;
+                let gameId = stream.game?.id ? String(stream.game.id) : undefined;
                 let title = stream.title || "";
                 let viewers = stream.viewersCount || 0;
 
@@ -810,6 +811,7 @@ export class Client {
                             if (directStream.id && !broadcastId) broadcastId = String(directStream.id);
                             if (directStream.game) {
                                 game = directStream.game.displayName || directStream.game.name;
+                                if (directStream.game.id) gameId = String(directStream.game.id);
                                 title = directStream.title || title;
                                 viewers = directStream.viewersCount || viewers;
                             }
@@ -822,6 +824,7 @@ export class Client {
                     channelId: channelId,
                     broadcastId: broadcastId,
                     game: game || undefined,
+                    gameId: gameId,
                     title: title,
                     viewers: viewers
                 };
@@ -843,6 +846,7 @@ export class Client {
                     channelId: directUser?.id ? String(directUser.id) : undefined,
                     broadcastId: directStream.id ? String(directStream.id) : undefined,
                     game: directStream.game?.displayName || directStream.game?.name || undefined,
+                    gameId: directStream.game?.id ? String(directStream.game.id) : undefined,
                     title: directStream.title || "",
                     viewers: directStream.viewersCount || 0
                 };
@@ -854,10 +858,11 @@ export class Client {
 
     /**
      * Headless Watch Engine (TwitchDropsMiner method):
-     * 1. Fetch stream PlaybackAccessToken via GQL
+     * 1. Fetch stream PlaybackAccessToken via GQL (with platform: "web" & playerType: "site")
      * 2. Fetch master HLS playlist from usher.ttvnw.net and pick lowest-quality variant URL
      * 3. Fetch variant .m3u8 playlist and send HEAD request to latest .ts transport segment
      * 4. Fallback/secondary: POST Base64-encoded "minute-watched" payload to Spade beacon URL
+     * 5. Query DropCurrentSessionContext to bind/read real-time currentMinutesWatched for the channel
      */
     async getPlaybackAccessToken(channelLogin) {
         if (!channelLogin) return null;
@@ -870,6 +875,7 @@ export class Client {
                     "login": login,
                     "isVod": false,
                     "vodID": "",
+                    "platform": "web",
                     "playerType": "site"
                 },
                 "extensions": {
@@ -895,6 +901,7 @@ export class Client {
                     "login": login,
                     "isVod": false,
                     "vodID": "",
+                    "platform": "web",
                     "playerType": "site"
                 }
             });
@@ -980,7 +987,9 @@ export class Client {
         }
 
         if (!variantText) return false;
-        const lines = variantText
+        // Strip any inline JSON "url": "...", fragments inside Twitch DATERANGE tags (matches TwitchDropsMiner channel.py)
+        const cleanedVariantText = variantText.replace(/"url"\s*:\s*"[^"]*",?/g, "");
+        const lines = cleanedVariantText
             .split(/\r?\n/)
             .map(l => l.trim())
             .filter(l => l.length > 0 && !l.startsWith("#"));
@@ -1014,7 +1023,7 @@ export class Client {
     }
 
     async getSpadeUrl(channelLogin) {
-        const DEFAULT_SPADE_URL = "https://video-edge-c2c424.pdx01.abs.hls.ttvnw.net/v1/segment";
+        const DEFAULT_SPADE_URL = "https://spade.twitch.tv/track";
         if (!channelLogin) return DEFAULT_SPADE_URL;
         const login = String(channelLogin).toLowerCase();
         if (!this._spadeUrlCache) this._spadeUrlCache = new Map();
@@ -1023,32 +1032,37 @@ export class Client {
             return this._spadeUrlCache.get(login);
         }
 
-        const spadeRegex = /"spade_?url"\s*:\s*"(https:\/\/[^"]+)"/i;
+        const spadeRegex = /"(?:spade|beacon)_?url"\s*:\s*"(https:\/\/[^"]+)"/i;
         const settingsJsRegex = /src="(https:\/\/[\w./-]+\/config\/settings\.[0-9a-f]{32}\.js)"/i;
 
-        try {
-            const pageRes = await fetch(`https://www.twitch.tv/${encodeURIComponent(login)}`, { method: "GET" });
-            if (pageRes && pageRes.ok) {
-                const html = await pageRes.text();
-                const directMatch = html.match(spadeRegex);
-                if (directMatch && directMatch[1]) {
-                    this._spadeUrlCache.set(login, directMatch[1]);
-                    return directMatch[1];
-                }
-                const settingsMatch = html.match(settingsJsRegex);
-                if (settingsMatch && settingsMatch[1]) {
-                    const jsRes = await fetch(settingsMatch[1], { method: "GET" });
-                    if (jsRes && jsRes.ok) {
-                        const jsText = await jsRes.text();
-                        const jsSpadeMatch = jsText.match(spadeRegex);
-                        if (jsSpadeMatch && jsSpadeMatch[1]) {
-                            this._spadeUrlCache.set(login, jsSpadeMatch[1]);
-                            return jsSpadeMatch[1];
+        for (const pageUrl of [
+            `https://www.twitch.tv/${encodeURIComponent(login)}`,
+            `https://m.twitch.tv/${encodeURIComponent(login)}`
+        ]) {
+            try {
+                const pageRes = await fetch(pageUrl, { method: "GET" });
+                if (pageRes && pageRes.ok) {
+                    const html = await pageRes.text();
+                    const directMatch = html.match(spadeRegex);
+                    if (directMatch && directMatch[1]) {
+                        this._spadeUrlCache.set(login, directMatch[1]);
+                        return directMatch[1];
+                    }
+                    const settingsMatch = html.match(settingsJsRegex);
+                    if (settingsMatch && settingsMatch[1]) {
+                        const jsRes = await fetch(settingsMatch[1], { method: "GET" });
+                        if (jsRes && jsRes.ok) {
+                            const jsText = await jsRes.text();
+                            const jsSpadeMatch = jsText.match(spadeRegex);
+                            if (jsSpadeMatch && jsSpadeMatch[1]) {
+                                this._spadeUrlCache.set(login, jsSpadeMatch[1]);
+                                return jsSpadeMatch[1];
+                            }
                         }
                     }
                 }
-            }
-        } catch (e) {}
+            } catch (e) {}
+        }
 
         this._spadeUrlCache.set(login, DEFAULT_SPADE_URL);
         return DEFAULT_SPADE_URL;
@@ -1060,16 +1074,26 @@ export class Client {
 
         let broadcastId = streamMeta?.broadcastId;
         let channelId = streamMeta?.channelId;
+        let gameName = streamMeta?.game;
+        let gameId = streamMeta?.gameId;
 
         if (!broadcastId || !channelId) {
             try {
                 const meta = await this.getStreamMetadata(login);
                 broadcastId = broadcastId || meta?.broadcastId;
                 channelId = channelId || meta?.channelId;
+                gameName = gameName || meta?.game;
+                gameId = gameId || meta?.gameId;
             } catch (e) {}
         }
 
         if (!broadcastId || !channelId) return false;
+
+        if (!this.userId && this.oauthToken) {
+            try {
+                await this.autoDetectUserId();
+            } catch (e) {}
+        }
 
         const spadeUrl = await this.getSpadeUrl(login);
         const payload = [
@@ -1079,10 +1103,15 @@ export class Client {
                     broadcast_id: String(broadcastId),
                     channel_id: String(channelId),
                     channel: login,
+                    client_time: new Date().toISOString(),
+                    ...(gameName ? { game: String(gameName) } : {}),
+                    ...(gameId ? { game_id: String(gameId) } : {}),
                     hidden: false,
+                    is_live: true,
                     live: true,
                     location: "channel",
                     logged_in: true,
+                    minutes_logged: 1,
                     muted: false,
                     player: "site",
                     ...(this.userId ? { user_id: Number(this.userId) || String(this.userId) } : {})
@@ -1109,6 +1138,28 @@ export class Client {
             return Boolean(res && (res.status === 204 || res.ok));
         } catch (e) {
             return false;
+        }
+    }
+
+    async getCurrentDropSession(channelId = "", channelLogin = "") {
+        if (!this.oauthToken) return null;
+        try {
+            const data = await this.postAuthorized({
+                "operationName": "DropCurrentSessionContext",
+                "variables": {
+                    "channelID": channelId ? String(channelId) : "",
+                    "channelLogin": channelId ? "" : String(channelLogin || "").toLowerCase()
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "4d06b702d25d652afb9ef835d2a550031f1cf762b193523a92166f40ea3d142b"
+                    }
+                }
+            });
+            return data?.currentUser?.dropCurrentSession || null;
+        } catch (e) {
+            return null;
         }
     }
 
