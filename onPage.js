@@ -11,6 +11,21 @@
 // 1. CHANNEL POINTS CHEST AUTO-CLAIMER (DOM + DEDUPLICATION)
 // ============================================================================
 const recentClaims = new Map();
+let atdEnabled = true;
+let atdAutoClaimPoints = true;
+
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("message", (event) => {
+        try {
+            if (!event || !event.data || typeof event.data !== "object") return;
+            const cfg = event.data.autoTwitchDropsConfig;
+            if (cfg && typeof cfg === "object") {
+                if (typeof cfg.enabled === "boolean") atdEnabled = cfg.enabled;
+                if (typeof cfg.autoClaimPoints === "boolean") atdAutoClaimPoints = cfg.autoClaimPoints;
+            }
+        } catch (e) {}
+    });
+}
 
 function isDuplicateClaim(key, ttlMs = 10000) {
     if (!key) return false;
@@ -45,31 +60,43 @@ function triggerSyntheticClick(el) {
 }
 
 function autoClaimPointsChests() {
+    if (!atdEnabled || !atdAutoClaimPoints) return;
     try {
+        // NOTE: Never include '[data-test-selector="community-points-summary"] button' here —
+        // the first button inside community-points-summary is the Channel Points balance/menu toggle!
         const selectors = [
             '[data-a-target="claim-channel-points-button"]',
             '[aria-label="Claim Bonus"]',
             'button[aria-label="Claim Bonus"]',
             'button[aria-label*="Claim Bonus"]',
-            '[data-test-selector="community-points-summary"] button',
             '.claimable-bonus__icon'
         ];
 
         for (const selector of selectors) {
-            const btn = document.querySelector(selector);
-            if (btn && btn.offsetParent !== null) {
-                triggerSyntheticClick(btn);
-                if (!isDuplicateClaim("dom-chest-click", 5000)) {
-                    window.postMessage({
-                        autoTwitchDrops: {
-                            type: "points-earned",
-                            points: 50,
-                            source: "dom"
-                        }
-                    }, "*");
-                }
-                break;
+            const found = document.querySelector(selector);
+            if (!found || found.offsetParent === null) continue;
+
+            const btn = (typeof found.closest === "function" && found.tagName !== "BUTTON")
+                ? (found.closest("button") || found)
+                : found;
+
+            // Guard against accidentally clicking the main Channel Points balance menu button
+            const ariaLabel = typeof btn.getAttribute === "function" ? (btn.getAttribute("aria-label") || "") : "";
+            if (/balance|bits|rewards/i.test(ariaLabel) && !/claim|bonus/i.test(ariaLabel)) {
+                continue;
             }
+
+            triggerSyntheticClick(btn);
+            if (!isDuplicateClaim("dom-chest-click", 5000)) {
+                window.postMessage({
+                    autoTwitchDrops: {
+                        type: "points-earned",
+                        points: 50,
+                        source: "dom"
+                    }
+                }, "*");
+            }
+            break;
         }
     } catch (e) {}
 }
@@ -154,6 +181,7 @@ if (typeof _origWS === "function") {
 
                         // A. Community Points Bonus Chest Available
                         if (msgType === "claim-available") {
+                            if (!atdEnabled || !atdAutoClaimPoints) return;
                             const claim = msgData.claim || innerPayload.claim;
                             if (claim && typeof claim.id === "string" && claim.id && claim.channel_id) {
                                 if (!isDuplicateClaim("claim-" + claim.id, 15000)) {
@@ -169,6 +197,7 @@ if (typeof _origWS === "function") {
                         }
                         // B. Community Points Earned
                         else if (msgType === "points-earned") {
+                            if (!atdEnabled || !atdAutoClaimPoints) return;
                             const gain = msgData.point_gain || innerPayload.point_gain;
                             if (gain && typeof gain === "object") {
                                 const pts = Number(gain.total_points || gain.baseline_points) || 50;

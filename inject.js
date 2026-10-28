@@ -1,3 +1,43 @@
+let extEnabledState = true;
+let autoClaimPointsState = true;
+
+function broadcastConfigToPage() {
+    try {
+        window.postMessage({
+            autoTwitchDropsConfig: {
+                enabled: extEnabledState,
+                autoClaimPoints: autoClaimPointsState
+            }
+        }, "*");
+    } catch (e) {}
+}
+
+try {
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.get(["exEnabled", "settings"]).then((val) => {
+            if (val && typeof val.exEnabled === "boolean") {
+                extEnabledState = val.exEnabled;
+            }
+            if (val && val.settings && typeof val.settings.autoClaimPoints === "boolean") {
+                autoClaimPointsState = val.settings.autoClaimPoints;
+            }
+            broadcastConfigToPage();
+        }).catch(() => {});
+    }
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.onChanged) {
+        chrome.storage.onChanged.addListener((changes, area) => {
+            if (area !== "local" || !changes) return;
+            if (changes.exEnabled && typeof changes.exEnabled.newValue === "boolean") {
+                extEnabledState = changes.exEnabled.newValue;
+            }
+            if (changes.settings && changes.settings.newValue && typeof changes.settings.newValue.autoClaimPoints === "boolean") {
+                autoClaimPointsState = changes.settings.newValue.autoClaimPoints;
+            }
+            broadcastConfigToPage();
+        });
+    }
+} catch (e) {}
+
 // Forward in-page events from onPage.js to background service worker
 window.addEventListener("message", (event) => {
     if (event.source !== window) return;
@@ -5,6 +45,9 @@ window.addEventListener("message", (event) => {
 
     const atd = event.data.autoTwitchDrops;
     if (atd && typeof atd === "object" && atd.type) {
+        if (!extEnabledState && atd.type !== "sendInteg" && atd.type !== "user") {
+            return;
+        }
         try {
             chrome.runtime.sendMessage({
                 type: atd.type,
@@ -20,6 +63,9 @@ function injectScript(file_path) {
         const script = document.createElement('script');
         script.setAttribute('type', 'text/javascript');
         script.setAttribute('src', chrome.runtime.getURL(file_path));
+        script.onload = () => {
+            broadcastConfigToPage();
+        };
         const target = document.head || document.documentElement;
         if (target) {
             target.appendChild(script);

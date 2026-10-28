@@ -1399,6 +1399,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "claim-points":
+                if (!extEnabled || settings.autoClaimPoints === false) {
+                    sendResponse({ success: false, disabled: true });
+                    break;
+                }
                 await fetchTwitchCookiesAndInitClient();
                 if (client && message.data) {
                     try {
@@ -1423,6 +1427,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "points-earned":
+                if (!extEnabled || settings.autoClaimPoints === false) {
+                    sendResponse({ success: false, disabled: true });
+                    break;
+                }
                 if (message.data) {
                     const earned = message.data.points || 50;
                     const src = message.data.source || "generic";
@@ -1438,6 +1446,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "claim-drop":
+                if (!extEnabled) {
+                    sendResponse({ success: false, disabled: true });
+                    break;
+                }
                 await fetchTwitchCookiesAndInitClient();
                 if (client) {
                     await checkClaimDrop();
