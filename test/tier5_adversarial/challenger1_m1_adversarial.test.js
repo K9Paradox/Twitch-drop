@@ -12,8 +12,8 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { setupTestSandbox } from "./harness/sandbox.js";
-import { Client, TwitchApiError } from "../background/twitchApi.js";
+import { setupTestSandbox } from "../harness/sandbox.js";
+import { Client, TwitchApiError } from "../../background/twitchApi.js";
 import {
     currentUserFixture,
     directoryRootFixture,
@@ -27,7 +27,7 @@ import {
     claimCommunityPointsErrorFixture,
     channelShellLiveFixture,
     channelShellOfflineFixture
-} from "./fixtures/graphql-fixtures.js";
+} from "../fixtures/graphql-fixtures.js";
 import {
     gqlAuthErrorFixture,
     gqlForbiddenErrorFixture,
@@ -36,7 +36,7 @@ import {
     expiredIntegrityTokenFixture,
     validIntegrityTokenFixture,
     malformedJsonString
-} from "./fixtures/error-fixtures.js";
+} from "../fixtures/error-fixtures.js";
 
 describe("Adversarial Suite: Twitch GraphQL Client (`background/twitchApi.js`)", () => {
     let sandbox;
@@ -637,9 +637,9 @@ describe("Adversarial Suite: Twitch GraphQL Client (`background/twitchApi.js`)",
             sandbox.fetchMock.onGql("DirectoryPage_Game", [directoryPageGameFixture]);
 
             await client.getActiveStreams("!!! Counter-Strike: Global Offensive (CS:GO) @@@", null);
-            const req = sandbox.fetchMock.history.find(h => Array.isArray(h.body) && h.body[0]?.operationName === "DirectoryPage_Game");
+            const req = sandbox.fetchMock.history.find(h => (Array.isArray(h.body) ? h.body[0]?.operationName : h.body?.operationName) === "DirectoryPage_Game");
             assert.ok(req);
-            const sentSlug = req.body[0].variables.slug;
+            const sentSlug = (Array.isArray(req.body) ? req.body[0] : req.body).variables.slug;
             assert.equal(sentSlug, "counter-strike-global-offensive-cs-go");
         });
 

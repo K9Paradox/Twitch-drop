@@ -56,6 +56,7 @@ let settings = {
     autoRefresh: true,
     showAllGames: true,
     autoGetToken: true,
+    autoClaimPoints: true,
     setShowBadges: true,
     soundOnClaim: false,
     desktopNotifications: true,
@@ -821,17 +822,20 @@ export async function checkGitHubUpdate(manual = false) {
             console.warn("[AutoUpdate] Releases check warning:", e?.message);
         }
 
-        // 2. Fallback to raw manifest.json on main branch
+        // 2. Fallback to raw manifest.json on v2.0-headless / main branch
         if (!releaseFound) {
             try {
-                const rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/main/manifest.json");
-                if (rawRes.ok) {
+                let rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/v2.0-headless/manifest.json").catch(() => null);
+                if (!rawRes || !rawRes.ok) {
+                    rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/main/manifest.json");
+                }
+                if (rawRes && rawRes.ok) {
                     const rawManifest = await rawRes.json();
                     if (rawManifest && rawManifest.version) {
                         result.latestVersion = rawManifest.version;
                         if (compareSemver(rawManifest.version, currentVersion) > 0) {
                             result.updateAvailable = true;
-                            result.releaseUrl = "https://github.com/K9Paradox/Twitch-drop";
+                            result.releaseUrl = "https://github.com/K9Paradox/Twitch-drop/tree/v2.0-headless";
                         }
                     }
                 }
@@ -840,12 +844,17 @@ export async function checkGitHubUpdate(manual = false) {
             }
         }
 
-        // 3. Fetch latest commit metadata from main branch
+        // 3. Fetch latest commit metadata from v2.0-headless / main branch
         try {
-            const commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/main", {
+            let commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/v2.0-headless", {
                 headers: { "Accept": "application/vnd.github.v3+json" }
-            });
-            if (commitRes.ok) {
+            }).catch(() => null);
+            if (!commitRes || !commitRes.ok) {
+                commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/main", {
+                    headers: { "Accept": "application/vnd.github.v3+json" }
+                });
+            }
+            if (commitRes && commitRes.ok) {
                 const commitData = await commitRes.json();
                 if (commitData) {
                     result.commitSha = (commitData.sha || "").substring(0, 7);
@@ -887,6 +896,16 @@ function setupAlarms() {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
     await hydrateState();
+
+    if (alarm.name === "autoGetTokenCleanupAlarm") {
+        if (autoGetTokenWindow !== 0) {
+            chrome.windows.remove(autoGetTokenWindow).catch(() => {});
+            autoGetTokenWindow = 0;
+            await chrome.storage.local.set({ autoGetTokenWindow: 0 }).catch(() => {});
+        }
+        return;
+    }
+
     if (!extEnabled) return;
 
     if (alarm.name === "watchdogAlarm") {
@@ -903,6 +922,24 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         }
     }
 });
+
+if (typeof chrome !== "undefined" && chrome.storage?.onChanged?.addListener) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName && areaName !== "local") return;
+        if (!changes || typeof changes !== "object") return;
+        if (changes.settings && changes.settings.newValue && typeof changes.settings.newValue === "object") {
+            settings = { ...settings, ...changes.settings.newValue };
+            updateBadgeUI();
+        }
+        if (changes.exEnabled !== undefined && typeof changes.exEnabled.newValue === "boolean") {
+            extEnabled = changes.exEnabled.newValue;
+            updateBadgeUI();
+        }
+        if (changes.autoDropGames && Array.isArray(changes.autoDropGames.newValue)) {
+            autoDropGames = changes.autoDropGames.newValue;
+        }
+    });
+}
 
 async function handleWatchdogTick() {
     if (!extEnabled) return;
@@ -1187,19 +1224,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         switch (message.type) {
-            case "clientInfo":
-                if (message.data && message.data.oauthToken) {
-                    if (client === null) client = new Client(message.data);
-                    else client.updateUserInfo(message.data);
-                    await chrome.storage.local.set({
-                        oauthToken: message.data.oauthToken,
-                        deviceId: message.data.deviceId,
-                        userId: message.data.userId,
-                        uuid: message.data.uuid
-                    });
+            case "user":
+            case "clientInfo": {
+                const info = (message.data && typeof message.data === "object") ? message.data : {};
+                const oauthToken = info.oauthToken || message.auth || null;
+                const deviceId = info.deviceId || message.uniq || null;
+                const clientId = info.clientId || message.id || "kimne78kx3ncx6brgo4mv6wki5h1ko";
+                const userId = info.userId || null;
+                const uuid = info.uuid || null;
+                if (oauthToken || deviceId) {
+                    const normalizedInfo = {
+                        ...info,
+                        clientId,
+                        ...(oauthToken ? { oauthToken } : {}),
+                        ...(deviceId ? { deviceId } : {}),
+                        ...(userId ? { userId } : {}),
+                        ...(uuid ? { uuid } : {})
+                    };
+                    if (client === null) client = new Client(normalizedInfo);
+                    else client.updateUserInfo(normalizedInfo);
+                    const toStore = {};
+                    if (oauthToken) toStore.oauthToken = oauthToken;
+                    if (deviceId) toStore.deviceId = deviceId;
+                    if (userId) toStore.userId = userId;
+                    if (uuid) toStore.uuid = uuid;
+                    if (Object.keys(toStore).length > 0) {
+                        await chrome.storage.local.set(toStore);
+                    }
                 }
                 sendResponse({ success: true });
                 break;
+            }
 
             case "sendInteg":
                 if (client === null) {
@@ -1212,6 +1267,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     chrome.windows.remove(autoGetTokenWindow).catch(() => {});
                     autoGetTokenWindow = 0;
                     await chrome.storage.local.set({ autoGetTokenWindow: 0 }).catch(() => {});
+                }
+                if (chrome.alarms && typeof chrome.alarms.clear === "function") {
+                    chrome.alarms.clear("autoGetTokenCleanupAlarm").catch(() => {});
                 }
                 refreshSyntheticCampaignDetails().catch(() => {});
                 sendResponse({ success: true });
@@ -2553,11 +2611,17 @@ async function checkClaimDrop() {
 
 function autoGetToken(force = false) {
     if (settings.autoGetToken === true && autoGetTokenWindow === 0) {
-        if (force || !client || !client.integrity || client.integrity.expiration - 960000 < Date.now()) {
+        const integExp = (client && client.integrity)
+            ? (typeof client.integrity === "object" ? client.integrity.expiration : client.integrityExpiration)
+            : null;
+        if (force || !client || !client.integrity || (integExp && integExp - 960000 < Date.now())) {
             chrome.windows.create({ focused: false, type: "popup", url: "https://www.twitch.tv/drops/inventory/" }).then(async (window) => {
                 if (window) {
                     autoGetTokenWindow = window.id;
                     await chrome.storage.local.set({ autoGetTokenWindow });
+                    if (chrome.alarms && typeof chrome.alarms.create === "function") {
+                        chrome.alarms.create("autoGetTokenCleanupAlarm", { delayInMinutes: 1 });
+                    }
                     // 60-second failsafe: close window if Twitch stalls or integrity token isn't intercepted
                     setTimeout(() => {
                         if (autoGetTokenWindow !== 0 && autoGetTokenWindow === window.id) {
@@ -2596,7 +2660,9 @@ function updateBadgeUI() {
         let text = "";
         let color = "#9146FF";
 
-        if (!extEnabled) {
+        if (settings.setShowBadges === false) {
+            text = "";
+        } else if (!extEnabled) {
             text = "OFF";
             color = "#52525b";
         } else if (activeStream && activeStream.campaign && activeStream.campaign !== "none") {

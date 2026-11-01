@@ -77,6 +77,9 @@ export class Client {
         this.oauthToken = options?.oauthToken ?? null;
         this.deviceId = options?.deviceId ?? null;
         this.integrity = options?.integrity ?? null;
+        this.integrityExpiration = (this.integrity && typeof this.integrity === "object" && typeof this.integrity.expiration === "number")
+            ? this.integrity.expiration
+            : (typeof this.integrity === "string" && this.integrity.length > 0 ? Date.now() + 3600000 : null);
         this.userId = options?.userId ?? null;
         this.uuid = options?.uuid ?? null;
         this.onIntegrityError = options?.onIntegrityError ?? null;
@@ -253,7 +256,7 @@ export class Client {
 
     async getInteg() {
         if (!this.integrity) return false;
-        const expiration = typeof this.integrity === "object" ? this.integrity.expiration : null;
+        const expiration = typeof this.integrity === "object" ? this.integrity.expiration : this.integrityExpiration;
         if (expiration && expiration - 960000 < Date.now()) {
             return false;
         }
@@ -262,6 +265,13 @@ export class Client {
 
     async setInteg(integ) {
         this.integrity = integ;
+        if (typeof integ === "string" && integ.length > 0) {
+            this.integrityExpiration = Date.now() + 3600000;
+        } else if (integ && typeof integ === "object" && typeof integ.expiration === "number") {
+            this.integrityExpiration = integ.expiration;
+        } else {
+            this.integrityExpiration = null;
+        }
         try {
             if (typeof chrome !== "undefined" && chrome?.storage?.local) {
                 await chrome.storage.local.set({ twitchInteg: integ });

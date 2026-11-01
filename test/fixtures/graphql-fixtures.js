@@ -39,7 +39,7 @@ export const viewerDropsDashboardFixture = {
                         boxArtURL: "https://static-cdn.jtvnw.net/ttv-boxart/515025-285x380.jpg"
                     },
                     startAt: "2026-08-01T00:00:00Z",
-                    endAt: "2026-10-30T23:59:59Z",
+                    endAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
                     timeBasedDrops: [
                         {
                             id: "drop-ow-1",
@@ -95,7 +95,7 @@ export const viewerDropsDashboardFixture = {
                     boxArtURL: "https://static-cdn.jtvnw.net/ttv-boxart/516575-285x380.jpg"
                 },
                 startAt: "2026-08-10T00:00:00Z",
-                endAt: "2026-08-25T23:59:59Z",
+                endAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
                 timeBasedDrops: [
                     {
                         id: "drop-val-1",

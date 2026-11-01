@@ -61,6 +61,7 @@ let settings = {
     autoRefresh: true,
     showAllGames: true,
     autoGetToken: true,
+    autoClaimPoints: true,
     setShowBadges: true,
     soundOnClaim: false,
     desktopNotifications: true,
@@ -155,9 +156,9 @@ $(() => {
 
             if (val.settings && typeof val.settings === "object") {
                 settings = { ...settings, ...val.settings };
-                for (let k in settings) {
-                    $(`#set${k}`).prop("checked", Boolean(settings[k]));
-                }
+            }
+            for (let k in settings) {
+                $(`#set${k}`).prop("checked", Boolean(settings[k]));
             }
 
             if (val.extStats) {
@@ -687,7 +688,7 @@ $(() => {
     });
 
     function copyGitPullCommand() {
-        const cmd = "git pull origin main";
+        const cmd = "git pull origin v2.0-headless";
         if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(cmd).then(() => {
                 showToast(`📋 Copied "${cmd}" to clipboard!`);

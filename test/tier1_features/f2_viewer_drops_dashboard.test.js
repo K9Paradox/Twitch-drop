@@ -58,7 +58,7 @@ describe("Tier 1: Feature 2 - GraphQL ViewerDropsDashboard", () => {
         assert.equal(req.body.variables.fetchRewardCampaigns, true);
     });
 
-    it("F2-T5: getDropCampaigns() uses sha256Hash 5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619", async () => {
+    it("F2-T5: getDropCampaigns() uses sha256Hash c16bb890cc8ce7647a96ee69cd313d423a378a3dedadf630a1017cde18975feb", async () => {
         sandbox.fetchMock.onGql("ViewerDropsDashboard", viewerDropsDashboardFixture);
 
         await client.getDropCampaigns();

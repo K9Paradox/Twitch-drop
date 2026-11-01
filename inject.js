@@ -38,14 +38,24 @@ try {
     }
 } catch (e) {}
 
+const ALLOWED_PAGE_MESSAGES = new Set([
+    "sendInteg",
+    "claim-points",
+    "points-earned",
+    "claim-drop",
+    "gqlOperation",
+    "user",
+    "clientInfo"
+]);
+
 // Forward in-page events from onPage.js to background service worker
 window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     if (!event.data || typeof event.data !== "object") return;
 
     const atd = event.data.autoTwitchDrops;
-    if (atd && typeof atd === "object" && atd.type) {
-        if (!extEnabledState && atd.type !== "sendInteg" && atd.type !== "user") {
+    if (atd && typeof atd === "object" && typeof atd.type === "string" && ALLOWED_PAGE_MESSAGES.has(atd.type)) {
+        if (!extEnabledState && atd.type !== "sendInteg" && atd.type !== "user" && atd.type !== "clientInfo") {
             return;
         }
         try {
@@ -88,10 +98,15 @@ function syncClientAuth() {
 
         if (clientId && (uniqueId || authToken)) {
             chrome.runtime.sendMessage({
-                type: "user",
+                type: "clientInfo",
                 id: clientId,
                 uniq: uniqueId,
-                auth: authToken
+                auth: authToken,
+                data: {
+                    clientId,
+                    deviceId: uniqueId || undefined,
+                    oauthToken: authToken || undefined
+                }
             }).catch(() => {});
         }
     } catch (e) {}

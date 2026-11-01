@@ -106,31 +106,76 @@ setInterval(autoClaimPointsChests, 1500);
 // ============================================================================
 // 2. FETCH INTERCEPTOR (CLIENT-INTEGRITY & GQL OPERATIONS)
 // ============================================================================
+const PASSIVE_GQL_OPS = new Set([
+    "DropCurrentSessionContext",
+    "Inventory",
+    "DropChannelCampaignsProgress"
+]);
+
 const _origFetch = window._originalFetch || window.fetch;
 if (typeof _origFetch === "function") {
     window._originalFetch = _origFetch;
     window.fetch = async function (...args) {
+        let isTwitchGql = false;
+        let reqOps = [];
         try {
             const reqUrl = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url ? args[0].url : "");
             const options = args[1];
-            if (reqUrl.includes("gql.twitch.tv/gql") && options && options.headers) {
-                let integ = null;
-                if (typeof options.headers.get === "function") {
-                    integ = options.headers.get("Client-Integrity") || options.headers.get("client-integrity");
-                } else if (typeof options.headers === "object") {
-                    integ = options.headers["Client-Integrity"] || options.headers["client-integrity"];
+            if (reqUrl.includes("gql.twitch.tv/gql")) {
+                isTwitchGql = true;
+                if (options && options.headers) {
+                    let integ = null;
+                    if (typeof options.headers.get === "function") {
+                        integ = options.headers.get("Client-Integrity") || options.headers.get("client-integrity");
+                    } else if (typeof options.headers === "object") {
+                        integ = options.headers["Client-Integrity"] || options.headers["client-integrity"];
+                    }
+                    if (integ) {
+                        window.postMessage({
+                            autoTwitchDrops: {
+                                type: "sendInteg",
+                                data: integ
+                            }
+                        }, "*");
+                    }
                 }
-                if (integ) {
-                    window.postMessage({
-                        autoTwitchDrops: {
-                            type: "sendInteg",
-                            data: integ
-                        }
-                    }, "*");
+                if (options && typeof options.body === "string" && (
+                    options.body.includes("DropCurrentSessionContext") ||
+                    options.body.includes("Inventory") ||
+                    options.body.includes("DropChannelCampaignsProgress")
+                )) {
+                    try {
+                        const parsedReq = JSON.parse(options.body);
+                        const reqList = Array.isArray(parsedReq) ? parsedReq : [parsedReq];
+                        reqOps = reqList.map(r => r && r.operationName ? r.operationName : null);
+                    } catch (e) {}
                 }
             }
         } catch (e) {}
-        return _origFetch.apply(this, args);
+
+        const response = await _origFetch.apply(this, args);
+
+        if (isTwitchGql && reqOps.some(op => PASSIVE_GQL_OPS.has(op)) && response && typeof response.clone === "function") {
+            try {
+                response.clone().json().then((json) => {
+                    const resList = Array.isArray(json) ? json : [json];
+                    resList.forEach((item, idx) => {
+                        const opName = item?.extensions?.operationName || reqOps[idx];
+                        if (opName && PASSIVE_GQL_OPS.has(opName) && item && item.data) {
+                            window.postMessage({
+                                autoTwitchDrops: {
+                                    type: "gqlOperation",
+                                    operation: opName,
+                                    data: item.data
+                                }
+                            }, "*");
+                        }
+                    });
+                }).catch(() => {});
+            } catch (e) {}
+        }
+
+        return response;
     };
 }
 

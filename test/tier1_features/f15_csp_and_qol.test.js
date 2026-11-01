@@ -27,6 +27,8 @@ describe("Tier 1: Feature 15 - Manifest V3 CSP & QoL Enhancements", () => {
     it("F15-T3: index.html contains #stopCampaignBtn and #setautoRefresh controls", () => {
         assert.ok(indexHtml.includes("id=\"stopCampaignBtn\""), "index.html must include #stopCampaignBtn");
         assert.ok(indexHtml.includes("id=\"setautoRefresh\""), "index.html must include #setautoRefresh");
+        assert.ok(indexHtml.includes("id=\"setautoClaimPoints\""), "index.html must include #setautoClaimPoints");
+        assert.ok(indexHtml.includes("id=\"setsetShowBadges\""), "index.html must include #setsetShowBadges");
     });
 
     it("F15-T4: HTML escaping helper sanitizes untrusted Twitch broadcaster and reward strings", () => {
@@ -48,6 +50,7 @@ describe("Tier 1: Feature 15 - Manifest V3 CSP & QoL Enhancements", () => {
 
     it("F15-T5: Dynamic badge formatting computes accurate remaining minutes and completion state", () => {
         function computeBadgeText(extEnabled, activeStream, setShowBadges) {
+            if (setShowBadges === false) return "";
             if (!extEnabled) return "OFF";
             if (activeStream && activeStream.campaign && activeStream.campaign !== "none") {
                 const camp = activeStream.campaign;
@@ -75,6 +78,7 @@ describe("Tier 1: Feature 15 - Manifest V3 CSP & QoL Enhancements", () => {
         }
 
         assert.equal(computeBadgeText(false, {}, true), "OFF");
+        assert.equal(computeBadgeText(true, { campaign: { isCompleted: true } }, false), "");
         assert.equal(computeBadgeText(true, { campaign: { isCompleted: true } }, true), "✓");
         assert.equal(computeBadgeText(true, { campaign: { status: "nostream" } }, true), "…");
         assert.equal(computeBadgeText(true, {
