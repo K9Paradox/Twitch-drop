@@ -1,7 +1,7 @@
-# Project: Auto Twitch Drops Pro
+# Project: Auto Twitch Drops Pro (v2.0.0 Headless Edition)
 
 ## Architecture
-Auto Twitch Drops Pro is a Manifest V3 Chrome Extension designed for resilient background automation of Twitch Drops and Community Points with zero memory leaks, robust data contracts, and a dark-theme UI.
+Auto Twitch Drops Pro v2.0.0 is a Manifest V3 Chrome Extension designed for resilient, zero-tab headless background automation of Twitch Drops and Community Points with zero memory leaks, robust data contracts, and a dark-theme UI.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -9,25 +9,25 @@ Auto Twitch Drops Pro is a Manifest V3 Chrome Extension designed for resilient b
 │  (index.html, assets/js/main.js, assets/css/main.css, assets/img/*)         │
 │  - 5 Tabs: Home, Drops, Queue, Activity, Settings + Disabled Overlay        │
 │  - Real-time reactive storage hydration & message listeners                 │
-│  - Quick Stream Controls Toolbar, Searchable Dropdowns, Fallback SVGs       │
+│  - Headless Pulse Controls Toolbar, Searchable Dropdowns, Fallback SVGs     │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │ chrome.runtime.sendMessage / storage
 ┌──────────────────────────────────────▼──────────────────────────────────────┐
 │                    Background Service Worker (background.js)                │
 │  - Alarm-driven scheduler: watchdogAlarm, dropCheckAlarm, tokenRefreshAlarm │
+│  - Headless 20s Watch Pulse Loop (HLS HEAD + Spade minute-watched beacon)   │
 │  - Hydration Mutex & State Manager (persisted in chrome.storage.local)      │
 │  - Stream Rotation Engine & Channel Discovery with Offline Failover         │
-│  - Non-intrusive Background Tab Manager (#atd-managed=1)                    │
 │  - Stall Watchdog & Automatic Recovery                                      │
 └───────────────────┬──────────────────────────────────┬──────────────────────┘
-                    │ HTTPS (fetch)                    │ chrome.tabs / content
+                    │ HTTPS (fetch)                    │ Content Script Bridge
 ┌───────────────────▼───────────────┐  ┌───────────────▼──────────────────────┐
-│   Twitch GraphQL Client Engine    │  │    In-Page Interceptors & Playback   │
+│   Twitch GraphQL & Watch Engine   │  │   In-Page Interceptors & Chests      │
 │      (background/twitchApi.js)    │  │       (inject.js, onPage.js)         │
-│  - 9 GQL Queries & Mutations      │  │  - Low bandwidth 160p30 forcing      │
-│  - Strict unwrapping & errors     │  │  - Page Visibility API spoofing      │
-│  - Auth & Client-Integrity        │  │  - Hermes & PubSub WS interception   │
-│  - Token expiration handling      │  │  - Deduplicated bonus points claim   │
+│  - GQL Queries & PlaybackTokens   │  │  - Client-Integrity Header Capture   │
+│  - Usher HLS M3U8 + HEAD Pulses   │  │  - Hermes & PubSub WS interception   │
+│  - Spade minute-watched Beacons   │  │  - Deduplicated bonus points claim   │
+│  - Token expiration handling      │  │  - Zero video player DOM bloat       │
 └───────────────────────────────────┘  └──────────────────────────────────────┘
 ```
 

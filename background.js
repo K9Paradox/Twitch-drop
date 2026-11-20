@@ -56,12 +56,10 @@ let settings = {
     autoRefresh: true,
     showAllGames: true,
     autoGetToken: true,
-    watchPopout: true,
-    autoMute: true,
+    autoClaimPoints: true,
     setShowBadges: true,
     soundOnClaim: false,
     desktopNotifications: true,
-    lowQualityMode: true,
     autoCheckUpdates: true
 };
 let listOfConnected = [...POPULAR_DROP_GAMES];
@@ -112,11 +110,6 @@ let extEnabled = true;
 let activeStream = {
     campaign: "none"
 };
-let curWindow = {
-    id: 0,
-    windowId: 0,
-    type: "none"
-};
 let gettingStreamObj = {
     allStreamers: [],
     notPlayingGame: [],
@@ -125,7 +118,221 @@ let gettingStreamObj = {
 let autoGetTokenWindow = 0;
 let isHydrated = false;
 let hydrationPromise = null;
-let pendingPlaybackHandshake = null;
+let headlessWatchInterval = null;
+let isSendingWatchPulse = false;
+
+function applyDropSessionProgress(session) {
+    if (!session || !activeStream || !activeStream.campaign || activeStream.campaign === "none" || !Array.isArray(activeStream.campaigns)) {
+        return false;
+    }
+    const dropData = session.currentDrop || session;
+    if (!dropData || typeof dropData.currentMinutesWatched !== "number") {
+        return false;
+    }
+    const watched = dropData.currentMinutesWatched;
+    const req = dropData.requiredMinutesWatched || 0;
+    const dropId = dropData.dropID || dropData.id || null;
+
+    let changed = false;
+    let matchedCamp = null;
+    let matchedItem = null;
+
+    if (dropId) {
+        for (let idx = 0; idx < activeStream.campaigns.length; idx++) {
+            const campObj = activeStream.campaigns[idx];
+            if (!Array.isArray(campObj.items)) continue;
+            const found = campObj.items.find(i => i && i.id === dropId);
+            if (found) {
+                matchedCamp = campObj;
+                matchedItem = found;
+                if (activeStream.campaign.onCamp !== idx) {
+                    activeStream.campaign.onCamp = idx;
+                    changed = true;
+                }
+                break;
+            }
+        }
+    }
+
+    if (!matchedCamp) {
+        matchedCamp = activeStream.campaigns[activeStream.campaign.onCamp || 0] || activeStream.campaigns[0] || null;
+    }
+    if (!matchedCamp) return false;
+
+    if (!matchedItem && Array.isArray(matchedCamp.items) && matchedCamp.items.length > 0) {
+        const nowTs = getTwitchNow();
+        const sortedCandidates = [...matchedCamp.items]
+            .filter(i => i && !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowTs))
+            .sort((a, b) => (a.reqTime || a.requiredMinutesWatched || 60) - (b.reqTime || b.requiredMinutesWatched || 60));
+        matchedItem = matchedCamp.items.find(i => i && i.isSynthetic)
+            || (req > 0 ? sortedCandidates.find(i => (i.reqTime || i.requiredMinutesWatched || 60) === req && (i.self?.currentMinutesWatched || 0) < req) : null)
+            || (req > 0 ? sortedCandidates.find(i => (i.reqTime || i.requiredMinutesWatched || 60) === req) : null)
+            || sortedCandidates.find(i => (i.self?.currentMinutesWatched || 0) < (i.reqTime || i.requiredMinutesWatched || 60))
+            || sortedCandidates[0];
+    }
+
+    if (matchedItem) {
+        const wasSynthetic = Boolean(matchedItem.isSynthetic);
+        matchedItem.self = matchedItem.self || {};
+        const prevWatched = matchedItem.self.currentMinutesWatched || 0;
+        if (watched > prevWatched) {
+            matchedItem.self.currentMinutesWatched = watched;
+            changed = true;
+        }
+        if (wasSynthetic && dropId) {
+            matchedItem.id = dropId;
+            matchedItem.isSynthetic = false;
+            changed = true;
+        }
+        if (matchedItem.id && activeStream.campaign.activeDropId !== matchedItem.id) {
+            activeStream.campaign.activeDropId = matchedItem.id;
+            changed = true;
+        }
+        if (req > 0 && (wasSynthetic || matchedItem.isSynthetic || !matchedItem.reqTime)) {
+            if (matchedItem.reqTime !== req || wasSynthetic) {
+                matchedItem.reqTime = req;
+                changed = true;
+            }
+            if (wasSynthetic) {
+                matchedCamp.minutesNeeded = req;
+            }
+        }
+    }
+
+    if (Array.isArray(matchedCamp.items) && matchedCamp.items.length > 0) {
+        const nowTs = getTwitchNow();
+        const sortedUnclaimed = matchedCamp.items
+            .filter(i => i && !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowTs))
+            .sort((a, b) => (a.reqTime || 60) - (b.reqTime || 60));
+        const activeTierItem = sortedUnclaimed[0];
+        if (activeTierItem && activeTierItem !== matchedItem && watched <= (activeTierItem.reqTime || 60)) {
+            activeTierItem.self = activeTierItem.self || {};
+            if (watched > (activeTierItem.self.currentMinutesWatched || 0)) {
+                activeTierItem.self.currentMinutesWatched = watched;
+                changed = true;
+            }
+        }
+    }
+
+    if (watched > (matchedCamp.minutesWatched || 0)) {
+        matchedCamp.minutesWatched = watched;
+        changed = true;
+    }
+    if (req > (matchedCamp.minutesNeeded || 0)) {
+        matchedCamp.minutesNeeded = req;
+        changed = true;
+    }
+
+    if (changed && activeStream.campaign) {
+        if (watched > (activeStream.campaign.lastMinutesWatched || 0)) {
+            activeStream.campaign.lastMinutesWatched = watched;
+            activeStream.campaign.lastProgressTimestamp = Date.now();
+            activeStream.campaign.stallCount = 0;
+        }
+    }
+
+    if (req > 0 && watched >= req) {
+        checkClaimDrop().catch(() => {});
+    }
+
+    return changed;
+}
+
+async function performHeadlessWatch(preFetchedMeta = null) {
+    if (!extEnabled || isSendingWatchPulse) return false;
+    if (!activeStream || !activeStream.campaign || activeStream.campaign === "none") return false;
+    if (activeStream.campaign.status !== "watching" || !activeStream.campaign.curWatching) return false;
+
+    isSendingWatchPulse = true;
+    try {
+        if (!client) await fetchTwitchCookiesAndInitClient();
+        if (!client) return false;
+
+        const streamer = activeStream.campaign.curWatching;
+        let meta = preFetchedMeta;
+        if (meta && meta.channelId && meta.broadcastId) {
+            activeStream.campaign.streamMeta = { ...meta, login: streamer.toLowerCase() };
+        } else if (
+            activeStream.campaign.streamMeta &&
+            activeStream.campaign.streamMeta.login === streamer.toLowerCase() &&
+            activeStream.campaign.streamMeta.channelId &&
+            activeStream.campaign.streamMeta.broadcastId
+        ) {
+            meta = activeStream.campaign.streamMeta;
+        } else if (typeof client.getStreamMetadata === "function") {
+            meta = await client.getStreamMetadata(streamer).catch(() => null);
+            if (meta && meta.channelId && meta.broadcastId) {
+                activeStream.campaign.streamMeta = { ...meta, login: streamer.toLowerCase() };
+            }
+        }
+
+        const watchRes = await client.sendWatch(streamer, meta || {});
+        if (watchRes && watchRes.success) {
+            const nowMs = Date.now();
+            activeStream.campaign.lastWatchPulse = nowMs;
+            activeStream.campaign.watchMethod = watchRes.method || "hls";
+
+            let sessionAdvanced = false;
+            if (typeof client.getCurrentDropSession === "function") {
+                const session = await client.getCurrentDropSession(meta?.channelId || "", streamer).catch(() => null);
+                if (session && applyDropSessionProgress(session)) {
+                    sessionAdvanced = true;
+                    await saveState();
+                    updateBadgeUI();
+                    chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                }
+            }
+
+            if (!sessionAdvanced && typeof client.getInventory === "function" && nowMs - (activeStream.campaign.lastInventorySyncTs || 0) >= 55000) {
+                activeStream.campaign.lastInventorySyncTs = nowMs;
+                const inv = await client.getInventory().catch(() => null);
+                if (inv) {
+                    const prevMinutes = activeStream.campaigns?.[activeStream.campaign.onCamp || 0]?.minutesWatched || 0;
+                    syncCampaignProgressWithInventory(inv);
+                    const newMinutes = activeStream.campaigns?.[activeStream.campaign.onCamp || 0]?.minutesWatched || 0;
+                    if (newMinutes > prevMinutes) {
+                        activeStream.campaign.lastMinutesWatched = newMinutes;
+                        activeStream.campaign.lastProgressTimestamp = nowMs;
+                        activeStream.campaign.stallCount = 0;
+                        await saveState();
+                        updateBadgeUI();
+                        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+                    }
+                }
+            }
+            return true;
+        }
+        return false;
+    } catch (e) {
+        return false;
+    } finally {
+        isSendingWatchPulse = false;
+    }
+}
+
+function startHeadlessWatchLoop() {
+    if (headlessWatchInterval) return;
+    headlessWatchInterval = setInterval(() => {
+        try {
+            chrome?.runtime?.getPlatformInfo?.(() => {});
+        } catch (e) {}
+        if (!extEnabled || !activeStream?.campaign || activeStream.campaign === "none" || activeStream.campaign.status !== "watching") {
+            stopHeadlessWatchLoop();
+            return;
+        }
+        performHeadlessWatch().catch(() => {});
+    }, 20000);
+}
+
+function stopHeadlessWatchLoop() {
+    if (headlessWatchInterval) {
+        clearInterval(headlessWatchInterval);
+        headlessWatchInterval = null;
+    }
+    if (client && client._streamUrlCache) {
+        client._streamUrlCache.clear();
+    }
+}
 
 // --- State Persistence & Hydration ---
 
@@ -133,7 +340,6 @@ async function saveState() {
     try {
         await chrome.storage.local.set({
             activeStream,
-            curWindow,
             extStats,
             settings,
             autoDropGames,
@@ -162,7 +368,6 @@ async function hydrateState() {
                 "extStats",
                 "listOfConnected",
                 "activeStream",
-                "curWindow",
                 "autoGetTokenWindow",
                 "activityHistory",
                 "oauthToken",
@@ -182,7 +387,6 @@ async function hydrateState() {
             if (val.activityHistory) activityHistory = val.activityHistory;
             if (val.extStats) extStats = { ...extStats, ...val.extStats };
 
-            if (val.curWindow) curWindow = val.curWindow;
             if (val.autoGetTokenWindow !== undefined) autoGetTokenWindow = val.autoGetTokenWindow;
             if (val.activeStream && val.activeStream.campaign && val.activeStream.campaign !== "none") {
                 if (val.activeStream.campaign.status === "starting" && (!val.activeStream.campaigns || val.activeStream.campaigns.length === 0)) {
@@ -194,6 +398,7 @@ async function hydrateState() {
 
             await fetchTwitchCookiesAndInitClient();
             isHydrated = true;
+            updateBadgeUI();
         } catch (e) {
             console.warn("Error hydrating state:", e);
         } finally {
@@ -236,23 +441,6 @@ function logActivity(type, title, game, points = 0, imgUrl = "") {
     chrome.runtime.sendMessage({ type: "p:activityUpdated", data: activityHistory }).catch(() => {});
 }
 
-function enableAutoplayForTwitch() {
-    try {
-        if (chrome.contentSettings && chrome.contentSettings.autoplay) {
-            chrome.contentSettings.autoplay.set({
-                primaryPattern: "*://*.twitch.tv/*",
-                setting: "allow"
-            });
-            chrome.contentSettings.autoplay.set({
-                primaryPattern: "https://*.twitch.tv/*",
-                setting: "allow"
-            });
-        }
-    } catch (e) {
-        console.warn("Could not set autoplay content settings:", e);
-    }
-}
-
 async function fetchTwitchCookiesAndInitClient() {
     try {
         let authCookie = await chrome.cookies.get({ url: "https://www.twitch.tv", name: "auth-token" }).catch(() => null);
@@ -274,20 +462,43 @@ async function fetchTwitchCookiesAndInitClient() {
 
         oauthToken = oauthToken || localData.oauthToken;
         deviceId = deviceId || localData.deviceId;
+        let resolvedUserId = localData.userId || null;
+        if (!resolvedUserId) {
+            try {
+                let persistentCookie = await chrome.cookies.get({ url: "https://www.twitch.tv", name: "persistent" }).catch(() => null);
+                if (!persistentCookie) {
+                    const allPersist = await chrome.cookies.getAll({ name: "persistent" }).catch(() => []);
+                    persistentCookie = allPersist.find(c => c.domain.includes("twitch.tv") && c.value) || allPersist[0];
+                }
+                if (persistentCookie && persistentCookie.value) {
+                    const rawId = decodeURIComponent(persistentCookie.value).split(":")[0];
+                    if (/^\d+$/.test(rawId)) {
+                        resolvedUserId = rawId;
+                        await chrome.storage.local.set({ userId: resolvedUserId }).catch(() => {});
+                    }
+                }
+            } catch (e) {}
+        }
         const integrity = localData.twitchInteg || null;
+
+        const onIntegrityError = () => {
+            if (client) client.integrity = null;
+            autoGetToken(true);
+            return false;
+        };
 
         if (oauthToken) {
             await chrome.storage.local.set({ oauthToken, deviceId }).catch(() => {});
             if (client === null) {
-                client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid, integrity });
+                client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", oauthToken, deviceId, userId: resolvedUserId, uuid: localData.uuid, integrity, onIntegrityError });
             } else {
-                client.updateUserInfo({ oauthToken, deviceId, userId: localData.userId, uuid: localData.uuid, integrity });
+                client.updateUserInfo({ oauthToken, deviceId, userId: resolvedUserId, uuid: localData.uuid, integrity, onIntegrityError });
             }
-            if (!localData.userId) {
+            if (!resolvedUserId) {
                 await client.autoDetectUserId().catch(() => {});
             }
         } else if (client === null) {
-            client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", integrity });
+            client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko", integrity, onIntegrityError });
         }
     } catch (e) {
         console.warn("Error fetching Twitch cookies:", e);
@@ -295,6 +506,97 @@ async function fetchTwitchCookiesAndInitClient() {
             client = new Client({ clientId: "kimne78kx3ncx6brgo4mv6wki5h1ko" });
         }
     }
+}
+
+async function refreshSyntheticCampaignDetails(inventory = null) {
+    if (!client || !activeStream || !activeStream.campaign || activeStream.campaign === "none" || !Array.isArray(activeStream.campaigns)) {
+        return false;
+    }
+    const syntheticCamps = activeStream.campaigns.filter(c =>
+        c && c.id && !String(c.id).startsWith("camp-") &&
+        (!Array.isArray(c.items) || c.items.length === 0 || c.items.some(i => i && i.isSynthetic))
+    );
+    if (syntheticCamps.length === 0) return false;
+
+    const campIds = syntheticCamps.map(c => c.id);
+    const campDeets = await client.getDropCampaignDetails(campIds).catch(() => null);
+    if (!Array.isArray(campDeets) || campDeets.length === 0) return false;
+
+    const eventDropsList = Array.isArray(inventory?.gameEventDrops) ? inventory.gameEventDrops : [];
+    const now = getTwitchNow();
+    let updatedAny = false;
+
+    for (const c of campDeets) {
+        const dropCamp = c?.data?.user?.dropCampaign || c?.data?.dropCampaign || c?.user?.dropCampaign || c?.dropCampaign;
+        if (!dropCamp || !Array.isArray(dropCamp.timeBasedDrops) || dropCamp.timeBasedDrops.length === 0) continue;
+
+        const targetCamp = activeStream.campaigns.find(sc => sc && sc.id === dropCamp.id);
+        if (!targetCamp) continue;
+
+        const allDrops = [];
+        let maxTime = 0;
+        let timeWatched = targetCamp.minutesWatched || 0;
+
+        for (const drop of dropCamp.timeBasedDrops) {
+            if (!drop) continue;
+            const reqMins = drop.requiredMinutesWatched || 60;
+            if (reqMins > maxTime) maxTime = reqMins;
+            if (reqMins === 0) continue;
+
+            const dropStartAt = drop.startAt || dropCamp.startAt || targetCamp.startAt || null;
+            const dropEndAt = drop.endAt || dropCamp.endAt || targetCamp.endAt || null;
+            const dropEndsAtTs = dropEndAt ? new Date(dropEndAt).getTime() : null;
+            const isEnded = Boolean(dropEndsAtTs && !isNaN(dropEndsAtTs) && dropEndsAtTs <= now);
+
+            const benefit = (drop.benefitEdges && drop.benefitEdges[0]) ? (drop.benefitEdges[0].benefit || drop.benefitEdges[0].node) : null;
+            const benefitId = benefit ? benefit.id : "";
+            const benefitName = (benefit && benefit.name) ? (drop.name ? `${drop.name} - ${benefit.name}` : benefit.name) : (drop.name || "Drop Reward");
+            const benefitImg = (benefit && benefit.imageAssetURL) ? benefit.imageAssetURL : (drop.imageURL || drop.imageAssetURL || "");
+
+            const isClaimed = isDropItemClaimedStrict(drop, eventDropsList) || Boolean(drop.self && drop.self.isClaimed);
+            const currentWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
+                ? drop.self.currentMinutesWatched
+                : (isClaimed ? reqMins : 0);
+            if (currentWatched > timeWatched) timeWatched = currentWatched;
+
+            allDrops.push({
+                name: benefitName,
+                picture: benefitImg,
+                reqTime: reqMins,
+                id: drop.id,
+                benefitId: benefitId,
+                badge: Boolean(dropCamp.owner && dropCamp.owner.name === "Twitch Gaming"),
+                startAt: dropStartAt,
+                endAt: dropEndAt,
+                endsAt: dropEndsAtTs,
+                isEnded: isEnded,
+                self: { isClaimed, currentMinutesWatched: currentWatched }
+            });
+        }
+
+        if (allDrops.length > 0) {
+            targetCamp.items = allDrops;
+            targetCamp.minutesNeeded = maxTime || 60;
+            targetCamp.minutesWatched = Math.max(targetCamp.minutesWatched || 0, timeWatched);
+            if (dropCamp.allow && dropCamp.allow.isEnabled !== false && Array.isArray(dropCamp.allow.channels)) {
+                const streams = dropCamp.allow.channels.map(ch => ch?.name).filter(Boolean);
+                if (streams.length > 0) {
+                    targetCamp.streamers = streams;
+                }
+            }
+            updatedAny = true;
+        }
+    }
+
+    if (updatedAny) {
+        if (inventory) {
+            syncCampaignProgressWithInventory(inventory);
+        }
+        await saveState();
+        updateBadgeUI();
+        chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
+    }
+    return updatedAny;
 }
 
 function isDropItemClaimedStrict(item, eventDropsList) {
@@ -382,10 +684,17 @@ function syncCampaignProgressWithInventory(inventory) {
                     curCamp.minutesNeeded = reqMinutes;
                 }
 
+                const benefit = drop.benefitEdges && drop.benefitEdges[0] ? (drop.benefitEdges[0].benefit || drop.benefitEdges[0].node) : null;
+                const matchedItem = curCamp.items ? curCamp.items.find(i => i.id === drop.id || (benefit && benefit.id && i.benefitId === benefit.id)) : null;
+
                 const isExplicitlyClaimed = (drop.self && drop.self.isClaimed === true) || isDropItemClaimedStrict(drop, eventDropsList);
-                const currentWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
+                const invWatched = (drop.self && drop.self.currentMinutesWatched !== undefined)
                     ? drop.self.currentMinutesWatched
                     : (isExplicitlyClaimed ? reqMinutes : 0);
+                // Preserve real-time session progress from DropCurrentSessionContext if Inventory lags behind
+                const currentWatched = (matchedItem && matchedItem.id === drop.id && (matchedItem.self?.currentMinutesWatched || 0) > invWatched)
+                    ? matchedItem.self.currentMinutesWatched
+                    : invWatched;
 
                 if (currentWatched > maxWatchedInCamp) {
                     maxWatchedInCamp = currentWatched;
@@ -399,31 +708,27 @@ function syncCampaignProgressWithInventory(inventory) {
                     allDropsClaimedInCamp = false;
                 }
 
-                if (curCamp.items) {
-                    const benefit = drop.benefitEdges && drop.benefitEdges[0] ? (drop.benefitEdges[0].benefit || drop.benefitEdges[0].node) : null;
-                    const matchedItem = curCamp.items.find(i => i.id === drop.id || (benefit && benefit.id && i.benefitId === benefit.id));
-                    if (matchedItem) {
-                        matchedItem.self = matchedItem.self || {};
-                        matchedItem.self.isClaimed = isExplicitlyClaimed;
-                        matchedItem.self.currentMinutesWatched = currentWatched;
-                        if (benefit && benefit.imageAssetURL) {
-                            matchedItem.picture = benefit.imageAssetURL;
-                        }
-                        if (benefit && benefit.id && !matchedItem.benefitId) {
-                            matchedItem.benefitId = benefit.id;
-                        }
-                        if (dropEnd) {
-                            matchedItem.endAt = dropEnd;
-                            if (dropEndsAt && !isNaN(dropEndsAt)) {
-                                matchedItem.endsAt = dropEndsAt;
-                                matchedItem.isEnded = isDropEnded;
-                            }
+                if (matchedItem) {
+                    matchedItem.self = matchedItem.self || {};
+                    matchedItem.self.isClaimed = isExplicitlyClaimed;
+                    matchedItem.self.currentMinutesWatched = currentWatched;
+                    if (benefit && benefit.imageAssetURL) {
+                        matchedItem.picture = benefit.imageAssetURL;
+                    }
+                    if (benefit && benefit.id && !matchedItem.benefitId) {
+                        matchedItem.benefitId = benefit.id;
+                    }
+                    if (dropEnd) {
+                        matchedItem.endAt = dropEnd;
+                        if (dropEndsAt && !isNaN(dropEndsAt)) {
+                            matchedItem.endsAt = dropEndsAt;
+                            matchedItem.isEnded = isDropEnded;
                         }
                     }
                 }
             }
 
-            curCamp.minutesWatched = maxWatchedInCamp;
+            curCamp.minutesWatched = Math.max(curCamp.minutesWatched || 0, maxWatchedInCamp);
 
             if (!allDropsClaimedInCamp) {
                 allCampaignsCompleted = false;
@@ -432,18 +737,21 @@ function syncCampaignProgressWithInventory(inventory) {
             let allItemsClaimed = true;
             const nowTs = getTwitchNow();
             if (curCamp.items && curCamp.items.length > 0) {
+                let maxItemWatched = curCamp.minutesWatched || 0;
                 for (const item of curCamp.items) {
                     const req = item.reqTime || curCamp.minutesNeeded || 60;
                     const isClaimed = isDropItemClaimedStrict(item, eventDropsList) || (item.self && item.self.isClaimed === true);
                     item.self = item.self || {};
                     item.self.isClaimed = isClaimed;
                     const itemWatched = item.self.currentMinutesWatched || 0;
+                    if (itemWatched > maxItemWatched) maxItemWatched = itemWatched;
                     const itemEnded = Boolean((item.endsAt && item.endsAt <= nowTs) || item.isEnded);
 
                     if (!isClaimed && !itemEnded && itemWatched < req) {
                         allItemsClaimed = false;
                     }
                 }
+                curCamp.minutesWatched = maxItemWatched;
             } else {
                 if ((curCamp.minutesWatched || 0) < curCamp.minutesNeeded) {
                     allItemsClaimed = false;
@@ -457,6 +765,7 @@ function syncCampaignProgressWithInventory(inventory) {
     }
 
     saveState();
+    updateBadgeUI();
     return allCampaignsCompleted;
 }
 
@@ -477,7 +786,7 @@ export function compareSemver(a, b) {
 }
 
 export async function checkGitHubUpdate(manual = false) {
-    const currentVersion = (typeof chrome !== "undefined" && chrome.runtime?.getManifest?.()?.version) || "1.5.1";
+    const currentVersion = (typeof chrome !== "undefined" && chrome.runtime?.getManifest?.()?.version) || "2.0.0";
     const result = {
         updateAvailable: false,
         latestVersion: currentVersion,
@@ -513,17 +822,20 @@ export async function checkGitHubUpdate(manual = false) {
             console.warn("[AutoUpdate] Releases check warning:", e?.message);
         }
 
-        // 2. Fallback to raw manifest.json on main branch
+        // 2. Fallback to raw manifest.json on v2.0-headless / main branch
         if (!releaseFound) {
             try {
-                const rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/main/manifest.json");
-                if (rawRes.ok) {
+                let rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/v2.0-headless/manifest.json").catch(() => null);
+                if (!rawRes || !rawRes.ok) {
+                    rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/main/manifest.json");
+                }
+                if (rawRes && rawRes.ok) {
                     const rawManifest = await rawRes.json();
                     if (rawManifest && rawManifest.version) {
                         result.latestVersion = rawManifest.version;
                         if (compareSemver(rawManifest.version, currentVersion) > 0) {
                             result.updateAvailable = true;
-                            result.releaseUrl = "https://github.com/K9Paradox/Twitch-drop";
+                            result.releaseUrl = "https://github.com/K9Paradox/Twitch-drop/tree/v2.0-headless";
                         }
                     }
                 }
@@ -532,12 +844,17 @@ export async function checkGitHubUpdate(manual = false) {
             }
         }
 
-        // 3. Fetch latest commit metadata from main branch
+        // 3. Fetch latest commit metadata from v2.0-headless / main branch
         try {
-            const commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/main", {
+            let commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/v2.0-headless", {
                 headers: { "Accept": "application/vnd.github.v3+json" }
-            });
-            if (commitRes.ok) {
+            }).catch(() => null);
+            if (!commitRes || !commitRes.ok) {
+                commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/main", {
+                    headers: { "Accept": "application/vnd.github.v3+json" }
+                });
+            }
+            if (commitRes && commitRes.ok) {
                 const commitData = await commitRes.json();
                 if (commitData) {
                     result.commitSha = (commitData.sha || "").substring(0, 7);
@@ -579,6 +896,16 @@ function setupAlarms() {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
     await hydrateState();
+
+    if (alarm.name === "autoGetTokenCleanupAlarm") {
+        if (autoGetTokenWindow !== 0) {
+            chrome.windows.remove(autoGetTokenWindow).catch(() => {});
+            autoGetTokenWindow = 0;
+            await chrome.storage.local.set({ autoGetTokenWindow: 0 }).catch(() => {});
+        }
+        return;
+    }
+
     if (!extEnabled) return;
 
     if (alarm.name === "watchdogAlarm") {
@@ -596,6 +923,24 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     }
 });
 
+if (typeof chrome !== "undefined" && chrome.storage?.onChanged?.addListener) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName && areaName !== "local") return;
+        if (!changes || typeof changes !== "object") return;
+        if (changes.settings && changes.settings.newValue && typeof changes.settings.newValue === "object") {
+            settings = { ...settings, ...changes.settings.newValue };
+            updateBadgeUI();
+        }
+        if (changes.exEnabled !== undefined && typeof changes.exEnabled.newValue === "boolean") {
+            extEnabled = changes.exEnabled.newValue;
+            updateBadgeUI();
+        }
+        if (changes.autoDropGames && Array.isArray(changes.autoDropGames.newValue)) {
+            autoDropGames = changes.autoDropGames.newValue;
+        }
+    });
+}
+
 async function handleWatchdogTick() {
     if (!extEnabled) return;
     if (activeStream && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaign.status === "watching") {
@@ -603,6 +948,7 @@ async function handleWatchdogTick() {
         if (client) {
             // 1. Inventory Sync & Drop Claiming
             const inventory = await client.getInventory().catch(() => null);
+            await refreshSyntheticCampaignDetails(inventory).catch(() => {});
             if (inventory) {
                 // Check if the current campaign has closed/expired
                 const now = getTwitchNow();
@@ -691,112 +1037,154 @@ async function handleWatchdogTick() {
                         return;
                     }
                 }
+            }
 
-                // If currently active campaign finished all its drops/ended, advance to next farmable sibling campaign
-                const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
-                const nowWatchdog = getTwitchNow();
-                if (curCamp && !isCampaignFarmable(curCamp, nowWatchdog)) {
-                    const nextFarmableIdx = activeStream.campaigns.findIndex(c => isCampaignFarmable(c, nowWatchdog));
-                    if (nextFarmableIdx !== -1 && nextFarmableIdx !== (activeStream.campaign.onCamp || 0)) {
-                        console.log(`[Watchdog] Current campaign ${curCamp.id} drops completed/ended. Advancing to sibling campaign index ${nextFarmableIdx} (${activeStream.campaigns[nextFarmableIdx].id}).`);
-                        activeStream.campaign.onCamp = nextFarmableIdx;
-                        activeStream.campaign.requiredStreamers = activeStream.campaigns[nextFarmableIdx].streamers || [];
-                        await saveState();
-                        await runCampaign(true);
-                        return;
-                    }
-                }
-
-                // Check if stream tab is still open and alive
-                if (curWindow.id !== 0) {
-                    const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
-                    if (!tab) {
-                        curWindow.id = 0;
-                        await saveState();
-                        await runCampaign();
-                        return;
-                    }
-                } else if (activeStream.campaign && activeStream.campaign.status === "watching" && !activeStream.campaign.isCompleted) {
-                    await runCampaign();
+            // If currently active campaign finished all its drops/ended, advance to next farmable sibling campaign
+            const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
+            const nowWatchdog = getTwitchNow();
+            if (curCamp && !isCampaignFarmable(curCamp, nowWatchdog)) {
+                const nextFarmableIdx = activeStream.campaigns.findIndex(c => isCampaignFarmable(c, nowWatchdog));
+                if (nextFarmableIdx !== -1 && nextFarmableIdx !== (activeStream.campaign.onCamp || 0)) {
+                    console.log(`[Watchdog] Current campaign ${curCamp.id} drops completed/ended. Advancing to sibling campaign index ${nextFarmableIdx} (${activeStream.campaigns[nextFarmableIdx].id}).`);
+                    activeStream.campaign.onCamp = nextFarmableIdx;
+                    activeStream.campaign.requiredStreamers = activeStream.campaigns[nextFarmableIdx].streamers || [];
+                    await saveState();
+                    await runCampaign(true);
                     return;
                 }
+            }
 
-                // Check if currently watched streamer went offline or changed game category
-                if (activeStream.campaign && activeStream.campaign.status === "watching" && activeStream.campaign.curWatching) {
-                    const meta = await client.getStreamMetadata(activeStream.campaign.curWatching).catch(() => null);
-                    const isOffline = !meta || !meta.game;
-                    const targetGame = activeStream.campaign.game?.name || "";
-                    
-                    let gameChanged = false;
-                    if (meta?.game && targetGame) {
-                        gameChanged = !areGameNamesMatching(meta.game, targetGame);
-                    }
-
-                    if (isOffline || gameChanged) {
-                        activeStream.campaign.consecutiveOfflineChecks = (activeStream.campaign.consecutiveOfflineChecks || 0) + 1;
-                        if (activeStream.campaign.consecutiveOfflineChecks >= 2) {
-                            console.log(`Streamer ${activeStream.campaign.curWatching} is confirmed ${isOffline ? "offline" : "playing " + meta.game + " instead of " + targetGame}. Rotating channel.`);
-                            activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
-                            if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
-                                activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
-                            }
-                            activeStream.campaign.consecutiveOfflineChecks = 0;
+            // IF/OR Requirement Promotion:
+            // If we are currently farming a fallback requirement (e.g. open category streamer because ow_esports was offline),
+            // check if a higher-priority restricted campaign's required channel (or curCamp's featured channels) just went LIVE!
+            const curIdx = activeStream.campaign?.onCamp || 0;
+            if (activeStream.campaign?.requirementType === "fallback_open" && curCamp && Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0) {
+                const livePreferredStreamer = await client.getLiveBroadcasterForCampaign(
+                    activeStream.campaign.game?.name,
+                    curCamp.id,
+                    activeStream.campaign.slug,
+                    curCamp.streamers,
+                    activeStream.campaign.skippedStreamers || []
+                ).catch(() => null);
+                if (livePreferredStreamer && livePreferredStreamer.toLowerCase() !== (activeStream.campaign.curWatching || "").toLowerCase()) {
+                    console.log(`[RequirementSwitch] Featured required channel @${livePreferredStreamer} (${curCamp.id}) is now LIVE! Switching from directory fallback.`);
+                    await runCampaign(true);
+                    return;
+                }
+            }
+            if (curIdx > 0 && Array.isArray(activeStream.campaigns)) {
+                for (let pIdx = 0; pIdx < curIdx; pIdx++) {
+                    const priorityCamp = activeStream.campaigns[pIdx];
+                    if (priorityCamp && isCampaignFarmable(priorityCamp, nowWatchdog) && Array.isArray(priorityCamp.streamers) && priorityCamp.streamers.length > 0) {
+                        const livePriorityStreamer = await client.getLiveBroadcasterForCampaign(
+                            activeStream.campaign.game?.name,
+                            priorityCamp.id,
+                            activeStream.campaign.slug,
+                            priorityCamp.streamers,
+                            activeStream.campaign.skippedStreamers || []
+                        ).catch(() => null);
+                        if (livePriorityStreamer) {
+                            console.log(`[RequirementSwitch] Higher-priority required channel @${livePriorityStreamer} (${priorityCamp.id}) is now LIVE! Switching from fallback.`);
+                            activeStream.campaign.onCamp = pIdx;
+                            activeStream.campaign.requiredStreamers = priorityCamp.streamers || [];
+                            await saveState();
                             await runCampaign(true);
                             return;
-                        } else {
-                            console.log(`Streamer ${activeStream.campaign.curWatching} appears ${isOffline ? "offline" : "in different category"} (check 1/2). Re-verifying next tick before rotating.`);
-                        }
-                    } else {
-                        activeStream.campaign.consecutiveOfflineChecks = 0;
-                    }
-                }
-
-                // 2. Stream Stall Watchdog (6-minute threshold to accommodate ad breaks)
-                if (settings.autoRefresh !== false && activeStream.campaign) {
-                    const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
-                    const currentMinutes = curCamp ? (curCamp.minutesWatched || 0) : 0;
-                    const now = Date.now();
-
-                    if (activeStream.campaign.lastMinutesWatched === undefined || activeStream.campaign.lastProgressTimestamp === undefined) {
-                        activeStream.campaign.lastMinutesWatched = currentMinutes;
-                        activeStream.campaign.lastProgressTimestamp = now;
-                        activeStream.campaign.stallCount = 0;
-                    } else if (currentMinutes > activeStream.campaign.lastMinutesWatched) {
-                        // Progress successfully advanced! Reset stall timer & counter
-                        activeStream.campaign.lastMinutesWatched = currentMinutes;
-                        activeStream.campaign.lastProgressTimestamp = now;
-                        activeStream.campaign.stallCount = 0;
-                    } else {
-                        // Progress has stalled for >6 minutes
-                        const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
-                        const stallThresholdMs = 6 * 60 * 1000;
-
-                        if (elapsedMs >= stallThresholdMs) {
-                            activeStream.campaign.stallCount = (activeStream.campaign.stallCount || 0) + 1;
-                            activeStream.campaign.lastProgressTimestamp = now;
-
-                            if (activeStream.campaign.stallCount === 1) {
-                                console.log(`Stream stall detected for ${activeStream.campaign.curWatching} (0m gained in 6m). Reloading stream tab.`);
-                                if (curWindow.id !== 0) {
-                                    chrome.tabs.reload(curWindow.id).catch(() => {});
-                                }
-                            } else if (activeStream.campaign.stallCount >= 2) {
-                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 12m). Rotating to next channel.`);
-                                activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
-                                if (activeStream.campaign.curWatching && !activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
-                                    activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
-                                }
-                                activeStream.campaign.stallCount = 0;
-                                await runCampaign(true);
-                                return;
-                            }
                         }
                     }
                 }
-
-                await saveState();
-                chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
             }
+
+            // Ensure headless watch loop is running and verify currently watched streamer
+            startHeadlessWatchLoop();
+
+            // Check if currently watched streamer went offline or changed game category
+            if (activeStream.campaign && activeStream.campaign.status === "watching" && activeStream.campaign.curWatching) {
+                const meta = await client.getStreamMetadata(activeStream.campaign.curWatching).catch(() => null);
+                const isOffline = !meta || (!meta.broadcastId && !meta.game);
+                const targetGame = activeStream.campaign.game?.name || "";
+                
+                let gameChanged = false;
+                if (meta?.game && targetGame) {
+                    gameChanged = !areGameNamesMatching(meta.game, targetGame);
+                }
+
+                if (isOffline || gameChanged) {
+                    activeStream.campaign.consecutiveOfflineChecks = (activeStream.campaign.consecutiveOfflineChecks || 0) + 1;
+                    if (activeStream.campaign.consecutiveOfflineChecks >= 2) {
+                        console.log(`Streamer ${activeStream.campaign.curWatching} is confirmed ${isOffline ? "offline" : "playing " + meta.game + " instead of " + targetGame}. Rotating channel.`);
+                        activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                        if (!activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
+                            activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                        }
+                        activeStream.campaign.consecutiveOfflineChecks = 0;
+                        await runCampaign(true);
+                        return;
+                    } else {
+                        console.log(`Streamer ${activeStream.campaign.curWatching} appears ${isOffline ? "offline" : "in different category"} (check 1/2). Re-verifying next tick before rotating.`);
+                    }
+                } else {
+                    activeStream.campaign.consecutiveOfflineChecks = 0;
+                    await performHeadlessWatch(meta);
+                }
+            } else if (activeStream.campaign && (activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
+                console.log(`[Watchdog] Active campaign for ${activeStream.campaign.game?.name} has no active stream (${activeStream.campaign.status}). Retrying streamer search...`);
+                await runCampaign(true);
+                return;
+            }
+
+            // 2. Stream Stall Watchdog (6-minute threshold)
+            if (settings.autoRefresh !== false && activeStream.campaign) {
+                const curCamp = activeStream.campaigns ? activeStream.campaigns[activeStream.campaign.onCamp || 0] : null;
+                const currentMinutes = curCamp ? (curCamp.minutesWatched || 0) : 0;
+                const now = Date.now();
+
+                if (activeStream.campaign.lastMinutesWatched === undefined || activeStream.campaign.lastProgressTimestamp === undefined) {
+                    activeStream.campaign.lastMinutesWatched = currentMinutes;
+                    activeStream.campaign.lastProgressTimestamp = now;
+                    activeStream.campaign.stallCount = 0;
+                } else if (currentMinutes > activeStream.campaign.lastMinutesWatched) {
+                    // Progress successfully advanced! Reset stall timer & counter
+                    activeStream.campaign.lastMinutesWatched = currentMinutes;
+                    activeStream.campaign.lastProgressTimestamp = now;
+                    activeStream.campaign.stallCount = 0;
+                    if (curCamp) curCamp.strictAllowlistOnly = false;
+                } else {
+                    // Progress has stalled for >6 minutes
+                    const elapsedMs = now - activeStream.campaign.lastProgressTimestamp;
+                    const stallThresholdMs = 6 * 60 * 1000;
+
+                    if (elapsedMs >= stallThresholdMs) {
+                        activeStream.campaign.stallCount = (activeStream.campaign.stallCount || 0) + 1;
+                        activeStream.campaign.lastProgressTimestamp = now;
+
+                        if (activeStream.campaign.stallCount === 1) {
+                            console.log(`Headless watch stall detected for ${activeStream.campaign.curWatching} (0m gained in 6m). Resetting HLS token & re-pulsing.`);
+                            if (client && client._streamUrlCache && activeStream.campaign.curWatching) {
+                                client._streamUrlCache.delete(activeStream.campaign.curWatching.toLowerCase());
+                            }
+                            await performHeadlessWatch();
+                        } else if (activeStream.campaign.stallCount >= 2) {
+                            if (activeStream.campaign.requirementType === "fallback_open" && curCamp && Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0) {
+                                console.log(`[DirectoryFallback] Open category streamer @${activeStream.campaign.curWatching} yielded 0m in 12m. Campaign ${curCamp.id} strictly requires allowlisted channels (${curCamp.streamers.slice(0, 3).join(", ")}). Disabling category fallback.`);
+                                curCamp.strictAllowlistOnly = true;
+                            } else {
+                                console.log(`Persistent stall detected for ${activeStream.campaign.curWatching} (0m gained in 12m). Rotating to next channel.`);
+                            }
+                            activeStream.campaign.skippedStreamers = activeStream.campaign.skippedStreamers || [];
+                            if (activeStream.campaign.curWatching && !activeStream.campaign.skippedStreamers.includes(activeStream.campaign.curWatching)) {
+                                activeStream.campaign.skippedStreamers.push(activeStream.campaign.curWatching);
+                            }
+                            activeStream.campaign.stallCount = 0;
+                            await runCampaign(true);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            await saveState();
+            chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
         }
     }
 }
@@ -813,13 +1201,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             extEnabled = Boolean(message.data);
             await chrome.storage.local.set({ exEnabled: extEnabled });
             if (extEnabled) {
-                enableAutoplayForTwitch();
                 await fetchTwitchCookiesAndInitClient();
                 setupAlarms();
                 setTimeout(checkForDrops, 1500);
             } else {
                 chrome.alarms.clearAll();
-                if (activeStream.campaign !== "none" && curWindow.id !== 0) {
+                stopHeadlessWatchLoop();
+                if (activeStream.campaign !== "none") {
                     await endCampaign();
                 }
                 activeStream = { campaign: "none" };
@@ -836,19 +1224,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         switch (message.type) {
-            case "clientInfo":
-                if (message.data && message.data.oauthToken) {
-                    if (client === null) client = new Client(message.data);
-                    else client.updateUserInfo(message.data);
-                    await chrome.storage.local.set({
-                        oauthToken: message.data.oauthToken,
-                        deviceId: message.data.deviceId,
-                        userId: message.data.userId,
-                        uuid: message.data.uuid
-                    });
+            case "user":
+            case "clientInfo": {
+                const info = (message.data && typeof message.data === "object") ? message.data : {};
+                const oauthToken = info.oauthToken || message.auth || null;
+                const deviceId = info.deviceId || message.uniq || null;
+                const clientId = info.clientId || message.id || "kimne78kx3ncx6brgo4mv6wki5h1ko";
+                const userId = info.userId || null;
+                const uuid = info.uuid || null;
+                if (oauthToken || deviceId) {
+                    const normalizedInfo = {
+                        ...info,
+                        clientId,
+                        ...(oauthToken ? { oauthToken } : {}),
+                        ...(deviceId ? { deviceId } : {}),
+                        ...(userId ? { userId } : {}),
+                        ...(uuid ? { uuid } : {})
+                    };
+                    if (client === null) client = new Client(normalizedInfo);
+                    else client.updateUserInfo(normalizedInfo);
+                    const toStore = {};
+                    if (oauthToken) toStore.oauthToken = oauthToken;
+                    if (deviceId) toStore.deviceId = deviceId;
+                    if (userId) toStore.userId = userId;
+                    if (uuid) toStore.uuid = uuid;
+                    if (Object.keys(toStore).length > 0) {
+                        await chrome.storage.local.set(toStore);
+                    }
                 }
                 sendResponse({ success: true });
                 break;
+            }
 
             case "sendInteg":
                 if (client === null) {
@@ -862,6 +1268,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     autoGetTokenWindow = 0;
                     await chrome.storage.local.set({ autoGetTokenWindow: 0 }).catch(() => {});
                 }
+                if (chrome.alarms && typeof chrome.alarms.clear === "function") {
+                    chrome.alarms.clear("autoGetTokenCleanupAlarm").catch(() => {});
+                }
+                refreshSyntheticCampaignDetails().catch(() => {});
                 sendResponse({ success: true });
                 break;
 
@@ -876,6 +1286,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const session = payload?.currentUser?.dropCurrentSession;
                         if (session && session.currentDrop) {
                             currentDrop = session.currentDrop;
+                        } else if (session && (session.dropID || session.currentMinutesWatched !== undefined)) {
+                            currentDrop = {
+                                ...session,
+                                id: session.dropID || session.id
+                            };
                         }
                     } else if (opName === "Inventory") {
                         const inProg = payload?.currentUser?.inventory?.dropCampaignsInProgress || [];
@@ -1042,6 +1457,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "claim-points":
+                if (!extEnabled || settings.autoClaimPoints === false) {
+                    sendResponse({ success: false, disabled: true });
+                    break;
+                }
                 await fetchTwitchCookiesAndInitClient();
                 if (client && message.data) {
                     try {
@@ -1066,6 +1485,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "points-earned":
+                if (!extEnabled || settings.autoClaimPoints === false) {
+                    sendResponse({ success: false, disabled: true });
+                    break;
+                }
                 if (message.data) {
                     const earned = message.data.points || 50;
                     const src = message.data.source || "generic";
@@ -1081,6 +1504,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "claim-drop":
+                if (!extEnabled) {
+                    sendResponse({ success: false, disabled: true });
+                    break;
+                }
                 await fetchTwitchCookiesAndInitClient();
                 if (client) {
                     await checkClaimDrop();
@@ -1157,9 +1584,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             case "p:startCampaign":
                 try {
                     if (message.data.campaign === "none") {
-                        if (activeStream.campaign !== "none" && curWindow.id !== 0) {
-                            await endCampaign();
-                        }
+                        await endCampaign();
                         activeStream = { campaign: "none" };
                         await saveState();
                         chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
@@ -1183,20 +1608,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 if (client) {
                     try {
                         currentInventory = await client.getInventory().catch(() => null);
-                        if (currentInventory && activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns) {
-                            const isDone = syncCampaignProgressWithInventory(currentInventory);
-                            if (isDone && activeStream.campaign) {
-                                const nowTs = getTwitchNow();
-                                const allDone = activeStream.campaigns.every(c => {
-                                    return (c.items && c.items.length > 0)
-                                        ? c.items.every(i => (i.self && i.self.isClaimed) || (i.endsAt && i.endsAt <= nowTs) || i.isEnded || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
-                                        : c.minutesWatched >= c.minutesNeeded;
-                                });
-                                if (allDone) {
-                                    activeStream.campaign.isCompleted = true;
-                                    activeStream.campaign.curWatching = null;
+                        await refreshSyntheticCampaignDetails(currentInventory).catch(() => {});
+                        if (activeStream.campaign && activeStream.campaign !== "none" && activeStream.campaigns) {
+                            if (currentInventory) {
+                                const isDone = syncCampaignProgressWithInventory(currentInventory);
+                                if (isDone && activeStream.campaign) {
+                                    const nowTs = getTwitchNow();
+                                    const allDone = activeStream.campaigns.every(c => {
+                                        return (c.items && c.items.length > 0)
+                                            ? c.items.every(i => (i.self && i.self.isClaimed) || (i.endsAt && i.endsAt <= nowTs) || i.isEnded || (i.self && i.self.currentMinutesWatched >= (i.reqTime || 60)))
+                                            : c.minutesWatched >= c.minutesNeeded;
+                                    });
+                                    if (allDone) {
+                                        activeStream.campaign.isCompleted = true;
+                                        activeStream.campaign.curWatching = null;
+                                    }
                                 }
                                 await saveState();
+                                updateBadgeUI();
+                            }
+                            if (activeStream.campaign?.status === "watching" && activeStream.campaign.curWatching) {
+                                const session = await client.getCurrentDropSession(
+                                    activeStream.campaign.streamMeta?.channelId || "",
+                                    activeStream.campaign.curWatching
+                                ).catch(() => null);
+                                if (session && applyDropSessionProgress(session)) {
+                                    await saveState();
+                                    updateBadgeUI();
+                                }
+                            }
+                            if (extEnabled && activeStream.campaign && (activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
+                                await runCampaign(true).catch(() => {});
                             }
                         }
                     } catch (err) {}
@@ -1224,99 +1666,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case "p:reloadStream":
-                if (curWindow.id !== 0) {
-                    chrome.tabs.reload(curWindow.id).catch(() => {});
-                } else {
-                    const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-                    if (tabs && tabs.length > 0) {
-                        chrome.tabs.reload(tabs[0].id).catch(() => {});
-                    }
+                if (client && client._streamUrlCache && activeStream?.campaign?.curWatching) {
+                    client._streamUrlCache.delete(activeStream.campaign.curWatching.toLowerCase());
                 }
+                await performHeadlessWatch();
                 sendResponse({ success: true });
                 break;
 
             case "p:focusStreamTab":
             case "p:focusFarmTab":
-                if (curWindow.id !== 0) {
-                    const tab = await chrome.tabs.get(curWindow.id).catch(() => null);
-                    if (tab) {
-                        await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
-                        if (tab.windowId) {
-                            await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-                        }
-                    }
+                if (activeStream?.campaign?.curWatching) {
+                    const channelUrl = `https://www.twitch.tv/${encodeURIComponent(activeStream.campaign.curWatching)}`;
+                    await chrome.tabs.create({ url: channelUrl, active: true }).catch(() => {});
                 } else {
-                    const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-                    if (tabs && tabs.length > 0) {
-                        await chrome.tabs.update(tabs[0].id, { active: true }).catch(() => {});
-                        if (tabs[0].windowId) {
-                            await chrome.windows.update(tabs[0].windowId, { focused: true }).catch(() => {});
-                        }
-                    }
+                    await chrome.tabs.create({ url: "https://www.twitch.tv/drops/inventory", active: true }).catch(() => {});
                 }
                 sendResponse({ success: true });
-                break;
-
-            case "p:toggleTabAudio":
-                let targetTabId = curWindow.id;
-                if (targetTabId === 0) {
-                    const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-                    if (tabs && tabs.length > 0) {
-                        targetTabId = tabs[0].id;
-                        curWindow.id = targetTabId;
-                        await saveState();
-                    }
-                }
-                if (targetTabId !== 0) {
-                    try {
-                        const tab = await chrome.tabs.get(targetTabId).catch(() => null);
-                        if (tab) {
-                            const currentlyMuted = Boolean(tab.mutedInfo && tab.mutedInfo.muted);
-                            const newMuted = !currentlyMuted;
-                            await chrome.tabs.update(targetTabId, { muted: newMuted }).catch(() => {});
-                            chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: newMuted }).catch(() => {});
-                            sendResponse({ success: true, muted: newMuted });
-                            return;
-                        }
-                    } catch (e) {}
-                }
-                sendResponse({ success: false });
-                break;
-
-            case "p:getTabAudioState":
-                let checkTabId = curWindow.id;
-                if (checkTabId === 0) {
-                    const tabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*" }).catch(() => []);
-                    if (tabs && tabs.length > 0) {
-                        checkTabId = tabs[0].id;
-                        curWindow.id = checkTabId;
-                        await saveState();
-                    }
-                }
-                if (checkTabId !== 0) {
-                    try {
-                        const tab = await chrome.tabs.get(checkTabId).catch(() => null);
-                        if (tab && tab.mutedInfo) {
-                            sendResponse({ muted: tab.mutedInfo.muted });
-                            return;
-                        }
-                    } catch (e) {}
-                }
-                sendResponse({ muted: true });
                 break;
 
             case "p:settingsChanged":
                 settings = { ...settings, ...message.data.settings };
                 await saveState();
-                if (curWindow.id !== 0) {
-                    if (settings.autoMute) {
-                        chrome.tabs.update(curWindow.id, { muted: true }).catch(() => {});
-                        chrome.tabs.sendMessage(curWindow.id, { type: "setTabAudio", muted: true }).catch(() => {});
-                    } else if (settings.autoMute === false) {
-                        chrome.tabs.update(curWindow.id, { muted: false }).catch(() => {});
-                        chrome.tabs.sendMessage(curWindow.id, { type: "setTabAudio", muted: false }).catch(() => {});
-                    }
-                }
+                updateBadgeUI();
                 sendResponse({ success: true, settings });
                 break;
 
@@ -1416,23 +1787,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({ success: true });
                 break;
 
-            case "streamPlaybackStarted":
-                if (pendingPlaybackHandshake && curWindow.id !== 0) {
-                    const { targetTabId } = pendingPlaybackHandshake;
-                    pendingPlaybackHandshake = null;
-                    if (settings.autoMute !== false && targetTabId) {
-                        chrome.tabs.update(targetTabId, { muted: true }).catch(() => {});
-                        chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: true }).catch(() => {});
-                    } else if (targetTabId) {
-                        chrome.tabs.update(targetTabId, { muted: false }).catch(() => {});
-                        chrome.tabs.sendMessage(targetTabId, { type: "setTabAudio", muted: false }).catch(() => {});
-                    }
-                    sendResponse({ success: true });
-                    return;
-                }
-                sendResponse({ success: false });
-                break;
-
             case "p:checkUpdate":
                 const updateRes = await checkGitHubUpdate(true);
                 sendResponse(updateRes);
@@ -1451,64 +1805,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
 });
 
-// --- Tab Watchdog ---
-
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-    await hydrateState();
-    if (activeStream.campaign !== "none" && extEnabled) {
-        if (tabId === curWindow.id) {
-            curWindow.id = 0;
-            curWindow.windowId = 0;
-            curWindow.type = "none";
-            await saveState();
-
-            if (!activeStream.campaign || activeStream.campaign.reOpening || activeStream.campaign.isCompleted) {
-                return;
-            }
-
-            setTimeout(async () => {
-                await hydrateState();
-                if (activeStream.campaign !== "none" && !activeStream.campaign.isCompleted && extEnabled && curWindow.id === 0) {
-                    await runCampaign();
-                }
-            }, 2500);
-        }
-    }
-});
-
-if (typeof chrome !== "undefined" && chrome.windows && chrome.windows.onRemoved) {
-    chrome.windows.onRemoved.addListener(async (windowId) => {
-        await hydrateState();
-        if (curWindow.windowId && windowId === curWindow.windowId) {
-            curWindow.id = 0;
-            curWindow.windowId = 0;
-            curWindow.type = "none";
-            await saveState();
-
-            if (!activeStream.campaign || activeStream.campaign.reOpening || activeStream.campaign.isCompleted) {
-                return;
-            }
-
-            setTimeout(async () => {
-                await hydrateState();
-                if (activeStream.campaign !== "none" && !activeStream.campaign.isCompleted && extEnabled && curWindow.id === 0) {
-                    await runCampaign();
-                }
-            }, 2500);
-        }
-    });
-}
-
 chrome.runtime.onStartup.addListener(startup);
 chrome.runtime.onInstalled.addListener(startup);
 
 async function startup() {
-    enableAutoplayForTwitch();
     await hydrateState();
     setupAlarms();
     updateBadgeUI();
 
     if (extEnabled) {
+        if (activeStream?.campaign && activeStream.campaign !== "none") {
+            if (activeStream.campaign.status === "watching" && activeStream.campaign.curWatching) {
+                startHeadlessWatchLoop();
+                performHeadlessWatch().catch(() => {});
+            } else if ((activeStream.campaign.status === "nostream" || !activeStream.campaign.curWatching) && !activeStream.campaign.isCompleted && activeStream.campaign.status !== "no_active_drops") {
+                setTimeout(() => runCampaign(true).catch(() => {}), 1500);
+            }
+        }
         setTimeout(autoGetToken, 3000);
         setTimeout(checkForDrops, 4000);
         if (settings.autoCheckUpdates !== false) {
@@ -1581,9 +1894,14 @@ async function runCampaign(forceNextStreamer = false) {
         );
     }
 
-    // MULTI-CAMPAIGN FAILOVER:
-    // If no live streamer was found for the primary campaign (e.g. required channels offline),
-    // check if sibling campaigns in activeStream.campaigns are farmable and have live broadcasters
+    // IF/OR MULTI-CAMPAIGN REQUIREMENT FAILOVER:
+    // If the primary requirement (e.g. restricted channel like ow_esports) is not met because those channels are offline,
+    // immediately switch to the next farmable campaign requirement (e.g. open category streamer) so view time continues uninterrupted.
+    let offlineRestrictedStreamers = [];
+    if (!targetStreamer && Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0) {
+        offlineRestrictedStreamers = [...curCamp.streamers];
+    }
+
     if (!targetStreamer && activeStream.campaigns.length > 1) {
         for (let i = 0; i < activeStream.campaigns.length; i++) {
             if (i === activeStream.campaign.onCamp) continue;
@@ -1609,13 +1927,45 @@ async function runCampaign(forceNextStreamer = false) {
             }
 
             if (siblingStreamer) {
-                console.log(`[CampaignFailover] Primary campaign ${curCamp.id} streamers offline. Failing over to sibling campaign ${siblingCamp.id} streamer @${siblingStreamer}`);
+                console.log(`[CampaignFailover] Primary campaign ${curCamp.id} requirement not met (streamers offline). Switching to sibling campaign ${siblingCamp.id} streamer @${siblingStreamer}`);
                 activeStream.campaign.onCamp = i;
                 curCamp = siblingCamp;
                 targetStreamer = siblingStreamer;
                 activeStream.campaign.requiredStreamers = curCamp.streamers || [];
                 break;
+            } else if (Array.isArray(siblingCamp.streamers) && siblingCamp.streamers.length > 0 && offlineRestrictedStreamers.length === 0) {
+                offlineRestrictedStreamers = [...siblingCamp.streamers];
             }
+        }
+    }
+
+    // SINGLE-CAMPAIGN / DIRECTORY FALLBACK (IF/OR):
+    // Many Twitch campaigns (e.g. Overwatch 2 "go to a participating live channel (?filter=drops) including /ow_esports and /ow_esports_jp")
+    // populate allow.channels with featured channels even though any Drops-enabled stream in the game directory counts.
+    // If all listed channels are offline, fall back to any live Drops-enabled broadcaster in the category directory!
+    let usedOpenDirectoryFallback = false;
+    if (!targetStreamer && offlineRestrictedStreamers.length > 0 && !curCamp.strictAllowlistOnly && typeof client.getChannelWithDrops === "function") {
+        let dirChannel = await client.getChannelWithDrops(
+            activeStream.campaign.game.name,
+            curCamp.id,
+            activeStream.campaign.slug,
+            skipped
+        ).catch(() => null);
+
+        if (!dirChannel && skipped.length > 0) {
+            activeStream.campaign.skippedStreamers = [];
+            dirChannel = await client.getChannelWithDrops(
+                activeStream.campaign.game.name,
+                curCamp.id,
+                activeStream.campaign.slug,
+                []
+            ).catch(() => null);
+        }
+
+        if (dirChannel && dirChannel.broadcaster && dirChannel.broadcaster.login) {
+            targetStreamer = dirChannel.broadcaster.login;
+            usedOpenDirectoryFallback = true;
+            console.log(`[DirectoryFallback] Listed channels (${offlineRestrictedStreamers.slice(0, 3).join(", ")}) are offline. Falling back to participating live category channel @${targetStreamer}`);
         }
     }
 
@@ -1638,6 +1988,7 @@ async function runCampaign(forceNextStreamer = false) {
         activeStream.campaign.status = "nostream";
         const anyFarmableOpen = activeStream.campaigns.some(c => isCampaignFarmable(c, nowTs) && (!c.streamers || c.streamers.length === 0));
         activeStream.campaign.requiredStreamers = anyFarmableOpen ? [] : (curCamp.streamers || []);
+        activeStream.campaign.requirementType = anyFarmableOpen ? "open" : "restricted";
         await saveState();
         chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
         updateBadgeUI();
@@ -1645,18 +1996,27 @@ async function runCampaign(forceNextStreamer = false) {
     }
 
     activeStream.campaign.curWatching = targetStreamer;
-    const streamUrl = `https://www.twitch.tv/${targetStreamer}#atd-managed=1`;
-
-    enableAutoplayForTwitch();
+    const isRestrictedActive = Array.isArray(curCamp.streamers) && curCamp.streamers.length > 0 && !usedOpenDirectoryFallback;
+    if (isRestrictedActive) {
+        activeStream.campaign.requirementType = "restricted";
+        activeStream.campaign.fallbackFromStreamers = [];
+    } else if (offlineRestrictedStreamers.length > 0) {
+        activeStream.campaign.requirementType = "fallback_open";
+        activeStream.campaign.fallbackFromStreamers = offlineRestrictedStreamers;
+    } else {
+        activeStream.campaign.requirementType = "open";
+        activeStream.campaign.fallbackFromStreamers = [];
+    }
 
     // Reset progress tracking & stall counts for new/re-targeted streamer
     activeStream.campaign.lastMinutesWatched = curCamp.minutesWatched || 0;
     activeStream.campaign.lastProgressTimestamp = Date.now();
     activeStream.campaign.stallCount = 0;
-
-    await windowManager("open", { url: streamUrl });
-
     activeStream.campaign.status = "watching";
+
+    startHeadlessWatchLoop();
+    performHeadlessWatch().catch(() => {});
+
     await saveState();
     chrome.runtime.sendMessage({ type: "p:sendCurrentDrops", data: { activeStream } }).catch(() => {});
     updateBadgeUI();
@@ -1764,7 +2124,7 @@ async function createCampaign(game, isManual = false) {
                 }
             }
             const streams = [];
-            if (dropCamp.allow && dropCamp.allow.channels) {
+            if (dropCamp.allow && dropCamp.allow.isEnabled !== false && Array.isArray(dropCamp.allow.channels)) {
                 for (const stream of dropCamp.allow.channels) {
                     if (stream && stream.name) streams.push(stream.name);
                 }
@@ -1871,6 +2231,7 @@ async function createCampaign(game, isManual = false) {
             activeStream.campaigns.push({
                 game: dropCamp.game ? (dropCamp.game.displayName || dropCamp.game.name) : game,
                 id: dropCamp.id,
+                name: dropCamp.name || "",
                 endsAt: dropCamp.endAt ? new Date(dropCamp.endAt).getTime() : (earliestEndsAt || null),
                 startAt: dropCamp.startAt || null,
                 endAt: dropCamp.endAt || null,
@@ -1948,9 +2309,10 @@ async function createCampaign(game, isManual = false) {
     }
 
     if (activeStream.campaigns.length > 0) {
-        // Multi-campaign prioritization:
+        // Multi-campaign IF/OR prioritization:
         // 1. Prioritize farmable campaigns over ended/completed campaigns
-        // 2. Prioritize open-streamer campaigns (streamers.length === 0) over restricted streamer campaigns
+        // 2. Prioritize restricted-channel campaigns (e.g. ow_esports) first so we check if they are live;
+        //    if they are offline, runCampaign() automatically fails over (IF/OR) to the open-streamer campaign!
         // 3. Prioritize earlier ending campaigns so soonest-to-expire drops are farmed first
         activeStream.campaigns.sort((a, b) => {
             const aFarmable = isCampaignFarmable(a, now);
@@ -1958,10 +2320,10 @@ async function createCampaign(game, isManual = false) {
             if (aFarmable !== bFarmable) {
                 return aFarmable ? -1 : 1;
             }
-            const aOpen = (!a.streamers || a.streamers.length === 0);
-            const bOpen = (!b.streamers || b.streamers.length === 0);
-            if (aOpen !== bOpen) {
-                return aOpen ? -1 : 1;
+            const aRestricted = Array.isArray(a.streamers) && a.streamers.length > 0;
+            const bRestricted = Array.isArray(b.streamers) && b.streamers.length > 0;
+            if (aRestricted !== bRestricted) {
+                return aRestricted ? -1 : 1;
             }
             const aEnd = a.endsAt || Infinity;
             const bEnd = b.endsAt || Infinity;
@@ -2247,13 +2609,19 @@ async function checkClaimDrop() {
     }
 }
 
-function autoGetToken() {
+function autoGetToken(force = false) {
     if (settings.autoGetToken === true && autoGetTokenWindow === 0) {
-        if (!client || !client.integrity || client.integrity.expiration - 960000 < Date.now()) {
+        const integExp = (client && client.integrity)
+            ? (typeof client.integrity === "object" ? client.integrity.expiration : client.integrityExpiration)
+            : null;
+        if (force || !client || !client.integrity || (integExp && integExp - 960000 < Date.now())) {
             chrome.windows.create({ focused: false, type: "popup", url: "https://www.twitch.tv/drops/inventory/" }).then(async (window) => {
                 if (window) {
                     autoGetTokenWindow = window.id;
                     await chrome.storage.local.set({ autoGetTokenWindow });
+                    if (chrome.alarms && typeof chrome.alarms.create === "function") {
+                        chrome.alarms.create("autoGetTokenCleanupAlarm", { delayInMinutes: 1 });
+                    }
                     // 60-second failsafe: close window if Twitch stalls or integrity token isn't intercepted
                     setTimeout(() => {
                         if (autoGetTokenWindow !== 0 && autoGetTokenWindow === window.id) {
@@ -2277,154 +2645,9 @@ if (typeof chrome !== "undefined" && chrome.windows?.onRemoved?.addListener) {
     });
 }
 
-async function windowManager(func, data = {}) {
-    if (func === "open") {
-        let prevActiveTab = null;
-        try {
-            const currentTabs = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-            if (currentTabs && currentTabs.length > 0) {
-                prevActiveTab = currentTabs[0];
-            }
-        } catch (e) {}
-
-        const streamUrl = data.url || "https://www.twitch.tv";
-        const isPopout = settings.watchPopout !== false;
-        let targetTab = null;
-
-        if (isPopout && chrome.windows && chrome.windows.create) {
-            let existingWin = null;
-            if (curWindow.windowId) {
-                existingWin = await chrome.windows.get(curWindow.windowId, { populate: true }).catch(() => null);
-            }
-            if (existingWin && existingWin.tabs && existingWin.tabs.length > 0) {
-                targetTab = existingWin.tabs[0];
-                curWindow.id = targetTab.id;
-                curWindow.windowId = existingWin.id;
-                curWindow.type = "window";
-                if (streamUrl && targetTab.url !== streamUrl) {
-                    await chrome.tabs.update(targetTab.id, { url: streamUrl }).catch(() => {});
-                }
-                // Ensure popout window shows up on user screen (on stream swap) so user can interact to unmute
-                await chrome.windows.update(existingWin.id, {
-                    focused: true,
-                    state: "normal",
-                    drawAttention: true
-                }).catch(() => {});
-            } else {
-                const win = await chrome.windows.create({
-                    url: streamUrl,
-                    type: "popup",
-                    width: 854,
-                    height: 480,
-                    focused: true,
-                    state: "normal"
-                }).catch(() => null);
-
-                if (win) {
-                    targetTab = (win.tabs && win.tabs.length > 0) ? win.tabs[0] : null;
-                    if (!targetTab && win.id) {
-                        const winWithTabs = await chrome.windows.get(win.id, { populate: true }).catch(() => null);
-                        targetTab = winWithTabs?.tabs?.[0] || null;
-                    }
-                    curWindow.id = targetTab ? targetTab.id : 0;
-                    curWindow.windowId = win.id;
-                    curWindow.type = "window";
-                    // Ensure window is in front and ready on user's screen
-                    await chrome.windows.update(win.id, {
-                        focused: true,
-                        state: "normal",
-                        drawAttention: true
-                    }).catch(() => {});
-                }
-            }
-            await saveState();
-        } else {
-            const tabOptions = {
-                active: true,
-                ...data,
-                url: streamUrl
-            };
-
-            if (curWindow.id === 0) {
-                const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*#atd-managed=1" }).catch(() => []);
-                if (existingTabs && existingTabs.length > 0) {
-                    targetTab = existingTabs[0];
-                    curWindow.id = targetTab.id;
-                    curWindow.windowId = 0;
-                    curWindow.type = "tab";
-                    await saveState();
-                    if (targetTab.url !== tabOptions.url) {
-                        await chrome.tabs.update(targetTab.id, { url: tabOptions.url, active: true }).catch(() => {});
-                    } else {
-                        await chrome.tabs.update(targetTab.id, { active: true }).catch(() => {});
-                    }
-                } else {
-                    targetTab = await chrome.tabs.create(tabOptions);
-                    curWindow.id = targetTab.id;
-                    curWindow.windowId = 0;
-                    curWindow.type = "tab";
-                    await saveState();
-                }
-            } else {
-                targetTab = await chrome.tabs.get(curWindow.id).catch(() => null);
-                if (!targetTab) {
-                    const existingTabs = await chrome.tabs.query({ url: "*://*.twitch.tv/*#atd-managed=1" }).catch(() => []);
-                    if (existingTabs && existingTabs.length > 0) {
-                        targetTab = existingTabs[0];
-                        curWindow.id = targetTab.id;
-                        curWindow.windowId = 0;
-                        curWindow.type = "tab";
-                        await saveState();
-                    } else {
-                        targetTab = await chrome.tabs.create(tabOptions);
-                        curWindow.id = targetTab.id;
-                        curWindow.windowId = 0;
-                        curWindow.type = "tab";
-                        await saveState();
-                    }
-                }
-                if (tabOptions.url && targetTab.url !== tabOptions.url) {
-                    await chrome.tabs.update(curWindow.id, { url: tabOptions.url, active: true }).catch(() => {});
-                } else {
-                    await chrome.tabs.update(curWindow.id, { active: true }).catch(() => {});
-                }
-            }
-        }
-
-        // Store handshake state to apply audio settings once stream starts playing
-        pendingPlaybackHandshake = {
-            targetTabId: targetTab?.id,
-            prevActiveTabId: prevActiveTab?.id,
-            timestamp: Date.now()
-        };
-
-        // Fallback safety timer (1.2s) to apply mute / audio settings
-        if (targetTab && targetTab.id) {
-            setTimeout(async () => {
-                if (pendingPlaybackHandshake && pendingPlaybackHandshake.targetTabId === targetTab.id) {
-                    if (settings.autoMute !== false) {
-                        chrome.tabs.update(targetTab.id, { muted: true }).catch(() => {});
-                        chrome.tabs.sendMessage(targetTab.id, { type: "setTabAudio", muted: true }).catch(() => {});
-                    } else {
-                        chrome.tabs.update(targetTab.id, { muted: false }).catch(() => {});
-                        chrome.tabs.sendMessage(targetTab.id, { type: "setTabAudio", muted: false }).catch(() => {});
-                    }
-                    pendingPlaybackHandshake = null;
-                }
-            }, 1200);
-        }
-
-        return targetTab;
-    } else if (func === "close") {
-        if (curWindow.windowId) {
-            await chrome.windows.remove(curWindow.windowId).catch(() => {});
-        }
-        if (curWindow.id !== 0) {
-            await chrome.tabs.remove(curWindow.id).catch(() => {});
-        }
-        curWindow.id = 0;
-        curWindow.windowId = 0;
-        curWindow.type = "none";
+async function windowManager(func) {
+    if (func === "close") {
+        stopHeadlessWatchLoop();
         await saveState();
     }
 }
@@ -2437,7 +2660,9 @@ function updateBadgeUI() {
         let text = "";
         let color = "#9146FF";
 
-        if (!extEnabled) {
+        if (settings.setShowBadges === false) {
+            text = "";
+        } else if (!extEnabled) {
             text = "OFF";
             color = "#52525b";
         } else if (activeStream && activeStream.campaign && activeStream.campaign !== "none") {
@@ -2452,20 +2677,56 @@ function updateBadgeUI() {
                 text = "";
                 color = "#52525b";
             } else if (activeStream.campaigns && activeStream.campaigns.length > 0) {
-                const cur = activeStream.campaigns[camp.onCamp || 0] || activeStream.campaigns[0];
-                if (cur) {
-                    let left = 0;
-                    const nowMs = getTwitchNow();
-                    if (cur.items && cur.items.length > 0) {
-                        const nextItem = cur.items.find(i => !i.self?.isClaimed && !i.isEnded && !(i.endsAt && i.endsAt <= nowMs) && (i.self?.currentMinutesWatched || 0) < (i.reqTime || 60));
-                        if (nextItem) {
-                            const req = nextItem.reqTime || 60;
-                            const watched = nextItem.self?.currentMinutesWatched || 0;
-                            left = Math.max(0, req - watched);
-                        }
-                    } else if (cur.minutesNeeded) {
-                        left = Math.max(0, cur.minutesNeeded - (cur.minutesWatched || 0));
+                const nowMs = getTwitchNow();
+                const getFarmableItemForCamp = (c) => {
+                    if (!c || !Array.isArray(c.items) || c.items.length === 0) return null;
+                    const sorted = [...c.items].sort((a, b) => {
+                        const reqA = a?.reqTime || a?.requiredMinutesWatched || 60;
+                        const reqB = b?.reqTime || b?.requiredMinutesWatched || 60;
+                        return reqA - reqB;
+                    });
+                    const isItemFarmable = (i) => {
+                        if (!i || i.self?.isClaimed) return false;
+                        const req = i.reqTime || i.requiredMinutesWatched || 60;
+                        const watched = (i.self && typeof i.self.currentMinutesWatched === "number")
+                            ? i.self.currentMinutesWatched
+                            : (c.minutesWatched || 0);
+                        if (req > 0 && watched >= req) return false;
+                        const dropEnd = i.endAt ? new Date(i.endAt).getTime() : (i.endsAt ? new Date(i.endsAt).getTime() : (c.endsAt || NaN));
+                        if (i.isEnded || (!isNaN(dropEnd) && dropEnd <= nowMs)) return false;
+                        return true;
+                    };
+                    if (camp.activeDropId) {
+                        const activeMatch = sorted.find(i => i && i.id === camp.activeDropId && isItemFarmable(i));
+                        if (activeMatch) return { item: activeMatch, camp: c };
                     }
+                    const firstFarmable = sorted.find(isItemFarmable);
+                    return firstFarmable ? { item: firstFarmable, camp: c } : null;
+                };
+
+                const primaryIdx = (typeof camp.onCamp === "number" && camp.onCamp >= 0) ? camp.onCamp : 0;
+                const primaryCamp = activeStream.campaigns[primaryIdx] || activeStream.campaigns[0];
+                let found = getFarmableItemForCamp(primaryCamp);
+                if (!found && activeStream.campaigns.length > 1) {
+                    for (let idx = 0; idx < activeStream.campaigns.length; idx++) {
+                        if (idx === primaryIdx) continue;
+                        found = getFarmableItemForCamp(activeStream.campaigns[idx]);
+                        if (found) break;
+                    }
+                }
+
+                if (found && found.item) {
+                    const req = found.item.reqTime || found.item.requiredMinutesWatched || 60;
+                    const watched = (found.item.self && typeof found.item.self.currentMinutesWatched === "number")
+                        ? found.item.self.currentMinutesWatched
+                        : (found.camp.minutesWatched || 0);
+                    const left = Math.max(0, Math.ceil(req - watched));
+                    text = left > 0 ? `${left}m` : "✓";
+                    color = left > 0 ? "#9146FF" : "#00e676";
+                } else if (primaryCamp) {
+                    const left = primaryCamp.minutesNeeded
+                        ? Math.max(0, Math.ceil(primaryCamp.minutesNeeded - (primaryCamp.minutesWatched || 0)))
+                        : 0;
                     text = left > 0 ? `${left}m` : "✓";
                     color = left > 0 ? "#9146FF" : "#00e676";
                 } else {
@@ -2476,7 +2737,6 @@ function updateBadgeUI() {
             text = "";
         }
 
-        if (text === lastBadgeState) return;
         lastBadgeState = text;
         chrome.action.setBadgeText({ text }).catch(() => {});
         chrome.action.setBadgeBackgroundColor({ color }).catch(() => {});

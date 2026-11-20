@@ -77,8 +77,45 @@ export class Client {
         this.oauthToken = options?.oauthToken ?? null;
         this.deviceId = options?.deviceId ?? null;
         this.integrity = options?.integrity ?? null;
+        this.integrityExpiration = (this.integrity && typeof this.integrity === "object" && typeof this.integrity.expiration === "number")
+            ? this.integrity.expiration
+            : (typeof this.integrity === "string" && this.integrity.length > 0 ? Date.now() + 3600000 : null);
         this.userId = options?.userId ?? null;
         this.uuid = options?.uuid ?? null;
+        this.onIntegrityError = options?.onIntegrityError ?? null;
+        this._streamUrlCache = new Map();
+        this._spadeUrlCache = new Map();
+    }
+
+    hasIntegrityError(json) {
+        if (!json) return false;
+        const items = Array.isArray(json) ? json : [json];
+        return items.some(item =>
+            Array.isArray(item?.errors) &&
+            item.errors.some(err =>
+                err?.extensions?.code === "IntegrityCheckFailed" ||
+                (typeof err?.message === "string" && err.message.toLowerCase().includes("integrity"))
+            )
+        );
+    }
+
+    hasTransientGqlError(json) {
+        if (!json) return false;
+        const transientMessages = [
+            "service error",
+            "service timeout",
+            "service unavailable",
+            "request cancelled",
+            "context deadline exceeded"
+        ];
+        const items = Array.isArray(json) ? json : [json];
+        return items.some(item =>
+            Array.isArray(item?.errors) &&
+            item.errors.some(err => {
+                const msg = typeof err?.message === "string" ? err.message.toLowerCase() : "";
+                return transientMessages.some(t => msg.includes(t));
+            })
+        );
     }
 
     extractOperationName(data) {
@@ -110,7 +147,7 @@ export class Client {
         return headers;
     }
 
-    async post(data) {
+    async post(data, _transientRetryCount = 0) {
         const opName = this.extractOperationName(data);
         const headers = this.buildHeaders(false);
 
@@ -130,6 +167,11 @@ export class Client {
         }
 
         const json = await res.json();
+        if (_transientRetryCount < 1 && this.hasTransientGqlError(json)) {
+            await new Promise(r => setTimeout(r, 150));
+            return await this.post(data, _transientRetryCount + 1);
+        }
+
         if (Array.isArray(json)) {
             return json;
         }
@@ -150,7 +192,7 @@ export class Client {
         return (json && json.data !== undefined) ? json.data : json;
     }
 
-    async postAuthorized(data) {
+    async postAuthorized(data, _retried = false, _transientRetryCount = 0) {
         const opName = this.extractOperationName(data);
         if (!this.oauthToken) {
             throw new TwitchApiError("Unauthorized: Missing OAuth token", {
@@ -177,6 +219,21 @@ export class Client {
         }
 
         const json = await res.json();
+
+        if (!_retried && this.hasIntegrityError(json) && typeof this.onIntegrityError === "function") {
+            try {
+                const refreshed = await this.onIntegrityError();
+                if (refreshed) {
+                    return await this.postAuthorized(data, true, _transientRetryCount);
+                }
+            } catch (e) {}
+        }
+
+        if (_transientRetryCount < 1 && this.hasTransientGqlError(json)) {
+            await new Promise(r => setTimeout(r, 150));
+            return await this.postAuthorized(data, _retried, _transientRetryCount + 1);
+        }
+
         if (Array.isArray(json)) {
             return json;
         }
@@ -199,7 +256,7 @@ export class Client {
 
     async getInteg() {
         if (!this.integrity) return false;
-        const expiration = typeof this.integrity === "object" ? this.integrity.expiration : null;
+        const expiration = typeof this.integrity === "object" ? this.integrity.expiration : this.integrityExpiration;
         if (expiration && expiration - 960000 < Date.now()) {
             return false;
         }
@@ -208,6 +265,13 @@ export class Client {
 
     async setInteg(integ) {
         this.integrity = integ;
+        if (typeof integ === "string" && integ.length > 0) {
+            this.integrityExpiration = Date.now() + 3600000;
+        } else if (integ && typeof integ === "object" && typeof integ.expiration === "number") {
+            this.integrityExpiration = integ.expiration;
+        } else {
+            this.integrityExpiration = null;
+        }
         try {
             if (typeof chrome !== "undefined" && chrome?.storage?.local) {
                 await chrome.storage.local.set({ twitchInteg: integ });
@@ -223,6 +287,7 @@ export class Client {
         if (options.userId !== undefined) this.userId = options.userId;
         if (options.uuid !== undefined) this.uuid = options.uuid;
         if (options.integrity !== undefined) this.integrity = options.integrity;
+        if (options.onIntegrityError !== undefined) this.onIntegrityError = options.onIntegrityError;
     }
 
     async getUserId() {
@@ -248,8 +313,31 @@ export class Client {
                         await chrome.storage.local.set({ userId: data.currentUser.id });
                     }
                 } catch (err) {}
+                return this.userId;
             }
         } catch (e) {}
+
+        if (!this.userId && this.oauthToken) {
+            try {
+                const res = await fetch("https://id.twitch.tv/oauth2/validate", {
+                    method: "GET",
+                    headers: {
+                        "Authorization": `OAuth ${this.oauthToken}`
+                    }
+                });
+                if (res && res.ok) {
+                    const valJson = await res.json();
+                    if (valJson && valJson.user_id) {
+                        this.userId = String(valJson.user_id);
+                        try {
+                            if (typeof chrome !== "undefined" && chrome?.storage?.local) {
+                                await chrome.storage.local.set({ userId: this.userId });
+                            }
+                        } catch (err) {}
+                    }
+                }
+            } catch (e) {}
+        }
         return this.userId;
     }
 
@@ -293,9 +381,11 @@ export class Client {
             }
             return list;
         };
+        const DASHBOARD_HASH = "c16bb890cc8ce7647a96ee69cd313d423a378a3dedadf630a1017cde18975feb";
+        const LEGACY_DASHBOARD_HASH = "5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619";
         if (this.oauthToken) {
             try {
-                const data = await this.postAuthorized({
+                let data = await this.postAuthorized({
                     "operationName": "ViewerDropsDashboard",
                     "variables": {
                         "fetchRewardCampaigns": true
@@ -303,10 +393,24 @@ export class Client {
                     "extensions": {
                         "persistedQuery": {
                             "version": 1,
-                            "sha256Hash": "5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619"
+                            "sha256Hash": DASHBOARD_HASH
                         }
                     }
-                });
+                }).catch(() => null);
+                if (!data) {
+                    data = await this.postAuthorized({
+                        "operationName": "ViewerDropsDashboard",
+                        "variables": {
+                            "fetchRewardCampaigns": true
+                        },
+                        "extensions": {
+                            "persistedQuery": {
+                                "version": 1,
+                                "sha256Hash": LEGACY_DASHBOARD_HASH
+                            }
+                        }
+                    });
+                }
                 if (data && data.currentUser && Array.isArray(data.currentUser.dropCampaigns) && data.currentUser.dropCampaigns.length > 0) {
                     if (includeAll && Array.isArray(data.rewardCampaignsAvailableToUser)) {
                         const merged = [...data.currentUser.dropCampaigns];
@@ -334,7 +438,7 @@ export class Client {
         }
 
         try {
-            const data = await this.post({
+            let data = await this.post({
                 "operationName": "ViewerDropsDashboard",
                 "variables": {
                     "fetchRewardCampaigns": true
@@ -342,10 +446,24 @@ export class Client {
                 "extensions": {
                     "persistedQuery": {
                         "version": 1,
-                        "sha256Hash": "5a4da2ab3d5b47c9f9ce864e727b2cb346af1e3ea8b897fe8f704a97ff017619"
+                        "sha256Hash": DASHBOARD_HASH
                     }
                 }
-            });
+            }).catch(() => null);
+            if (!data) {
+                data = await this.post({
+                    "operationName": "ViewerDropsDashboard",
+                    "variables": {
+                        "fetchRewardCampaigns": true
+                    },
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": LEGACY_DASHBOARD_HASH
+                        }
+                    }
+                });
+            }
             if (includeAll) {
                 const merged = [];
                 const seen = new Set();
@@ -451,17 +569,39 @@ export class Client {
     }
 
     async getInventory() {
+        const INVENTORY_HASH = "8337eb8541b314040b0edde0c09c5c7a2783ba1960aa9edfbf3bac16d0fec404";
+        const LEGACY_INVENTORY_HASH = "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b";
         try {
-            const data = await this.postAuthorized({
+            let data = await this.postAuthorized({
                 "operationName": "Inventory",
+                "variables": {
+                    "fetchRewardCampaigns": false
+                },
                 "extensions": {
                     "persistedQuery": {
                         "version": 1,
-                        "sha256Hash": "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b"
+                        "sha256Hash": INVENTORY_HASH
                     }
                 }
             });
-            const inv = data && data.currentUser ? data.currentUser.inventory : null;
+            let inv = data && data.currentUser ? data.currentUser.inventory : null;
+            if (!inv && data && data.currentUser && data.currentUser.id) {
+                const fallbackData = await this.postAuthorized({
+                    "operationName": "Inventory",
+                    "variables": {
+                        "fetchRewardCampaigns": false
+                    },
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": LEGACY_INVENTORY_HASH
+                        }
+                    }
+                }).catch(() => null);
+                if (fallbackData && fallbackData.currentUser && fallbackData.currentUser.inventory) {
+                    inv = fallbackData.currentUser.inventory;
+                }
+            }
             if (inv) {
                 if (!inv.gameEventDrops && inv.gameEventDropsConnection?.edges) {
                     inv.gameEventDrops = inv.gameEventDropsConnection.edges
@@ -725,9 +865,20 @@ export class Client {
 
             if (listToCheck.length === 0) return null;
 
+            const isStreamPlayingTargetGame = (streamObj) => {
+                if (!streamObj) return false;
+                const streamGame = streamObj.game?.displayName || streamObj.game?.name;
+                // If ChannelShell includes the game name, verify it matches target game (or Special Events for official broadcasts)
+                if (streamGame && gameName) {
+                    if (streamGame.toLowerCase() === "special events") return true;
+                    return areGameNamesMatching(streamGame, gameName);
+                }
+                return true;
+            };
+
             if (listToCheck.length === 1) {
                 const stream = await this.getStream(listToCheck[0]);
-                if (stream) {
+                if (stream && isStreamPlayingTargetGame(stream)) {
                     return listToCheck[0];
                 }
                 return null;
@@ -737,7 +888,8 @@ export class Client {
                 if (Array.isArray(res)) {
                     for (let i = 0; i < res.length; i++) {
                         const item = res[i];
-                        if (item?.data?.userOrError?.stream) {
+                        const streamObj = item?.data?.userOrError?.stream;
+                        if (streamObj && isStreamPlayingTargetGame(streamObj)) {
                             return batch[i];
                         }
                     }
@@ -758,6 +910,24 @@ export class Client {
 
     async getStreamMetadata(channelLogin) {
         if (!channelLogin) return { login: "" };
+        const login = String(channelLogin).toLowerCase();
+
+        const queryOverlayMeta = async () => {
+            const overlayData = await this.post({
+                "operationName": "VideoPlayerStreamInfoOverlayChannel",
+                "variables": {
+                    "channel": login
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "198492e0857f6aedead9665c81c5a06d67b25b58034649687124083ff288597d"
+                    }
+                }
+            });
+            return overlayData?.user || null;
+        };
+
         try {
             const data = await this.post({
                 "operationName": "ChannelShell",
@@ -771,14 +941,37 @@ export class Client {
                     }
                 }
             });
-            const stream = data?.userOrError?.stream;
+            const userObj = data?.userOrError;
+            const stream = userObj?.stream;
             if (stream) {
+                let channelId = userObj?.id ? String(userObj.id) : undefined;
+                let broadcastId = stream.id ? String(stream.id) : undefined;
                 let game = stream.game?.displayName || stream.game?.name;
+                let gameId = stream.game?.id ? String(stream.game.id) : undefined;
                 let title = stream.title || "";
                 let viewers = stream.viewersCount || 0;
 
                 // ChannelShell in production Twitch GQL only returns stream ID & viewersCount without game.
-                // Fetch direct stream details if game is missing.
+                // Fetch stream game details via PersistedQuery VideoPlayerStreamInfoOverlayChannel (with GetChannelStream fallback).
+                if (!game) {
+                    try {
+                        const overlayUser = await queryOverlayMeta();
+                        if (overlayUser) {
+                            if (overlayUser.id && !channelId) channelId = String(overlayUser.id);
+                            if (overlayUser.stream?.id && !broadcastId) broadcastId = String(overlayUser.stream.id);
+                            if (overlayUser.stream?.viewersCount) viewers = overlayUser.stream.viewersCount;
+                            const bs = overlayUser.broadcastSettings;
+                            if (bs) {
+                                if (bs.title) title = bs.title;
+                                if (bs.game) {
+                                    game = bs.game.displayName || bs.game.name;
+                                    if (bs.game.id) gameId = String(bs.game.id);
+                                }
+                            }
+                        }
+                    } catch (err) {}
+                }
+
                 if (!game) {
                     try {
                         const directData = await this.post({
@@ -786,36 +979,66 @@ export class Client {
                             "query": "query GetChannelStream($login: String!) { user(login: $login) { id login stream { id game { id name displayName } title viewersCount type } } }",
                             "variables": { "login": channelLogin }
                         });
-                        const directStream = directData?.user?.stream;
-                        if (directStream && directStream.game) {
-                            game = directStream.game.displayName || directStream.game.name;
-                            title = directStream.title || title;
-                            viewers = directStream.viewersCount || viewers;
+                        const directUser = directData?.user;
+                        const directStream = directUser?.stream;
+                        if (directUser?.id && !channelId) channelId = String(directUser.id);
+                        if (directStream) {
+                            if (directStream.id && !broadcastId) broadcastId = String(directStream.id);
+                            if (directStream.game) {
+                                game = directStream.game.displayName || directStream.game.name;
+                                if (directStream.game.id) gameId = String(directStream.game.id);
+                                title = directStream.title || title;
+                                viewers = directStream.viewersCount || viewers;
+                            }
                         }
                     } catch (err) {}
                 }
 
                 return {
                     login: channelLogin,
+                    channelId: channelId,
+                    broadcastId: broadcastId,
                     game: game || undefined,
+                    gameId: gameId,
                     title: title,
                     viewers: viewers
                 };
             }
         } catch (e) {}
 
-        // Fallback: direct GraphQL query if ChannelShell failed or returned null
+        // Fallback 1: PersistedQuery VideoPlayerStreamInfoOverlayChannel if ChannelShell failed
+        try {
+            const overlayUser = await queryOverlayMeta();
+            if (overlayUser && overlayUser.stream) {
+                const bs = overlayUser.broadcastSettings;
+                return {
+                    login: channelLogin,
+                    channelId: overlayUser.id ? String(overlayUser.id) : undefined,
+                    broadcastId: overlayUser.stream.id ? String(overlayUser.stream.id) : undefined,
+                    game: bs?.game?.displayName || bs?.game?.name || undefined,
+                    gameId: bs?.game?.id ? String(bs.game.id) : undefined,
+                    title: bs?.title || "",
+                    viewers: overlayUser.stream.viewersCount || 0
+                };
+            }
+        } catch (err) {}
+
+        // Fallback 2: direct GraphQL query if persisted queries failed or returned null
         try {
             const directData = await this.post({
                 "operationName": "GetChannelStream",
                 "query": "query GetChannelStream($login: String!) { user(login: $login) { id login stream { id game { id name displayName } title viewersCount type } } }",
                 "variables": { "login": channelLogin }
             });
-            const directStream = directData?.user?.stream;
+            const directUser = directData?.user;
+            const directStream = directUser?.stream;
             if (directStream) {
                 return {
                     login: channelLogin,
+                    channelId: directUser?.id ? String(directUser.id) : undefined,
+                    broadcastId: directStream.id ? String(directStream.id) : undefined,
                     game: directStream.game?.displayName || directStream.game?.name || undefined,
+                    gameId: directStream.game?.id ? String(directStream.game.id) : undefined,
                     title: directStream.title || "",
                     viewers: directStream.viewersCount || 0
                 };
@@ -823,6 +1046,376 @@ export class Client {
         } catch (err) {}
 
         return { login: channelLogin };
+    }
+
+    /**
+     * Headless Watch Engine (TwitchDropsMiner method):
+     * 1. Fetch stream PlaybackAccessToken via GQL (with platform: "web" & playerType: "site")
+     * 2. Fetch master HLS playlist from usher.ttvnw.net and pick lowest-quality variant URL
+     * 3. Fetch variant .m3u8 playlist and send HEAD request to latest .ts transport segment
+     * 4. Fallback/secondary: POST Base64-encoded "minute-watched" payload to Spade beacon URL
+     * 5. Query DropCurrentSessionContext to bind/read real-time currentMinutesWatched for the channel
+     */
+    async getPlaybackAccessToken(channelLogin) {
+        if (!channelLogin) return null;
+        const login = String(channelLogin).toLowerCase();
+        try {
+            const data = await this.postAuthorized({
+                "operationName": "PlaybackAccessToken",
+                "variables": {
+                    "isLive": true,
+                    "login": login,
+                    "isVod": false,
+                    "vodID": "",
+                    "platform": "web",
+                    "playerType": "site"
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9"
+                    }
+                }
+            });
+            const token = data?.streamPlaybackAccessToken;
+            if (token && token.value && token.signature) {
+                return { value: token.value, signature: token.signature };
+            }
+        } catch (e) {}
+
+        // Fallback to raw GQL query if persistedQuery hash is rejected or unavailable
+        try {
+            const fallbackData = await this.postAuthorized({
+                "operationName": "PlaybackAccessToken_Template",
+                "query": "query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isLive) { value signature __typename } }",
+                "variables": {
+                    "isLive": true,
+                    "login": login,
+                    "isVod": false,
+                    "vodID": "",
+                    "platform": "web",
+                    "playerType": "site"
+                }
+            });
+            const token = fallbackData?.streamPlaybackAccessToken;
+            if (token && token.value && token.signature) {
+                return { value: token.value, signature: token.signature };
+            }
+        } catch (e) {}
+
+        return null;
+    }
+
+    async getStreamUrl(channelLogin) {
+        if (!channelLogin) return null;
+        const login = String(channelLogin).toLowerCase();
+        const token = await this.getPlaybackAccessToken(login);
+        if (!token) return null;
+
+        // Match TwitchDropsMiner Usher request: omit fast_bread and allow_audio_only so Twitch
+        // returns standard 2s video segments (lowest: 160p30) that reliably advance Drop progress.
+        const params = new URLSearchParams({
+            sig: token.signature,
+            token: token.value
+        });
+
+        const usherUrl = `https://usher.ttvnw.net/api/channel/hls/${encodeURIComponent(login)}.m3u8?${params.toString()}`;
+        try {
+            const res = await fetch(usherUrl, { method: "GET" });
+            if (!res || !res.ok) return null;
+            const playlistText = await res.text();
+            if (!playlistText) return null;
+
+            const trimmed = playlistText.trim();
+            if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                return null;
+            }
+
+            const rawLines = trimmed
+                .split(/\r?\n/)
+                .map(l => l.trim())
+                .filter(l => l.length > 0);
+
+            const videoUrls = [];
+            const allUrls = [];
+            let pendingAudioOnly = false;
+
+            for (const line of rawLines) {
+                if (line.startsWith("#")) {
+                    if (line.startsWith("#EXT-X-STREAM-INF") || line.startsWith("#EXT-X-MEDIA")) {
+                        if (/audio_only/i.test(line)) {
+                            pendingAudioOnly = true;
+                        }
+                    }
+                } else {
+                    allUrls.push(line);
+                    if (!pendingAudioOnly && !/audio_only/i.test(line)) {
+                        videoUrls.push(line);
+                    }
+                    pendingAudioOnly = false;
+                }
+            }
+
+            const candidates = videoUrls.length > 0 ? videoUrls : allUrls;
+            if (candidates.length === 0) return null;
+            // Twitch lists lowest-resolution video variant (e.g. 160p30) last among video variants
+            return candidates[candidates.length - 1];
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async sendWatchPlaylist(channelLogin) {
+        if (!channelLogin) return false;
+        const login = String(channelLogin).toLowerCase();
+        if (!this._streamUrlCache) this._streamUrlCache = new Map();
+
+        let variantUrl = this._streamUrlCache.get(login);
+        let variantText = null;
+
+        if (variantUrl) {
+            try {
+                const res = await fetch(variantUrl, { method: "GET" });
+                if (res && res.ok) {
+                    variantText = await res.text();
+                    const trimmed = (variantText || "").trim();
+                    if (!trimmed || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                        this._streamUrlCache.delete(login);
+                        variantUrl = null;
+                        variantText = null;
+                    }
+                } else {
+                    this._streamUrlCache.delete(login);
+                    variantUrl = null;
+                }
+            } catch (e) {
+                this._streamUrlCache.delete(login);
+                variantUrl = null;
+            }
+        }
+
+        if (!variantUrl) {
+            variantUrl = await this.getStreamUrl(login);
+            if (!variantUrl) return false;
+            try {
+                const res = await fetch(variantUrl, { method: "GET" });
+                if (!res || !res.ok) return false;
+                variantText = await res.text();
+                const trimmed = (variantText || "").trim();
+                if (!trimmed || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                    return false;
+                }
+                this._streamUrlCache.set(login, variantUrl);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        if (!variantText) return false;
+        // Strip any inline JSON "url": "...", fragments inside Twitch DATERANGE tags (matches TwitchDropsMiner channel.py)
+        const cleanedVariantText = variantText.replace(/"url"\s*:\s*"[^"]*",?/g, "");
+        const lines = cleanedVariantText
+            .split(/\r?\n/)
+            .map(l => l.trim())
+            .filter(l => l.length > 0 && !l.startsWith("#"));
+
+        if (lines.length === 0) {
+            this._streamUrlCache.delete(login);
+            return false;
+        }
+
+        const segmentUrls = [];
+        for (const rawSeg of lines) {
+            if (/^https?:\/\//i.test(rawSeg)) {
+                segmentUrls.push(rawSeg);
+            } else {
+                try {
+                    segmentUrls.push(new URL(rawSeg, variantUrl).toString());
+                } catch (e) {}
+            }
+        }
+
+        if (segmentUrls.length === 0) {
+            this._streamUrlCache.delete(login);
+            return false;
+        }
+
+        try {
+            // Send HEAD requests to all segment chunks in the variant playlist (matches TwitchDropsMiner f693b0c)
+            const headResults = await Promise.allSettled(
+                segmentUrls.map(segUrl => fetch(segUrl, { method: "HEAD" }))
+            );
+            const anyHeadOk = headResults.some(
+                r => r.status === "fulfilled" && r.value && (r.value.ok || r.value.status === 200 || r.value.status === 206)
+            );
+            if (anyHeadOk) {
+                return true;
+            }
+            // Fallback to GET on the latest segment if HEAD is disallowed by edge node
+            const lastSegUrl = segmentUrls[segmentUrls.length - 1];
+            const getRes = await fetch(lastSegUrl, { method: "GET" });
+            return Boolean(getRes && getRes.ok);
+        } catch (e) {
+            this._streamUrlCache.delete(login);
+            return false;
+        }
+    }
+
+    async getSpadeUrl(channelLogin) {
+        const DEFAULT_SPADE_URL = "https://spade.twitch.tv/track";
+        if (!channelLogin) return DEFAULT_SPADE_URL;
+        const login = String(channelLogin).toLowerCase();
+        if (!this._spadeUrlCache) this._spadeUrlCache = new Map();
+
+        if (this._spadeUrlCache.has(login)) {
+            return this._spadeUrlCache.get(login);
+        }
+
+        const spadeRegex = /"(?:spade|beacon)_?url"\s*:\s*"(https:\/\/[^"]+)"/i;
+        const settingsJsRegex = /https:\/\/[\w./-]+\/config\/settings\.[0-9a-f]+\.js/i;
+
+        for (const pageUrl of [
+            `https://www.twitch.tv/${encodeURIComponent(login)}`,
+            `https://m.twitch.tv/${encodeURIComponent(login)}`
+        ]) {
+            try {
+                const pageRes = await fetch(pageUrl, { method: "GET" });
+                if (pageRes && pageRes.ok) {
+                    const html = await pageRes.text();
+                    const directMatch = html.match(spadeRegex);
+                    if (directMatch && directMatch[1]) {
+                        this._spadeUrlCache.set(login, directMatch[1]);
+                        return directMatch[1];
+                    }
+                    const settingsMatch = html.match(settingsJsRegex);
+                    const settingsUrl = settingsMatch ? (settingsMatch[1] || settingsMatch[0]) : null;
+                    if (settingsUrl) {
+                        const jsRes = await fetch(settingsUrl, { method: "GET" });
+                        if (jsRes && jsRes.ok) {
+                            const jsText = await jsRes.text();
+                            const jsSpadeMatch = jsText.match(spadeRegex);
+                            if (jsSpadeMatch && jsSpadeMatch[1]) {
+                                this._spadeUrlCache.set(login, jsSpadeMatch[1]);
+                                return jsSpadeMatch[1];
+                            }
+                        }
+                    }
+                }
+            } catch (e) {}
+        }
+
+        this._spadeUrlCache.set(login, DEFAULT_SPADE_URL);
+        return DEFAULT_SPADE_URL;
+    }
+
+    async sendWatchSpade(channelLogin, streamMeta = {}) {
+        if (!channelLogin) return false;
+        const login = String(channelLogin).toLowerCase();
+
+        let broadcastId = streamMeta?.broadcastId;
+        let channelId = streamMeta?.channelId;
+        let gameName = streamMeta?.game;
+        let gameId = streamMeta?.gameId;
+
+        if (!broadcastId || !channelId) {
+            try {
+                const meta = await this.getStreamMetadata(login);
+                broadcastId = broadcastId || meta?.broadcastId;
+                channelId = channelId || meta?.channelId;
+                gameName = gameName || meta?.game;
+                gameId = gameId || meta?.gameId;
+            } catch (e) {}
+        }
+
+        if (!broadcastId || !channelId) return false;
+
+        if (!this.userId && this.oauthToken) {
+            try {
+                await this.autoDetectUserId();
+            } catch (e) {}
+        }
+
+        const spadeUrl = await this.getSpadeUrl(login);
+        const payload = [
+            {
+                event: "minute-watched",
+                properties: {
+                    broadcast_id: String(broadcastId),
+                    channel_id: String(channelId),
+                    channel: login,
+                    client_time: new Date().toISOString(),
+                    ...(gameName ? { game: String(gameName) } : {}),
+                    ...(gameId ? { game_id: String(gameId) } : {}),
+                    hidden: false,
+                    is_live: true,
+                    live: true,
+                    location: "channel",
+                    logged_in: true,
+                    minutes_logged: 1,
+                    muted: false,
+                    player: "site",
+                    ...(this.userId ? { user_id: Number(this.userId) || String(this.userId) } : {})
+                }
+            }
+        ];
+
+        const jsonStr = JSON.stringify(payload);
+        let base64Data;
+        if (typeof btoa === "function") {
+            base64Data = btoa(jsonStr);
+        } else {
+            base64Data = Buffer.from(jsonStr, "utf8").toString("base64");
+        }
+
+        try {
+            const res = await fetch(spadeUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                body: `data=${encodeURIComponent(base64Data)}`
+            });
+            return Boolean(res && (res.status === 204 || res.ok));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    async getCurrentDropSession(channelId = "", channelLogin = "") {
+        if (!this.oauthToken) return null;
+        try {
+            const data = await this.postAuthorized({
+                "operationName": "DropCurrentSessionContext",
+                "variables": {
+                    "channelID": channelId ? String(channelId) : "",
+                    "channelLogin": channelId ? "" : String(channelLogin || "").toLowerCase()
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "4d06b702d25d652afb9ef835d2a550031f1cf762b193523a92166f40ea3d142b"
+                    }
+                }
+            });
+            return data?.currentUser?.dropCurrentSession || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async sendWatch(channelLogin, streamMeta = {}) {
+        if (!channelLogin) return { success: false, method: "none" };
+        // Primary method: playlist HEAD requests to all chunks (matches TwitchDropsMiner commit f693b0c)
+        const hlsOk = await this.sendWatchPlaylist(channelLogin);
+        if (hlsOk) {
+            return { success: true, method: "hls", spade: false };
+        }
+        // Fallback: Spade minute-watched beacon only if HLS playlist pulse failed
+        const spadeOk = await this.sendWatchSpade(channelLogin, streamMeta);
+        if (spadeOk) {
+            return { success: true, method: "spade", spade: true };
+        }
+        return { success: false, method: "none" };
     }
 
     isCampaignActiveWithDrops(campaign, now = getTwitchNow(), inventory = null) {
