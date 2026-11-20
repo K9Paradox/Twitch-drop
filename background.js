@@ -822,20 +822,17 @@ export async function checkGitHubUpdate(manual = false) {
             console.warn("[AutoUpdate] Releases check warning:", e?.message);
         }
 
-        // 2. Fallback to raw manifest.json on v2.0-headless / main branch
+        // 2. Fallback to raw manifest.json on main branch
         if (!releaseFound) {
             try {
-                let rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/v2.0-headless/manifest.json").catch(() => null);
-                if (!rawRes || !rawRes.ok) {
-                    rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/main/manifest.json");
-                }
+                const rawRes = await fetch("https://raw.githubusercontent.com/K9Paradox/Twitch-drop/main/manifest.json");
                 if (rawRes && rawRes.ok) {
                     const rawManifest = await rawRes.json();
                     if (rawManifest && rawManifest.version) {
                         result.latestVersion = rawManifest.version;
                         if (compareSemver(rawManifest.version, currentVersion) > 0) {
                             result.updateAvailable = true;
-                            result.releaseUrl = "https://github.com/K9Paradox/Twitch-drop/tree/v2.0-headless";
+                            result.releaseUrl = "https://github.com/K9Paradox/Twitch-drop/tree/main";
                         }
                     }
                 }
@@ -844,16 +841,11 @@ export async function checkGitHubUpdate(manual = false) {
             }
         }
 
-        // 3. Fetch latest commit metadata from v2.0-headless / main branch
+        // 3. Fetch latest commit metadata from main branch
         try {
-            let commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/v2.0-headless", {
+            const commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/main", {
                 headers: { "Accept": "application/vnd.github.v3+json" }
-            }).catch(() => null);
-            if (!commitRes || !commitRes.ok) {
-                commitRes = await fetch("https://api.github.com/repos/K9Paradox/Twitch-drop/commits/main", {
-                    headers: { "Accept": "application/vnd.github.v3+json" }
-                });
-            }
+            });
             if (commitRes && commitRes.ok) {
                 const commitData = await commitRes.json();
                 if (commitData) {

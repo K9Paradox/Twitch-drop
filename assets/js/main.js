@@ -688,7 +688,7 @@ $(() => {
     });
 
     function copyGitPullCommand() {
-        const cmd = "git pull origin v2.0-headless";
+        const cmd = "git pull origin main";
         if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(cmd).then(() => {
                 showToast(`📋 Copied "${cmd}" to clipboard!`);
