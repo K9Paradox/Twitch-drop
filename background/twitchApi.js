@@ -9,15 +9,17 @@ export function getTwitchNow() {
     return Date.now() + twitchServerTimeOffset;
 }
 
-export function setTwitchServerTimeOffset(offsetMs, calibrated = true) {
+export function setTwitchServerTimeOffset(offsetMs, calibrated = true, persist = true) {
     const num = Number(offsetMs);
     twitchServerTimeOffset = Number.isFinite(num) ? num : 0;
     hasCalibratedServerTime = Boolean(calibrated);
-    try {
-        if (typeof chrome !== "undefined" && chrome?.storage?.local) {
-            chrome.storage.local.set({ twitchServerTimeOffset }).catch(() => {});
-        }
-    } catch (e) {}
+    if (persist) {
+        try {
+            if (typeof chrome !== "undefined" && chrome?.storage?.local) {
+                chrome.storage.local.set({ twitchServerTimeOffset }).catch(() => {});
+            }
+        } catch (e) {}
+    }
 }
 
 export function updateServerTimeFromResponse(res) {
@@ -82,7 +84,10 @@ export class Client {
             : (typeof this.integrity === "string" && this.integrity.length > 0 ? Date.now() + 3600000 : null);
         this.userId = options?.userId ?? null;
         this.uuid = options?.uuid ?? null;
+        this.clientVersion = options?.clientVersion ?? null;
         this.onIntegrityError = options?.onIntegrityError ?? null;
+        this.onAuthError = options?.onAuthError ?? null;
+        this.onAuthSuccess = options?.onAuthSuccess ?? null;
         this._streamUrlCache = new Map();
         this._spadeUrlCache = new Map();
     }
@@ -126,7 +131,7 @@ export class Client {
         return data?.operationName || null;
     }
 
-    buildHeaders(authorized = false) {
+    buildHeaders(authorized = false, { skipIntegrity = false } = {}) {
         const headers = {
             "Client-Id": this.clientId,
             "Content-Type": "application/json"
@@ -137,14 +142,52 @@ export class Client {
         if (this.deviceId) {
             headers["X-Device-Id"] = this.deviceId;
         }
-        if (this.integrity) {
-            const integToken = typeof this.integrity === "string" ? this.integrity : this.integrity?.token;
-            if (integToken) headers["Client-Integrity"] = integToken;
+        if (!skipIntegrity && this.integrity) {
+            if (typeof this.integrity === "string") {
+                if (this.integrity.length > 0) headers["Client-Integrity"] = this.integrity;
+            } else if (typeof this.integrity === "object") {
+                const exp = this.integrity.expiration;
+                const isExpired = typeof exp === "number" && Number.isFinite(exp) && exp <= Date.now();
+                if (!isExpired && this.integrity.token) {
+                    headers["Client-Integrity"] = this.integrity.token;
+                }
+            }
         }
         if (this.uuid) {
             headers["Client-Session-Id"] = this.uuid;
         }
+        if (this.clientVersion) {
+            headers["Client-Version"] = this.clientVersion;
+        }
         return headers;
+    }
+
+    async fetchIntegrity() {
+        if (!this.oauthToken) {
+            return { ok: false, status: 401 };
+        }
+        try {
+            const headers = this.buildHeaders(true, { skipIntegrity: true });
+            const res = await fetch("https://gql.twitch.tv/integrity", {
+                method: "POST",
+                headers
+            });
+            updateServerTimeFromResponse(res);
+            if (!res || !res.ok) {
+                return { ok: false, status: res?.status || 0 };
+            }
+            const json = await res.json().catch(() => null);
+            if (json && typeof json.token === "string" && json.token) {
+                const expiration = (typeof json.expiration === "number" && Number.isFinite(json.expiration))
+                    ? json.expiration
+                    : (Date.now() + 3600000);
+                await this.setInteg({ token: json.token, expiration });
+                return { ok: true, token: json.token, expiration };
+            }
+            return { ok: false, status: res.status || 0 };
+        } catch (e) {
+            return { ok: false, status: 0 };
+        }
     }
 
     async post(data, _transientRetryCount = 0) {
@@ -212,6 +255,11 @@ export class Client {
         updateServerTimeFromResponse(res);
 
         if (!res.ok) {
+            if (res.status === 401 && typeof this.onAuthError === "function") {
+                try {
+                    this.onAuthError(this.oauthToken, "Twitch session expired. Please sign in on Twitch.");
+                } catch (e) {}
+            }
             throw new TwitchApiError(`Twitch GQL HTTP error ${res.status}: ${res.statusText}`, {
                 status: res.status,
                 operationName: opName
@@ -220,37 +268,63 @@ export class Client {
 
         const json = await res.json();
 
-        if (!_retried && this.hasIntegrityError(json) && typeof this.onIntegrityError === "function") {
-            try {
-                const refreshed = await this.onIntegrityError();
-                if (refreshed) {
-                    return await this.postAuthorized(data, true, _transientRetryCount);
-                }
-            } catch (e) {}
+        if (!_retried && this.hasIntegrityError(json)) {
+            let refreshed = false;
+            if (typeof this.onIntegrityError === "function") {
+                try {
+                    refreshed = Boolean(await this.onIntegrityError(opName));
+                } catch (e) {}
+            }
+            if (refreshed) {
+                return await this.postAuthorized(data, true, _transientRetryCount);
+            }
+            const isProtectedMutation = typeof opName === "string" && (
+                opName.includes("DropsPage_ClaimDropRewards") ||
+                opName.includes("ClaimCommunityPoints")
+            );
+            if (!isProtectedMutation) {
+                this.integrity = null;
+                this.integrityExpiration = null;
+                return await this.postAuthorized(data, true, _transientRetryCount);
+            }
         }
 
-        if (_transientRetryCount < 1 && this.hasTransientGqlError(json)) {
+        const hasEmptyOrNullCoreData = !json?.data || Object.keys(json.data).length === 0 || json.data?.currentUser?.inventory === null;
+        if (_transientRetryCount < 1 && this.hasTransientGqlError(json) && hasEmptyOrNullCoreData) {
             await new Promise(r => setTimeout(r, 150));
             return await this.postAuthorized(data, _retried, _transientRetryCount + 1);
         }
 
         if (Array.isArray(json)) {
+            if (typeof this.onAuthSuccess === "function") {
+                try { this.onAuthSuccess(this.oauthToken); } catch (e) {}
+            }
             return json;
         }
 
         if (json && json.errors && json.errors.length > 0) {
             if (!json.data || Object.keys(json.data).length === 0) {
                 const errMsg = json.errors.map(e => e?.message || JSON.stringify(e)).join("; ") || "GraphQL query error";
+                if (/unauthoriz|invalid oauth|authentication/i.test(errMsg) && typeof this.onAuthError === "function") {
+                    try {
+                        this.onAuthError(this.oauthToken, "Twitch session expired. Please sign in on Twitch.");
+                    } catch (e) {}
+                }
                 throw new TwitchApiError(errMsg, {
                     status: res.status,
                     errors: json.errors,
                     operationName: opName
                 });
+            } else if (this.hasTransientGqlError(json)) {
+                console.debug(`Twitch GQL partial warning in ${opName}:`, json.errors[0]?.message);
             } else {
                 console.warn(`Twitch GQL warning in ${opName}:`, json.errors[0]?.message);
             }
         }
 
+        if (typeof this.onAuthSuccess === "function") {
+            try { this.onAuthSuccess(this.oauthToken); } catch (e) {}
+        }
         return (json && json.data !== undefined) ? json.data : json;
     }
 
@@ -264,17 +338,29 @@ export class Client {
     }
 
     async setInteg(integ) {
-        this.integrity = integ;
+        let toStore = integ;
         if (typeof integ === "string" && integ.length > 0) {
-            this.integrityExpiration = Date.now() + 3600000;
-        } else if (integ && typeof integ === "object" && typeof integ.expiration === "number") {
+            const expiration = Date.now() + 3600000;
+            this.integrity = { token: integ, expiration };
+            this.integrityExpiration = expiration;
+            toStore = this.integrity;
+        } else if (integ && typeof integ === "object" && typeof integ.expiration === "number" && Number.isFinite(integ.expiration)) {
+            this.integrity = integ;
             this.integrityExpiration = integ.expiration;
         } else {
+            this.integrity = integ || null;
             this.integrityExpiration = null;
+            toStore = this.integrity;
         }
         try {
             if (typeof chrome !== "undefined" && chrome?.storage?.local) {
-                await chrome.storage.local.set({ twitchInteg: integ });
+                if (toStore) {
+                    await chrome.storage.local.set({ twitchInteg: toStore });
+                } else if (typeof chrome.storage.local.remove === "function") {
+                    await chrome.storage.local.remove("twitchInteg");
+                } else {
+                    await chrome.storage.local.set({ twitchInteg: null });
+                }
             }
         } catch (e) {}
     }
@@ -286,8 +372,20 @@ export class Client {
         if (options.deviceId !== undefined) this.deviceId = options.deviceId;
         if (options.userId !== undefined) this.userId = options.userId;
         if (options.uuid !== undefined) this.uuid = options.uuid;
-        if (options.integrity !== undefined) this.integrity = options.integrity;
+        if (options.clientVersion !== undefined) this.clientVersion = options.clientVersion;
+        if (options.integrity !== undefined) {
+            this.integrity = options.integrity;
+            if (this.integrity && typeof this.integrity === "object" && typeof this.integrity.expiration === "number" && Number.isFinite(this.integrity.expiration)) {
+                this.integrityExpiration = this.integrity.expiration;
+            } else if (typeof this.integrity === "string" && this.integrity.length > 0) {
+                this.integrityExpiration = Date.now() + 3600000;
+            } else {
+                this.integrityExpiration = null;
+            }
+        }
         if (options.onIntegrityError !== undefined) this.onIntegrityError = options.onIntegrityError;
+        if (options.onAuthError !== undefined) this.onAuthError = options.onAuthError;
+        if (options.onAuthSuccess !== undefined) this.onAuthSuccess = options.onAuthSuccess;
     }
 
     async getUserId() {
@@ -569,23 +667,35 @@ export class Client {
     }
 
     async getInventory() {
+        if (!this.oauthToken) return null;
         const INVENTORY_HASH = "8337eb8541b314040b0edde0c09c5c7a2783ba1960aa9edfbf3bac16d0fec404";
         const LEGACY_INVENTORY_HASH = "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b";
         try {
-            let data = await this.postAuthorized({
-                "operationName": "Inventory",
-                "variables": {
-                    "fetchRewardCampaigns": false
-                },
-                "extensions": {
-                    "persistedQuery": {
-                        "version": 1,
-                        "sha256Hash": INVENTORY_HASH
+            let data = null;
+            let shouldTryLegacy = false;
+            try {
+                data = await this.postAuthorized({
+                    "operationName": "Inventory",
+                    "variables": {
+                        "fetchRewardCampaigns": false
+                    },
+                    "extensions": {
+                        "persistedQuery": {
+                            "version": 1,
+                            "sha256Hash": INVENTORY_HASH
+                        }
                     }
+                });
+            } catch (primaryErr) {
+                // Only fall back to legacy hash on GraphQL-level errors (not HTTP 401/403 or network failures)
+                if (primaryErr instanceof TwitchApiError && (!primaryErr.status || primaryErr.status === 200)) {
+                    shouldTryLegacy = true;
+                } else {
+                    return null;
                 }
-            });
+            }
             let inv = data && data.currentUser ? data.currentUser.inventory : null;
-            if (!inv && data && data.currentUser && data.currentUser.id) {
+            if (!inv && (shouldTryLegacy || (data && data.currentUser))) {
                 const fallbackData = await this.postAuthorized({
                     "operationName": "Inventory",
                     "variables": {
@@ -788,6 +898,50 @@ export class Client {
         });
     }
 
+    async getChannelPointsContext(channelLogin) {
+        if (!channelLogin || !this.oauthToken) return null;
+        const login = String(channelLogin).toLowerCase();
+        const extractContext = (data) => {
+            const community = data?.community || data?.channel || null;
+            if (!community) return null;
+            const channelId = community.id ? String(community.id) : (community.channel?.id ? String(community.channel.id) : null);
+            const cp = community.channel?.self?.communityPoints || community.self?.communityPoints || null;
+            const claimId = cp?.availableClaim?.id ? String(cp.availableClaim.id) : null;
+            const balance = typeof cp?.balance === "number" ? cp.balance : null;
+            if (!channelId && !claimId) return null;
+            return { channelId, claimId, balance };
+        };
+
+        try {
+            const data = await this.postAuthorized({
+                "operationName": "ChannelPointsContext",
+                "variables": {
+                    "channelLogin": login,
+                    "includeGoalTypes": ["CREATOR", "BOOST"]
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "1530a003a7d374b0380b79db0be0534f30ff46e61cffa2bc0e2468a909fbc024"
+                    }
+                }
+            }).catch(() => null);
+            const parsed = extractContext(data);
+            if (parsed) return parsed;
+        } catch (e) {}
+
+        try {
+            const fallbackData = await this.postAuthorized({
+                "operationName": "ChannelPointsContext",
+                "query": "query ChannelPointsContext($channelLogin: String!) { community(name: $channelLogin) { id channel { self { communityPoints { availableClaim { id } balance } } } } }",
+                "variables": { "channelLogin": login }
+            }).catch(() => null);
+            return extractContext(fallbackData);
+        } catch (e) {
+            return null;
+        }
+    }
+
     async getStream(username) {
         if (!username) return null;
         try {
@@ -846,7 +1000,8 @@ export class Client {
     async getChannelWithDrops(gameName, campaignId, slug, skippedLogins = []) {
         const streams = await this.getActiveStreams(gameName, slug);
         if (Array.isArray(streams) && streams.length > 0) {
-            const available = streams.filter(s => !skippedLogins.includes(s.broadcaster.login));
+            const skippedLower = new Set((Array.isArray(skippedLogins) ? skippedLogins : []).map(s => String(s).toLowerCase()));
+            const available = streams.filter(s => s?.broadcaster?.login && !skippedLower.has(String(s.broadcaster.login).toLowerCase()));
             if (available.length > 0) {
                 return available[0];
             }
@@ -1002,6 +1157,14 @@ export class Client {
                     gameId: gameId,
                     title: title,
                     viewers: viewers
+                };
+            }
+            // ChannelShell explicitly confirmed the user exists and is offline (stream === null):
+            // avoid making 2 unnecessary fallback GQL queries.
+            if (userObj && userObj.stream === null) {
+                return {
+                    login: channelLogin,
+                    ...(userObj.id ? { channelId: String(userObj.id) } : {})
                 };
             }
         } catch (e) {}
@@ -1361,10 +1524,19 @@ export class Client {
 
         const jsonStr = JSON.stringify(payload);
         let base64Data;
-        if (typeof btoa === "function") {
-            base64Data = btoa(jsonStr);
-        } else {
+        if (typeof TextEncoder === "function" && typeof btoa === "function") {
+            const bytes = new TextEncoder().encode(jsonStr);
+            let bin = "";
+            for (let i = 0; i < bytes.length; i++) {
+                bin += String.fromCharCode(bytes[i]);
+            }
+            base64Data = btoa(bin);
+        } else if (typeof Buffer !== "undefined") {
             base64Data = Buffer.from(jsonStr, "utf8").toString("base64");
+        } else if (typeof btoa === "function") {
+            base64Data = btoa(unescape(encodeURIComponent(jsonStr)));
+        } else {
+            return false;
         }
 
         try {
@@ -1561,8 +1733,18 @@ export function areGameNamesMatching(gameA, gameB) {
     if (!normA || !normB) return false;
     if (normA === normB) return true;
 
+    // Match edition/subtitle variants (e.g. "Warframe" <-> "Warframe: 1999",
+    // "World of Warcraft" <-> "World of Warcraft: The War Within") without falsely
+    // matching distinct numbered sequels (e.g. "Fallout" vs "Fallout 76", "Diablo" vs "Diablo IV").
     if (normA.length >= 6 && normB.length >= 6) {
-        if (normA.includes(normB) || normB.includes(normA)) {
+        const lowerA = a.toLowerCase();
+        const lowerB = b.toLowerCase();
+        const isSubtitleVariant = (base, full) => {
+            if (!full.startsWith(base)) return false;
+            const remainder = full.slice(base.length);
+            return /^\s*(?::|-|—|–)\s*/.test(remainder);
+        };
+        if (isSubtitleVariant(lowerA, lowerB) || isSubtitleVariant(lowerB, lowerA)) {
             return true;
         }
     }

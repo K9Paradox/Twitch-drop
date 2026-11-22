@@ -46,6 +46,7 @@
     "https://gql.twitch.tv/*",
     "https://usher.ttvnw.net/*",
     "https://*.ttvnw.net/*",
+    "https://static.twitchcdn.net/*",
     "https://api.github.com/*",
     "https://raw.githubusercontent.com/*"
   ]

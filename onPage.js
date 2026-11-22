@@ -13,15 +13,107 @@
 const recentClaims = new Map();
 let atdEnabled = true;
 let atdAutoClaimPoints = true;
+let cachedSessionId = null;
+let cachedClientVersion = null;
+let cachedAuthHeader = null;
+let cachedDeviceId = null;
+let internalIntegrityFetchesInFlight = 0;
+
+function readPageCookie(name) {
+    try {
+        if (typeof document === "undefined" || typeof document.cookie !== "string") return null;
+        const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}=([^;]+)`));
+        return match ? decodeURIComponent(match[1]) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function getSafeTargetOrigin() {
+    try {
+        if (typeof window !== "undefined" && window.location && window.location.origin && window.location.origin !== "null") {
+            return window.location.origin;
+        }
+    } catch (e) {}
+    return "*";
+}
+
+function postToExtension(payload) {
+    try {
+        window.postMessage({ autoTwitchDrops: payload }, getSafeTargetOrigin());
+    } catch (e) {}
+}
+
+async function handleIntegrityRequest(req) {
+    const requestId = req.requestId;
+    const cookieAuth = readPageCookie("auth-token");
+    const cookieDevice = readPageCookie("unique_id");
+    const authHeader = cachedAuthHeader || (cookieAuth ? `OAuth ${cookieAuth}` : null);
+    const deviceId = cachedDeviceId || cookieDevice || null;
+
+    internalIntegrityFetchesInFlight++;
+    try {
+        const headers = {
+            "Client-Id": "kimne78kx3ncx6brgo4mv6wki5h1ko"
+        };
+        if (authHeader) headers["Authorization"] = authHeader;
+        if (deviceId) headers["X-Device-Id"] = deviceId;
+        if (cachedSessionId) headers["Client-Session-Id"] = cachedSessionId;
+        if (cachedClientVersion) headers["Client-Version"] = cachedClientVersion;
+
+        // Call live window.fetch (NOT _origFetch) so Twitch's Kasada SDK attaches x-kpsdk-* headers natively
+        const res = await window.fetch("https://gql.twitch.tv/integrity", {
+            method: "POST",
+            credentials: "include",
+            headers
+        });
+        if (res && res.ok) {
+            const json = await res.json().catch(() => null);
+            if (json && typeof json.token === "string" && json.token) {
+                const expiration = (typeof json.expiration === "number" && Number.isFinite(json.expiration))
+                    ? json.expiration
+                    : undefined;
+                postToExtension({
+                    type: "integrityResponse",
+                    requestId,
+                    ok: true,
+                    token: json.token,
+                    ...(expiration !== undefined ? { expiration } : {}),
+                    ...(cachedSessionId ? { clientSessionId: cachedSessionId } : {}),
+                    ...(cachedClientVersion ? { clientVersion: cachedClientVersion } : {})
+                });
+                return;
+            }
+        }
+        postToExtension({
+            type: "integrityResponse",
+            requestId,
+            ok: false,
+            status: res?.status || 0
+        });
+    } catch (e) {
+        postToExtension({
+            type: "integrityResponse",
+            requestId,
+            ok: false,
+            status: 0
+        });
+    } finally {
+        internalIntegrityFetchesInFlight = Math.max(0, internalIntegrityFetchesInFlight - 1);
+    }
+}
 
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
     window.addEventListener("message", (event) => {
         try {
-            if (!event || !event.data || typeof event.data !== "object") return;
+            if (!event || event.source !== window || !event.data || typeof event.data !== "object") return;
             const cfg = event.data.autoTwitchDropsConfig;
             if (cfg && typeof cfg === "object") {
                 if (typeof cfg.enabled === "boolean") atdEnabled = cfg.enabled;
                 if (typeof cfg.autoClaimPoints === "boolean") atdAutoClaimPoints = cfg.autoClaimPoints;
+            }
+            if (event.data.source === "atd-extension" && event.data.type === "atd:requestIntegrity" && event.data.requestId) {
+                handleIntegrityRequest(event.data);
             }
         } catch (e) {}
     });
@@ -40,6 +132,11 @@ function isDuplicateClaim(key, ttlMs = 10000) {
     }
     recentClaims.set(key, now);
     return false;
+}
+
+function hasRecentClaim(key, ttlMs = 15000) {
+    if (!key || !recentClaims.has(key)) return false;
+    return (Date.now() - recentClaims.get(key)) < ttlMs;
 }
 
 function triggerSyntheticClick(el) {
@@ -62,6 +159,9 @@ function triggerSyntheticClick(el) {
 function autoClaimPointsChests() {
     if (!atdEnabled || !atdAutoClaimPoints) return;
     try {
+        // Skip DOM click if a WebSocket claim-available already claimed a chest in the last 10s
+        if (hasRecentClaim("ws-chest-claim", 10000)) return;
+
         // NOTE: Never include '[data-test-selector="community-points-summary"] button' here —
         // the first button inside community-points-summary is the Channel Points balance/menu toggle!
         const selectors = [
@@ -87,14 +187,14 @@ function autoClaimPointsChests() {
             }
 
             triggerSyntheticClick(btn);
-            if (!isDuplicateClaim("dom-chest-click", 5000)) {
-                window.postMessage({
-                    autoTwitchDrops: {
-                        type: "points-earned",
-                        points: 50,
-                        source: "dom"
-                    }
-                }, "*");
+            if (!isDuplicateClaim("dom-chest-click", 15000)) {
+                recentClaims.set("any-chest-claim", Date.now());
+                postToExtension({
+                    type: "points-earned",
+                    points: 50,
+                    source: "dom",
+                    reasonCode: "CLAIM"
+                });
             }
             break;
         }
@@ -112,40 +212,73 @@ const PASSIVE_GQL_OPS = new Set([
     "DropChannelCampaignsProgress"
 ]);
 
+function extractHeaderValue(headers, name) {
+    if (!headers) return null;
+    try {
+        if (typeof headers.get === "function") {
+            return headers.get(name) || headers.get(name.toLowerCase()) || null;
+        }
+        if (typeof headers === "object") {
+            const lower = name.toLowerCase();
+            for (const key of Object.keys(headers)) {
+                if (key.toLowerCase() === lower) return headers[key];
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
 const _origFetch = window._originalFetch || window.fetch;
 if (typeof _origFetch === "function") {
     window._originalFetch = _origFetch;
     window.fetch = async function (...args) {
         let isTwitchGql = false;
+        let isTwitchIntegrity = false;
+        const isInternalIntegrity = internalIntegrityFetchesInFlight > 0;
         let reqOps = [];
         try {
-            const reqUrl = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url ? args[0].url : "");
+            const reqInput = args[0];
+            const reqUrl = typeof reqInput === "string" ? reqInput : (reqInput && reqInput.url ? reqInput.url : "");
             const options = args[1];
-            if (reqUrl.includes("gql.twitch.tv/gql")) {
+            const isGqlOrigin = reqUrl.includes("gql.twitch.tv/");
+            if (isGqlOrigin) {
+                const sessionId = extractHeaderValue(options?.headers, "Client-Session-Id")
+                    || extractHeaderValue(reqInput?.headers, "Client-Session-Id");
+                const clientVer = extractHeaderValue(options?.headers, "Client-Version")
+                    || extractHeaderValue(reqInput?.headers, "Client-Version");
+                const authHdr = extractHeaderValue(options?.headers, "Authorization")
+                    || extractHeaderValue(reqInput?.headers, "Authorization");
+                const devId = extractHeaderValue(options?.headers, "X-Device-Id")
+                    || extractHeaderValue(reqInput?.headers, "X-Device-Id");
+                if (sessionId) cachedSessionId = sessionId;
+                if (clientVer) cachedClientVersion = clientVer;
+                if (authHdr) cachedAuthHeader = authHdr;
+                if (devId) cachedDeviceId = devId;
+            }
+            if (reqUrl.includes("gql.twitch.tv/integrity")) {
+                isTwitchIntegrity = true;
+            } else if (reqUrl.includes("gql.twitch.tv/gql")) {
                 isTwitchGql = true;
-                if (options && options.headers) {
-                    let integ = null;
-                    if (typeof options.headers.get === "function") {
-                        integ = options.headers.get("Client-Integrity") || options.headers.get("client-integrity");
-                    } else if (typeof options.headers === "object") {
-                        integ = options.headers["Client-Integrity"] || options.headers["client-integrity"];
-                    }
-                    if (integ) {
-                        window.postMessage({
-                            autoTwitchDrops: {
-                                type: "sendInteg",
-                                data: integ
-                            }
-                        }, "*");
-                    }
+                const integ = extractHeaderValue(options?.headers, "Client-Integrity")
+                    || extractHeaderValue(reqInput?.headers, "Client-Integrity");
+                if (integ) {
+                    postToExtension({
+                        type: "sendInteg",
+                        data: {
+                            token: integ,
+                            ...(cachedSessionId ? { clientSessionId: cachedSessionId } : {}),
+                            ...(cachedClientVersion ? { clientVersion: cachedClientVersion } : {})
+                        }
+                    });
                 }
-                if (options && typeof options.body === "string" && (
-                    options.body.includes("DropCurrentSessionContext") ||
-                    options.body.includes("Inventory") ||
-                    options.body.includes("DropChannelCampaignsProgress")
+                const bodyStr = typeof options?.body === "string" ? options.body : null;
+                if (bodyStr && (
+                    bodyStr.includes("DropCurrentSessionContext") ||
+                    bodyStr.includes("Inventory") ||
+                    bodyStr.includes("DropChannelCampaignsProgress")
                 )) {
                     try {
-                        const parsedReq = JSON.parse(options.body);
+                        const parsedReq = JSON.parse(bodyStr);
                         const reqList = Array.isArray(parsedReq) ? parsedReq : [parsedReq];
                         reqOps = reqList.map(r => r && r.operationName ? r.operationName : null);
                     } catch (e) {}
@@ -155,20 +288,36 @@ if (typeof _origFetch === "function") {
 
         const response = await _origFetch.apply(this, args);
 
-        if (isTwitchGql && reqOps.some(op => PASSIVE_GQL_OPS.has(op)) && response && typeof response.clone === "function") {
+        if (isTwitchIntegrity && !isInternalIntegrity && response && response.ok && typeof response.clone === "function") {
+            try {
+                response.clone().json().then((json) => {
+                    if (json && typeof json.token === "string" && json.token) {
+                        postToExtension({
+                            type: "sendInteg",
+                            data: {
+                                token: json.token,
+                                ...(typeof json.expiration === "number" && Number.isFinite(json.expiration) ? { expiration: json.expiration } : {}),
+                                ...(cachedSessionId ? { clientSessionId: cachedSessionId } : {}),
+                                ...(cachedClientVersion ? { clientVersion: cachedClientVersion } : {})
+                            }
+                        });
+                    }
+                }).catch(() => {});
+            } catch (e) {}
+        }
+
+        if (atdEnabled && isTwitchGql && reqOps.some(op => PASSIVE_GQL_OPS.has(op)) && response && typeof response.clone === "function") {
             try {
                 response.clone().json().then((json) => {
                     const resList = Array.isArray(json) ? json : [json];
                     resList.forEach((item, idx) => {
                         const opName = item?.extensions?.operationName || reqOps[idx];
                         if (opName && PASSIVE_GQL_OPS.has(opName) && item && item.data) {
-                            window.postMessage({
-                                autoTwitchDrops: {
-                                    type: "gqlOperation",
-                                    operation: opName,
-                                    data: item.data
-                                }
-                            }, "*");
+                            postToExtension({
+                                type: "gqlOperation",
+                                operation: opName,
+                                data: item.data
+                            });
                         }
                     });
                 }).catch(() => {});
@@ -230,13 +379,13 @@ if (typeof _origWS === "function") {
                             const claim = msgData.claim || innerPayload.claim;
                             if (claim && typeof claim.id === "string" && claim.id && claim.channel_id) {
                                 if (!isDuplicateClaim("claim-" + claim.id, 15000)) {
-                                    window.postMessage({
-                                        autoTwitchDrops: {
-                                            type: "claim-points",
-                                            claimID: claim.id,
-                                            channelID: claim.channel_id
-                                        }
-                                    }, "*");
+                                    recentClaims.set("ws-chest-claim", Date.now());
+                                    recentClaims.set("any-chest-claim", Date.now());
+                                    postToExtension({
+                                        type: "claim-points",
+                                        claimID: claim.id,
+                                        channelID: claim.channel_id
+                                    });
                                 }
                             }
                         }
@@ -245,15 +394,20 @@ if (typeof _origWS === "function") {
                             if (!atdEnabled || !atdAutoClaimPoints) return;
                             const gain = msgData.point_gain || innerPayload.point_gain;
                             if (gain && typeof gain === "object") {
+                                const reasonCode = gain.reason_code || null;
                                 const pts = Number(gain.total_points || gain.baseline_points) || 50;
-                                if (!isDuplicateClaim(`points-earned-${pts}-${wsSource}`, 3000)) {
-                                    window.postMessage({
-                                        autoTwitchDrops: {
-                                            type: "points-earned",
-                                            points: pts,
-                                            source: wsSource
-                                        }
-                                    }, "*");
+                                // Skip duplicate CLAIM notification if we already counted a chest claim within 15s
+                                if (reasonCode === "CLAIM" && hasRecentClaim("any-chest-claim", 15000)) {
+                                    return;
+                                }
+                                if (!isDuplicateClaim(`points-earned-${pts}-${reasonCode || wsSource}`, 3000)) {
+                                    postToExtension({
+                                        type: "points-earned",
+                                        points: pts,
+                                        source: wsSource,
+                                        reasonCode: reasonCode,
+                                        channelID: msgData.channel_id || innerPayload.channel_id || null
+                                    });
                                 }
                             }
                         }
@@ -263,15 +417,15 @@ if (typeof _origWS === "function") {
                             msgType === "drop-progress" ||
                             msgType === "drop-claim"
                         ) {
-                            window.postMessage({
-                                autoTwitchDrops: {
-                                    type: "claim-drop",
-                                    eventType: msgType,
-                                    dropInstanceID: msgData.drop_instance_id || msgData.drop_id || null,
-                                    currentProgressMin: msgData.current_progress_min ?? null,
-                                    requiredProgressMin: msgData.required_progress_min ?? null
-                                }
-                            }, "*");
+                            if (!atdEnabled) return;
+                            postToExtension({
+                                type: "claim-drop",
+                                eventType: msgType,
+                                dropID: msgData.drop_id || null,
+                                dropInstanceID: msgData.drop_instance_id || null,
+                                currentProgressMin: msgData.current_progress_min ?? null,
+                                requiredProgressMin: msgData.required_progress_min ?? null
+                            });
                         }
                     } catch (e) {
                         // Never throw on malformed or non-JSON frames
